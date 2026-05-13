@@ -219,9 +219,11 @@ class PlotPlugin(PlotPluginBase):
                 phase_curve.setData(subsweep_distances_m, subsweep_result.phases)
 
                 dvm = subsweep_result.distance_velocity_map
-                ft_image.updateImage(dvm.T, levels=(0, 1.05 * np.max(dvm)))
+                # ft_image.updateImage(dvm.T, levels=(0, 1.05 * np.max(dvm)))
+                ft_image.updateImage(dvm.T, levels=(0, np.float64(5000.0)))
 
-        self.ampl_plot.setYRange(0, self.smooth_max.update(max_))
+        # self.ampl_plot.setYRange(0, self.smooth_max.update(max_))
+        self.ampl_plot.setYRange(0, 5000.0)
 
     def setup(
         self, metadatas: list[dict[int, a121.Metadata]], session_config: a121.SessionConfig
