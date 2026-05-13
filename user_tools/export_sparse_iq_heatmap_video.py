@@ -120,17 +120,19 @@ def _load_plot_inputs(h5_path: Path, session_idx: int, group_idx: int, entry_idx
     str,
 ]:
     record = a121.open_record(h5_path)
-    session = record.session(session_idx)
-    session_config = session.session_config
 
     try:
+        session = record.session(session_idx)
+        session_config = session.session_config
         sensor_items = list(session_config.groups[group_idx].items())
         sensor_id, sensor_config = sensor_items[entry_idx]
     except IndexError as exc:
         record.close()
-        raise ValueError(
-            f"Could not find group {group_idx}, entry {entry_idx} in session {session_idx}."
-        ) from exc
+        msg = f"Could not find group {group_idx}, entry {entry_idx} in session {session_idx}."
+        raise ValueError(msg) from exc
+    except Exception:
+        record.close()
+        raise
 
     metadata = session.extended_metadata[group_idx][sensor_id]
     results = [extended_result[group_idx][sensor_id] for extended_result in session.extended_results]
@@ -213,10 +215,30 @@ def export_heatmap_video(
     ) = _load_plot_inputs(h5_path, session_idx, group_idx, entry_idx)
 
     try:
-        subsweep = sensor_config.subsweeps[subsweep_idx]
+        if max_frames is not None and max_frames < 0:
+            msg = f"--max-frames must be non-negative, got {max_frames}."
+            raise ValueError(msg)
+
+        if len(results) == 0:
+            msg = "The selected sensor entry does not contain any frames to export."
+            raise ValueError(msg)
+
+        try:
+            subsweep = sensor_config.subsweeps[subsweep_idx]
+        except IndexError as exc:
+            msg = f"Could not find subsweep {subsweep_idx} for sensor {sensor_id}."
+            raise ValueError(msg) from exc
+
         frame_indices = list(range(0, len(results), every_n))
         if max_frames is not None:
             frame_indices = frame_indices[:max_frames]
+
+        if len(frame_indices) == 0:
+            msg = (
+                "No frames were selected for export. Adjust --max-frames or choose a recording "
+                "with available frames."
+            )
+            raise ValueError(msg)
 
         distances_m = algo.get_distances_m(subsweep, metadata)
         velocities_m_s, velocity_resolution = algo.get_approx_fft_vels(metadata, sensor_config)
