@@ -60,10 +60,14 @@ class CommDevice(abc.ABC):
 @attrs.frozen(kw_only=True)
 class SerialDevice(CommDevice):
     port: str
+    description: Optional[str] = None
 
     def display_name(self) -> str:
         if self.name is not None:
             dev_name = f"{self.name} {self.port}"
+        elif self.description is not None:
+            description = re.sub(rf"\s*\({re.escape(self.port)}\)\s*$", "", self.description)
+            dev_name = f"{self.port} - {description}"
         else:
             dev_name = f"{self.port}"
 
@@ -112,6 +116,7 @@ def serial_device_from_port_object(port_object: serial.Serial) -> SerialDevice:
             return SerialDevice(
                 name=model_number,
                 port=port_object.device,
+                description=port_object.description,
                 serial=port_object.serial_number,
                 unflashed=unflashed,
                 recognized=True,
@@ -153,6 +158,7 @@ def serial_device_from_port_object(port_object: serial.Serial) -> SerialDevice:
     return SerialDevice(
         name=device_name,
         port=device_port,
+        description=port_object.description,
         serial=device_serial_number,
         unflashed=device_unflashed,
         recognized=device_recognized,

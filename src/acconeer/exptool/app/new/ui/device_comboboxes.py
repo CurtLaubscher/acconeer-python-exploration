@@ -6,7 +6,7 @@ import abc
 from typing import Optional, Sequence
 
 from PySide6 import QtCore
-from PySide6.QtWidgets import QComboBox, QWidget
+from PySide6.QtWidgets import QComboBox, QSizePolicy, QWidget
 
 from acconeer.exptool._core.communication.comm_devices import CommDevice, SerialDevice, USBDevice
 from acconeer.exptool.app.new.app_model import AppModel
@@ -19,6 +19,7 @@ class CommDeviceComboBox(QComboBox):
         app_model.sig_notify.connect(self._on_app_model_update)
         self.currentTextChanged.connect(self._on_change)
         self.setMinimumWidth(175)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
     def _on_app_model_update(self, app_model: AppModel) -> None:
         devices = self._get_available_devices()

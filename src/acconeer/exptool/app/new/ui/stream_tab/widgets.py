@@ -4,7 +4,15 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QSplitter, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QSizePolicy,
+    QSplitter,
+    QVBoxLayout,
+    QWidget,
+)
 
 from acconeer.exptool.app.new.app_model import AppModel
 from acconeer.exptool.app.new.ui.icons import BUTTON_ICON_COLOR
@@ -47,9 +55,12 @@ class TopBar(QFrame):
 
         layout.addWidget(GenerationSelection(app_model, self))
         layout.addWidget(VerticalSeparator(self))
-        layout.addWidget(ClientConnectionWidget(app_model, self))
+
+        connection_widget = ClientConnectionWidget(app_model, self)
+        connection_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        layout.addWidget(connection_widget, 1)
+
         layout.addWidget(HintWidget(app_model, self))
-        layout.addStretch(1)
         layout.addWidget(RecordingWidget(app_model, self))
 
         self.setLayout(layout)

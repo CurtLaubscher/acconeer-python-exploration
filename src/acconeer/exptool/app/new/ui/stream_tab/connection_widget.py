@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QSizePolicy,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -113,7 +114,7 @@ class _SerialConnectionWidget(AppModelAwareWidget):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        layout.addWidget(SerialPortComboBox(app_model, self))
+        layout.addWidget(SerialPortComboBox(app_model, self), 1)
 
         self.setLayout(layout)
 
@@ -258,16 +259,17 @@ class ClientConnectionWidget(AppModelAwareWidget):
 
         self.stacked = QStackedWidget(self)
         self.stacked.setStyleSheet("QStackedWidget {background-color: transparent;}")
+        self.stacked.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.stacked.addWidget(_SocketConnectionWidget(app_model, self.stacked))
         self.stacked.addWidget(_SerialConnectionWidget(app_model, self.stacked))
         self.stacked.addWidget(USBDeviceComboBox(app_model, self.stacked))
         self.stacked.addWidget(_SimulatedConnectionWidget(app_model, self.stacked))
-        layout.addWidget(self.stacked)
+        # self.stacked.setMinimumWidth(350)
+        layout.addWidget(self.stacked, 1)
 
         layout.addWidget(_ConnectSettingsButton(app_model, self))
         layout.addWidget(_ConnectAndDisconnectButton(app_model, self))
 
-        layout.addStretch(1)
         self.setLayout(layout)
 
     def _on_interface_dd_change(self) -> None:
