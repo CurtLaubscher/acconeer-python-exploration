@@ -272,7 +272,7 @@ class PlotPlugin(PlotPluginBase):
         )
 
         self.ampl_plot = self.amplitude_plot_widget.addPlot()
-        self.ampl_plot.setMenuEnabled(False)
+        # self.ampl_plot.setMenuEnabled(False)
         self.ampl_plot.showGrid(x=True, y=True)
         self.ampl_plot.setLabel("left", "Amplitude")
         self.ampl_plot.setLabel("bottom", "Distance (m)")
@@ -367,7 +367,7 @@ class PlotPlugin(PlotPluginBase):
             plot_widget = self.tab_widget.newPlotWidget(f"G{group_idx}:S{sensor_id}")
 
             phase_plot = plot_widget.addPlot(colspan=sensor_config.num_subsweeps)
-            phase_plot.setMenuEnabled(False)
+            # phase_plot.setMenuEnabled(False)
             phase_plot.showGrid(x=True, y=True)
             phase_plot.setLabel("left", "Phase")
             phase_plot.setYRange(-np.pi, np.pi)
@@ -409,7 +409,7 @@ class PlotPlugin(PlotPluginBase):
             for subsweep_index, subsweep_distances_m in enumerate(subsweeps_distances_m):
                 step_length = sensor_config.subsweeps[subsweep_index].step_length
                 plot = plot_widget.addPlot()
-                plot.setMenuEnabled(False)
+                # plot.setMenuEnabled(False)
                 plot.setLabel("bottom", "Distance (m)")
                 plot.setLabel("left", "Velocity (m/s)")
 
