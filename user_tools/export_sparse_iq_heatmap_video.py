@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import os
 import shutil
+import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -203,6 +204,93 @@ def _load_plot_inputs(
         fps=fps,
         sensor_id=sensor_id,
         record_timestamp=record_timestamp,
+    )
+
+
+def _resolve_index(
+    *,
+    requested_idx: int | None,
+    count: int,
+    option_name: str,
+    item_name: str,
+    parent_description: str,
+) -> int:
+    if count == 0:
+        msg = f"{parent_description} does not contain any {item_name}s."
+        raise ValueError(msg)
+
+    if requested_idx is None:
+        if count > 1:
+            print(
+                f"Warning: {parent_description} contains {count} {item_name}s; "
+                f"defaulting to --{option_name} 0.",
+                file=sys.stderr,
+            )
+        return 0
+
+    if 0 <= requested_idx < count:
+        return requested_idx
+
+    msg = (
+        f"{parent_description} does not contain {item_name} {requested_idx}. "
+        f"Valid indices are 0 to {count - 1}."
+    )
+    raise ValueError(msg)
+
+
+def _resolve_selection_indices(
+    *,
+    h5_path: Path,
+    session_idx: int | None,
+    group_idx: int | None,
+    entry_idx: int | None,
+    subsweep_idx: int | None,
+) -> tuple[int, int, int, int]:
+    record = a121.open_record(h5_path)
+
+    try:
+        resolved_session_idx = _resolve_index(
+            requested_idx=session_idx,
+            count=record.num_sessions,
+            option_name="session",
+            item_name="session",
+            parent_description="recording",
+        )
+
+        session = record.session(resolved_session_idx)
+        resolved_group_idx = _resolve_index(
+            requested_idx=group_idx,
+            count=len(session.session_config.groups),
+            option_name="group",
+            item_name="group",
+            parent_description=f"session {resolved_session_idx}",
+        )
+
+        sensor_items = list(session.session_config.groups[resolved_group_idx].items())
+        resolved_entry_idx = _resolve_index(
+            requested_idx=entry_idx,
+            count=len(sensor_items),
+            option_name="entry",
+            item_name="entry",
+            parent_description=f"group {resolved_group_idx} in session {resolved_session_idx}",
+        )
+
+        sensor_id, sensor_config = sensor_items[resolved_entry_idx]
+        resolved_subsweep_idx = _resolve_index(
+            requested_idx=subsweep_idx,
+            count=len(sensor_config.subsweeps),
+            option_name="subsweep",
+            item_name="subsweep",
+            parent_description=f"sensor {sensor_id} in group {resolved_group_idx}",
+        )
+    finally:
+        record.close()
+
+    return (
+        resolved_session_idx,
+        resolved_group_idx,
+        resolved_entry_idx,
+        resolved_subsweep_idx,
     )
 
 
@@ -488,10 +576,30 @@ def main() -> None:
         type=Path,
         help="Output .gif or .mp4. Defaults to INPUT_STEM_velocity_distance.gif",
     )
-    parser.add_argument("--session", type=int, default=0, help="Session index")
-    parser.add_argument("--group", type=int, default=0, help="Group index")
-    parser.add_argument("--entry", type=int, default=0, help="Entry index")
-    parser.add_argument("--subsweep", type=int, default=0, help="Zero-based subsweep index")
+    parser.add_argument(
+        "--session",
+        type=int,
+        default=None,
+        help="Session index. Defaults to 0, with a warning if multiple sessions exist.",
+    )
+    parser.add_argument(
+        "--group",
+        type=int,
+        default=None,
+        help="Group index within the selected session. Defaults to 0 if omitted.",
+    )
+    parser.add_argument(
+        "--entry",
+        type=int,
+        default=None,
+        help="Entry index within the selected group. Defaults to 0 if omitted.",
+    )
+    parser.add_argument(
+        "--subsweep",
+        type=int,
+        default=None,
+        help="Zero-based subsweep index. Defaults to 0 if omitted.",
+    )
     parser.add_argument("--max-frames", type=int, default=None, help="Limit exported frames")
     parser.add_argument("--every-n", type=int, default=1, help="Export every Nth frame")
     parser.add_argument(
@@ -532,13 +640,20 @@ def main() -> None:
     args = parser.parse_args()
 
     output = args.output or args.input.with_name(f"{args.input.stem}_velocity_distance.gif")
-    export_heatmap_video(
+    session_idx, group_idx, entry_idx, subsweep_idx = _resolve_selection_indices(
         h5_path=args.input,
-        output_path=output,
         session_idx=args.session,
         group_idx=args.group,
         entry_idx=args.entry,
         subsweep_idx=args.subsweep,
+    )
+    export_heatmap_video(
+        h5_path=args.input,
+        output_path=output,
+        session_idx=session_idx,
+        group_idx=group_idx,
+        entry_idx=entry_idx,
+        subsweep_idx=subsweep_idx,
         max_frames=args.max_frames,
         every_n=max(args.every_n, 1),
         fixed_levels=not args.dynamic_levels,
