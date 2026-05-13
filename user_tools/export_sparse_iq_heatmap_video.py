@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timedelta
 import os
 import shutil
+from datetime import datetime, timedelta
 from pathlib import Path
 
+import matplotlib
 import numpy as np
 
-import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -55,6 +55,10 @@ def _distance_velocity_map(subframe: np.ndarray) -> np.ndarray:
     return np.abs(z_ft)
 
 
+def _color_max_for_dvm(dvm: np.ndarray) -> float:
+    return max(float(1.05 * np.max(dvm)), 1e-12)
+
+
 def _make_figure(
     first_dvm: np.ndarray,
     distances_m: np.ndarray,
@@ -99,6 +103,39 @@ def _make_figure(
     )
     fig.tight_layout()
     return fig, ax, image, timestamp_artist
+
+
+def _update_frame_plot(
+    *,
+    frame_idx: int,
+    subsweep_idx: int,
+    fixed_levels: bool,
+    color_min: float,
+    title: str,
+    results: list[a121.Result],
+    image: matplotlib.image.AxesImage,
+    ax: plt.Axes,
+    timestamp_artist: matplotlib.text.Text,
+    timestamp_mode: str,
+    record_timestamp: str,
+    ticks: np.ndarray,
+    ticks_per_second: int,
+) -> None:
+    dvm = _distance_velocity_map(results[frame_idx].subframes[subsweep_idx])
+    image.set_data(dvm)
+    if not fixed_levels:
+        image.set_clim(color_min, _color_max_for_dvm(dvm))
+
+    ax.set_title(f"{title} - frame {frame_idx + 1}/{len(results)}")
+    timestamp_artist.set_text(
+        _timestamp_text(
+            timestamp_mode,
+            record_timestamp,
+            ticks,
+            ticks_per_second,
+            frame_idx,
+        )
+    )
 
 
 def _canvas_to_pil(fig: plt.Figure) -> Image.Image:
@@ -242,11 +279,7 @@ def export_heatmap_video(
 
         distances_m = algo.get_distances_m(subsweep, metadata)
         velocities_m_s, velocity_resolution = algo.get_approx_fft_vels(metadata, sensor_config)
-
-        def dvm_for_frame(frame_idx: int) -> np.ndarray:
-            return _distance_velocity_map(results[frame_idx].subframes[subsweep_idx])
-
-        first_dvm = dvm_for_frame(frame_indices[0])
+        first_dvm = _distance_velocity_map(results[frame_indices[0]].subframes[subsweep_idx])
         title = f"{h5_path.name} - sensor {sensor_id}, subsweep {subsweep_idx + 1}"
         fig, ax, image, timestamp_artist = _make_figure(
             first_dvm=first_dvm,
@@ -262,7 +295,10 @@ def export_heatmap_video(
             max_level = (
                 color_max
                 if color_max is not None
-                else max(float(1.05 * max(np.max(dvm_for_frame(i)) for i in frame_indices)), 1e-12)
+                else max(
+                    _color_max_for_dvm(_distance_velocity_map(results[i].subframes[subsweep_idx]))
+                    for i in frame_indices
+                )
             )
             image.set_clim(color_min, max_level)
 
@@ -272,47 +308,50 @@ def export_heatmap_video(
         if output_path.suffix.lower() == ".mp4":
             ffmpeg_path = _find_ffmpeg(ffmpeg)
             if ffmpeg_path is None:
-                raise RuntimeError("MP4 output requires ffmpeg on PATH. Use .gif or install ffmpeg.")
+                msg = "MP4 output requires ffmpeg on PATH. Use .gif or install ffmpeg."
+                raise RuntimeError(msg)
 
             rcParams["animation.ffmpeg_path"] = ffmpeg_path
             writer = FFMpegWriter(fps=effective_fps, metadata={"title": title})
             with writer.saving(fig, str(output_path), dpi=120):
-                for frame_no, frame_idx in enumerate(frame_indices, start=1):
-                    dvm = dvm_for_frame(frame_idx)
-                    image.set_data(dvm)
-                    if not fixed_levels:
-                        image.set_clim(color_min, max(float(1.05 * np.max(dvm)), 1e-12))
-                    ax.set_title(f"{title} - frame {frame_idx + 1}/{len(results)}")
-                    timestamp_artist.set_text(
-                        _timestamp_text(
-                            timestamp_mode,
-                            record_timestamp,
-                            ticks,
-                            ticks_per_second,
-                            frame_idx,
-                        )
+                for frame_idx in frame_indices:
+                    _update_frame_plot(
+                        frame_idx=frame_idx,
+                        subsweep_idx=subsweep_idx,
+                        fixed_levels=fixed_levels,
+                        color_min=color_min,
+                        title=title,
+                        results=results,
+                        image=image,
+                        ax=ax,
+                        timestamp_artist=timestamp_artist,
+                        timestamp_mode=timestamp_mode,
+                        record_timestamp=record_timestamp,
+                        ticks=ticks,
+                        ticks_per_second=ticks_per_second,
                     )
                     writer.grab_frame()
         else:
             pil_frames: list[Image.Image] = []
             for frame_idx in frame_indices:
-                dvm = dvm_for_frame(frame_idx)
-                image.set_data(dvm)
-                if not fixed_levels:
-                    image.set_clim(color_min, max(float(1.05 * np.max(dvm)), 1e-12))
-                ax.set_title(f"{title} - frame {frame_idx + 1}/{len(results)}")
-                timestamp_artist.set_text(
-                    _timestamp_text(
-                        timestamp_mode,
-                        record_timestamp,
-                        ticks,
-                        ticks_per_second,
-                        frame_idx,
-                    )
+                _update_frame_plot(
+                    frame_idx=frame_idx,
+                    subsweep_idx=subsweep_idx,
+                    fixed_levels=fixed_levels,
+                    color_min=color_min,
+                    title=title,
+                    results=results,
+                    image=image,
+                    ax=ax,
+                    timestamp_artist=timestamp_artist,
+                    timestamp_mode=timestamp_mode,
+                    record_timestamp=record_timestamp,
+                    ticks=ticks,
+                    ticks_per_second=ticks_per_second,
                 )
                 pil_frames.append(_canvas_to_pil(fig))
 
-            duration_ms = max(int(round(1000 / effective_fps)), 1)
+            duration_ms = max(round(1000 / effective_fps), 1)
             pil_frames[0].save(
                 output_path,
                 save_all=True,
