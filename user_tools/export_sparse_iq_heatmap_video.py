@@ -2,11 +2,9 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timedelta
-import json
 import shutil
 from pathlib import Path
 
-import h5py
 import numpy as np
 
 import matplotlib
@@ -19,10 +17,6 @@ from PIL import Image
 
 from acconeer.exptool import a121
 from acconeer.exptool.a121 import algo
-
-
-def _h5_str(dataset: h5py.Dataset) -> str:
-    return bytes(dataset[()]).decode()
 
 
 def _recording_fps(ticks: np.ndarray, ticks_per_second: int) -> float:
@@ -52,14 +46,6 @@ def _timestamp_text(
             return f"{record_timestamp} + {elapsed_s:.3f} s"
 
     return f"t = {elapsed_s:.3f} s"
-
-
-def _entry_group(session_group: h5py.Group, group_idx: int, entry_idx: int) -> h5py.Group:
-    return session_group[f"group_{group_idx}"][f"entry_{entry_idx}"]
-
-
-def _complex_frame(frame: np.ndarray) -> np.ndarray:
-    return frame["real"].astype(np.float32) + 1j * frame["imag"].astype(np.float32)
 
 
 def _distance_velocity_map(subframe: np.ndarray) -> np.ndarray:
@@ -121,35 +107,48 @@ def _canvas_to_pil(fig: plt.Figure) -> Image.Image:
     return Image.fromarray(rgba[:, :, :3])
 
 
-def _load_plot_inputs(
-    h5_path: Path, session_idx: int, group_idx: int, entry_idx: int, subsweep_idx: int
-) -> tuple[
-    h5py.File,
-    h5py.Group,
+def _load_plot_inputs(h5_path: Path, session_idx: int, group_idx: int, entry_idx: int) -> tuple[
+    a121.Record,
     a121.SensorConfig,
     a121.Metadata,
+    list[a121.Result],
     np.ndarray,
     int,
     float,
     int,
     str,
 ]:
-    h5_file = h5py.File(h5_path, "r")
-    session_group = h5_file["sessions"][f"session_{session_idx}"]
-    entry = _entry_group(session_group, group_idx, entry_idx)
+    record = a121.open_record(h5_path)
+    session = record.session(session_idx)
+    session_config = session.session_config
 
-    session_config = a121.SessionConfig.from_json(_h5_str(session_group["session_config"]))
-    sensor_id = int(entry["sensor_id"][()])
-    sensor_config = session_config.groups[group_idx][sensor_id]
-    metadata = a121.Metadata.from_json(_h5_str(entry["metadata"]))
+    try:
+        sensor_items = list(session_config.groups[group_idx].items())
+        sensor_id, sensor_config = sensor_items[entry_idx]
+    except IndexError as exc:
+        record.close()
+        raise ValueError(
+            f"Could not find group {group_idx}, entry {entry_idx} in session {session_idx}."
+        ) from exc
 
-    ticks = entry["result/tick"][()]
-    server_info = json.loads(_h5_str(h5_file["server_info"]))
-    ticks_per_second = int(server_info["ticks_per_second"])
+    metadata = session.extended_metadata[group_idx][sensor_id]
+    results = [extended_result[group_idx][sensor_id] for extended_result in session.extended_results]
+    ticks = np.array([result.tick for result in results], dtype=np.int64)
+    ticks_per_second = record.server_info.ticks_per_second
     fps = _recording_fps(ticks, ticks_per_second)
-    record_timestamp = _h5_str(h5_file["timestamp"])
+    record_timestamp = record.timestamp
 
-    return h5_file, entry, sensor_config, metadata, ticks, ticks_per_second, fps, sensor_id, record_timestamp
+    return (
+        record,
+        sensor_config,
+        metadata,
+        results,
+        ticks,
+        ticks_per_second,
+        fps,
+        sensor_id,
+        record_timestamp,
+    )
 
 
 def _find_ffmpeg(explicit_ffmpeg: Path | None) -> str | None:
@@ -192,25 +191,20 @@ def export_heatmap_video(
 ) -> None:
     _apply_theme(theme)
     (
-        h5_file,
-        entry,
+        record,
         sensor_config,
         metadata,
+        results,
         ticks,
         ticks_per_second,
         fps,
         sensor_id,
         record_timestamp,
-    ) = _load_plot_inputs(
-        h5_path, session_idx, group_idx, entry_idx, subsweep_idx
-    )
+    ) = _load_plot_inputs(h5_path, session_idx, group_idx, entry_idx)
 
     try:
-        frame_dataset = entry["result/frame"]
         subsweep = sensor_config.subsweeps[subsweep_idx]
-        offset = metadata.subsweep_data_offset[subsweep_idx]
-        length = metadata.subsweep_data_length[subsweep_idx]
-        frame_indices = list(range(0, len(frame_dataset), every_n))
+        frame_indices = list(range(0, len(results), every_n))
         if max_frames is not None:
             frame_indices = frame_indices[:max_frames]
 
@@ -218,9 +212,7 @@ def export_heatmap_video(
         velocities_m_s, velocity_resolution = algo.get_approx_fft_vels(metadata, sensor_config)
 
         def dvm_for_frame(frame_idx: int) -> np.ndarray:
-            frame = _complex_frame(frame_dataset[frame_idx])
-            subframe = frame[:, offset : offset + length]
-            return _distance_velocity_map(subframe)
+            return _distance_velocity_map(results[frame_idx].subframes[subsweep_idx])
 
         first_dvm = dvm_for_frame(frame_indices[0])
         title = f"{h5_path.name} - sensor {sensor_id}, subsweep {subsweep_idx + 1}"
@@ -258,7 +250,7 @@ def export_heatmap_video(
                     image.set_data(dvm)
                     if not fixed_levels:
                         image.set_clim(color_min, max(float(1.05 * np.max(dvm)), 1e-12))
-                    ax.set_title(f"{title} - frame {frame_idx + 1}/{len(frame_dataset)}")
+                    ax.set_title(f"{title} - frame {frame_idx + 1}/{len(results)}")
                     timestamp_artist.set_text(
                         _timestamp_text(
                             timestamp_mode,
@@ -276,7 +268,7 @@ def export_heatmap_video(
                 image.set_data(dvm)
                 if not fixed_levels:
                     image.set_clim(color_min, max(float(1.05 * np.max(dvm)), 1e-12))
-                ax.set_title(f"{title} - frame {frame_idx + 1}/{len(frame_dataset)}")
+                ax.set_title(f"{title} - frame {frame_idx + 1}/{len(results)}")
                 timestamp_artist.set_text(
                     _timestamp_text(
                         timestamp_mode,
@@ -301,7 +293,7 @@ def export_heatmap_video(
         print(f"Source FPS: {fps:.3f}; output FPS: {effective_fps:.3f}; frames: {len(frame_indices)}")
     finally:
         plt.close("all")
-        h5_file.close()
+        record.close()
 
 
 def main() -> None:
