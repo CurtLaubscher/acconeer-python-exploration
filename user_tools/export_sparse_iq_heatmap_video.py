@@ -34,6 +34,15 @@ class _PlotInputs:
     record_timestamp: str
 
 
+@dataclass
+class _PreparedPlot:
+    title: str
+    fig: plt.Figure
+    ax: plt.Axes
+    image: matplotlib.image.AxesImage
+    timestamp_artist: matplotlib.text.Text
+
+
 def _recording_fps(ticks: np.ndarray, ticks_per_second: int) -> float:
     if len(ticks) < 2:
         return 1.0
@@ -197,6 +206,166 @@ def _load_plot_inputs(
     )
 
 
+def _select_subsweep(plot_inputs: _PlotInputs, subsweep_idx: int) -> a121.SubsweepConfig:
+    if len(plot_inputs.results) == 0:
+        msg = "The selected sensor entry does not contain any frames to export."
+        raise ValueError(msg)
+
+    try:
+        return plot_inputs.sensor_config.subsweeps[subsweep_idx]
+    except IndexError as exc:
+        msg = f"Could not find subsweep {subsweep_idx} for sensor {plot_inputs.sensor_id}."
+        raise ValueError(msg) from exc
+
+
+def _select_frame_indices(
+    results: list[a121.Result], every_n: int, max_frames: int | None
+) -> list[int]:
+    if max_frames is not None and max_frames < 0:
+        msg = f"--max-frames must be non-negative, got {max_frames}."
+        raise ValueError(msg)
+
+    frame_indices = list(range(0, len(results), every_n))
+    if max_frames is not None:
+        frame_indices = frame_indices[:max_frames]
+
+    if len(frame_indices) == 0:
+        msg = (
+            "No frames were selected for export. Adjust --max-frames or choose a recording "
+            "with available frames."
+        )
+        raise ValueError(msg)
+
+    return frame_indices
+
+
+def _fixed_color_level(
+    *, color_max: float | None, results: list[a121.Result], subsweep_idx: int, frame_indices: list[int]
+) -> float:
+    if color_max is not None:
+        return color_max
+
+    return max(
+        _color_max_for_dvm(_distance_velocity_map(results[i].subframes[subsweep_idx]))
+        for i in frame_indices
+    )
+
+
+def _prepare_plot(
+    *,
+    h5_path: Path,
+    plot_inputs: _PlotInputs,
+    subsweep_idx: int,
+    subsweep: a121.SubsweepConfig,
+    color_min: float,
+    color_max: float | None,
+    frame_indices: list[int],
+) -> _PreparedPlot:
+    distances_m = algo.get_distances_m(subsweep, plot_inputs.metadata)
+    velocities_m_s, velocity_resolution = algo.get_approx_fft_vels(
+        plot_inputs.metadata, plot_inputs.sensor_config
+    )
+    first_dvm = _distance_velocity_map(plot_inputs.results[frame_indices[0]].subframes[subsweep_idx])
+    title = f"{h5_path.name} - sensor {plot_inputs.sensor_id}, subsweep {subsweep_idx + 1}"
+    fig, ax, image, timestamp_artist = _make_figure(
+        first_dvm=first_dvm,
+        distances_m=distances_m,
+        velocities_m_s=velocities_m_s,
+        velocity_resolution=velocity_resolution,
+        title=title,
+        color_min=color_min,
+        color_max=color_max,
+    )
+    return _PreparedPlot(
+        title=title,
+        fig=fig,
+        ax=ax,
+        image=image,
+        timestamp_artist=timestamp_artist,
+    )
+
+
+def _write_mp4(
+    *,
+    output_path: Path,
+    ffmpeg: Path | None,
+    effective_fps: float,
+    prepared_plot: _PreparedPlot,
+    plot_inputs: _PlotInputs,
+    subsweep_idx: int,
+    frame_indices: list[int],
+    fixed_levels: bool,
+    color_min: float,
+    timestamp_mode: str,
+) -> None:
+    ffmpeg_path = _find_ffmpeg(ffmpeg)
+    if ffmpeg_path is None:
+        msg = "MP4 output requires ffmpeg on PATH. Use .gif or install ffmpeg."
+        raise RuntimeError(msg)
+
+    rcParams["animation.ffmpeg_path"] = ffmpeg_path
+    writer = FFMpegWriter(fps=effective_fps, metadata={"title": prepared_plot.title})
+    with writer.saving(prepared_plot.fig, str(output_path), dpi=120):
+        for frame_idx in frame_indices:
+            _update_frame_plot(
+                frame_idx=frame_idx,
+                subsweep_idx=subsweep_idx,
+                fixed_levels=fixed_levels,
+                color_min=color_min,
+                title=prepared_plot.title,
+                results=plot_inputs.results,
+                image=prepared_plot.image,
+                ax=prepared_plot.ax,
+                timestamp_artist=prepared_plot.timestamp_artist,
+                timestamp_mode=timestamp_mode,
+                record_timestamp=plot_inputs.record_timestamp,
+                ticks=plot_inputs.ticks,
+                ticks_per_second=plot_inputs.ticks_per_second,
+            )
+            writer.grab_frame()
+
+
+def _write_gif(
+    *,
+    output_path: Path,
+    effective_fps: float,
+    prepared_plot: _PreparedPlot,
+    plot_inputs: _PlotInputs,
+    subsweep_idx: int,
+    frame_indices: list[int],
+    fixed_levels: bool,
+    color_min: float,
+    timestamp_mode: str,
+) -> None:
+    pil_frames: list[Image.Image] = []
+    for frame_idx in frame_indices:
+        _update_frame_plot(
+            frame_idx=frame_idx,
+            subsweep_idx=subsweep_idx,
+            fixed_levels=fixed_levels,
+            color_min=color_min,
+            title=prepared_plot.title,
+            results=plot_inputs.results,
+            image=prepared_plot.image,
+            ax=prepared_plot.ax,
+            timestamp_artist=prepared_plot.timestamp_artist,
+            timestamp_mode=timestamp_mode,
+            record_timestamp=plot_inputs.record_timestamp,
+            ticks=plot_inputs.ticks,
+            ticks_per_second=plot_inputs.ticks_per_second,
+        )
+        pil_frames.append(_canvas_to_pil(prepared_plot.fig))
+
+    duration_ms = max(round(1000 / effective_fps), 1)
+    pil_frames[0].save(
+        output_path,
+        save_all=True,
+        append_images=pil_frames[1:],
+        duration=duration_ms,
+        loop=0,
+    )
+
+
 def _resolve_ffmpeg_path(path: Path | None) -> str | None:
     if path is None:
         return None
@@ -248,118 +417,54 @@ def export_heatmap_video(
     plot_inputs = _load_plot_inputs(h5_path, session_idx, group_idx, entry_idx)
 
     try:
-        if max_frames is not None and max_frames < 0:
-            msg = f"--max-frames must be non-negative, got {max_frames}."
-            raise ValueError(msg)
-
-        if len(plot_inputs.results) == 0:
-            msg = "The selected sensor entry does not contain any frames to export."
-            raise ValueError(msg)
-
-        try:
-            subsweep = plot_inputs.sensor_config.subsweeps[subsweep_idx]
-        except IndexError as exc:
-            msg = f"Could not find subsweep {subsweep_idx} for sensor {plot_inputs.sensor_id}."
-            raise ValueError(msg) from exc
-
-        frame_indices = list(range(0, len(plot_inputs.results), every_n))
-        if max_frames is not None:
-            frame_indices = frame_indices[:max_frames]
-
-        if len(frame_indices) == 0:
-            msg = (
-                "No frames were selected for export. Adjust --max-frames or choose a recording "
-                "with available frames."
-            )
-            raise ValueError(msg)
-
-        distances_m = algo.get_distances_m(subsweep, plot_inputs.metadata)
-        velocities_m_s, velocity_resolution = algo.get_approx_fft_vels(
-            plot_inputs.metadata, plot_inputs.sensor_config
-        )
-        first_dvm = _distance_velocity_map(
-            plot_inputs.results[frame_indices[0]].subframes[subsweep_idx]
-        )
-        title = f"{h5_path.name} - sensor {plot_inputs.sensor_id}, subsweep {subsweep_idx + 1}"
-        fig, ax, image, timestamp_artist = _make_figure(
-            first_dvm=first_dvm,
-            distances_m=distances_m,
-            velocities_m_s=velocities_m_s,
-            velocity_resolution=velocity_resolution,
-            title=title,
+        subsweep = _select_subsweep(plot_inputs, subsweep_idx)
+        frame_indices = _select_frame_indices(plot_inputs.results, every_n, max_frames)
+        prepared_plot = _prepare_plot(
+            h5_path=h5_path,
+            plot_inputs=plot_inputs,
+            subsweep_idx=subsweep_idx,
+            subsweep=subsweep,
             color_min=color_min,
             color_max=color_max,
+            frame_indices=frame_indices,
         )
 
         if fixed_levels:
-            max_level = (
-                color_max
-                if color_max is not None
-                else max(
-                    _color_max_for_dvm(
-                        _distance_velocity_map(plot_inputs.results[i].subframes[subsweep_idx])
-                    )
-                    for i in frame_indices
-                )
+            max_level = _fixed_color_level(
+                color_max=color_max,
+                results=plot_inputs.results,
+                subsweep_idx=subsweep_idx,
+                frame_indices=frame_indices,
             )
-            image.set_clim(color_min, max_level)
+            prepared_plot.image.set_clim(color_min, max_level)
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
         effective_fps = plot_inputs.fps / every_n
 
         if output_path.suffix.lower() == ".mp4":
-            ffmpeg_path = _find_ffmpeg(ffmpeg)
-            if ffmpeg_path is None:
-                msg = "MP4 output requires ffmpeg on PATH. Use .gif or install ffmpeg."
-                raise RuntimeError(msg)
-
-            rcParams["animation.ffmpeg_path"] = ffmpeg_path
-            writer = FFMpegWriter(fps=effective_fps, metadata={"title": title})
-            with writer.saving(fig, str(output_path), dpi=120):
-                for frame_idx in frame_indices:
-                    _update_frame_plot(
-                        frame_idx=frame_idx,
-                        subsweep_idx=subsweep_idx,
-                        fixed_levels=fixed_levels,
-                        color_min=color_min,
-                        title=title,
-                        results=plot_inputs.results,
-                        image=image,
-                        ax=ax,
-                        timestamp_artist=timestamp_artist,
-                        timestamp_mode=timestamp_mode,
-                        record_timestamp=plot_inputs.record_timestamp,
-                        ticks=plot_inputs.ticks,
-                        ticks_per_second=plot_inputs.ticks_per_second,
-                    )
-                    writer.grab_frame()
+            _write_mp4(
+                output_path=output_path,
+                ffmpeg=ffmpeg,
+                effective_fps=effective_fps,
+                prepared_plot=prepared_plot,
+                plot_inputs=plot_inputs,
+                subsweep_idx=subsweep_idx,
+                frame_indices=frame_indices,
+                fixed_levels=fixed_levels,
+                color_min=color_min,
+                timestamp_mode=timestamp_mode,
+            )
         else:
-            pil_frames: list[Image.Image] = []
-            for frame_idx in frame_indices:
-                _update_frame_plot(
-                    frame_idx=frame_idx,
-                    subsweep_idx=subsweep_idx,
-                    fixed_levels=fixed_levels,
-                    color_min=color_min,
-                    title=title,
-                    results=plot_inputs.results,
-                    image=image,
-                    ax=ax,
-                    timestamp_artist=timestamp_artist,
-                    timestamp_mode=timestamp_mode,
-                    record_timestamp=plot_inputs.record_timestamp,
-                    ticks=plot_inputs.ticks,
-                    ticks_per_second=plot_inputs.ticks_per_second,
-                )
-                pil_frames.append(_canvas_to_pil(fig))
-
-            duration_ms = max(round(1000 / effective_fps), 1)
-            pil_frames[0].save(
-                output_path,
-                save_all=True,
-                append_images=pil_frames[1:],
-                duration=duration_ms,
-                loop=0,
+            _write_gif(
+                output_path=output_path,
+                effective_fps=effective_fps,
+                prepared_plot=prepared_plot,
+                plot_inputs=plot_inputs,
+                subsweep_idx=subsweep_idx,
+                frame_indices=frame_indices,
+                fixed_levels=fixed_levels,
+                color_min=color_min,
+                timestamp_mode=timestamp_mode,
             )
 
         print(f"Wrote {output_path}")
