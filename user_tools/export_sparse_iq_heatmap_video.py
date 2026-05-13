@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import os
 import shutil
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -18,6 +19,19 @@ from PIL import Image
 
 from acconeer.exptool import a121
 from acconeer.exptool.a121 import algo
+
+
+@dataclass
+class _PlotInputs:
+    record: a121.Record
+    sensor_config: a121.SensorConfig
+    metadata: a121.Metadata
+    results: list[a121.Result]
+    ticks: np.ndarray
+    ticks_per_second: int
+    fps: float
+    sensor_id: int
+    record_timestamp: str
 
 
 def _recording_fps(ticks: np.ndarray, ticks_per_second: int) -> float:
@@ -145,17 +159,9 @@ def _canvas_to_pil(fig: plt.Figure) -> Image.Image:
     return Image.fromarray(rgba[:, :, :3])
 
 
-def _load_plot_inputs(h5_path: Path, session_idx: int, group_idx: int, entry_idx: int) -> tuple[
-    a121.Record,
-    a121.SensorConfig,
-    a121.Metadata,
-    list[a121.Result],
-    np.ndarray,
-    int,
-    float,
-    int,
-    str,
-]:
+def _load_plot_inputs(
+    h5_path: Path, session_idx: int, group_idx: int, entry_idx: int
+) -> _PlotInputs:
     record = a121.open_record(h5_path)
 
     try:
@@ -178,16 +184,16 @@ def _load_plot_inputs(h5_path: Path, session_idx: int, group_idx: int, entry_idx
     fps = _recording_fps(ticks, ticks_per_second)
     record_timestamp = record.timestamp
 
-    return (
-        record,
-        sensor_config,
-        metadata,
-        results,
-        ticks,
-        ticks_per_second,
-        fps,
-        sensor_id,
-        record_timestamp,
+    return _PlotInputs(
+        record=record,
+        sensor_config=sensor_config,
+        metadata=metadata,
+        results=results,
+        ticks=ticks,
+        ticks_per_second=ticks_per_second,
+        fps=fps,
+        sensor_id=sensor_id,
+        record_timestamp=record_timestamp,
     )
 
 
@@ -239,34 +245,24 @@ def export_heatmap_video(
     theme: str,
 ) -> None:
     _apply_theme(theme)
-    (
-        record,
-        sensor_config,
-        metadata,
-        results,
-        ticks,
-        ticks_per_second,
-        fps,
-        sensor_id,
-        record_timestamp,
-    ) = _load_plot_inputs(h5_path, session_idx, group_idx, entry_idx)
+    plot_inputs = _load_plot_inputs(h5_path, session_idx, group_idx, entry_idx)
 
     try:
         if max_frames is not None and max_frames < 0:
             msg = f"--max-frames must be non-negative, got {max_frames}."
             raise ValueError(msg)
 
-        if len(results) == 0:
+        if len(plot_inputs.results) == 0:
             msg = "The selected sensor entry does not contain any frames to export."
             raise ValueError(msg)
 
         try:
-            subsweep = sensor_config.subsweeps[subsweep_idx]
+            subsweep = plot_inputs.sensor_config.subsweeps[subsweep_idx]
         except IndexError as exc:
-            msg = f"Could not find subsweep {subsweep_idx} for sensor {sensor_id}."
+            msg = f"Could not find subsweep {subsweep_idx} for sensor {plot_inputs.sensor_id}."
             raise ValueError(msg) from exc
 
-        frame_indices = list(range(0, len(results), every_n))
+        frame_indices = list(range(0, len(plot_inputs.results), every_n))
         if max_frames is not None:
             frame_indices = frame_indices[:max_frames]
 
@@ -277,10 +273,14 @@ def export_heatmap_video(
             )
             raise ValueError(msg)
 
-        distances_m = algo.get_distances_m(subsweep, metadata)
-        velocities_m_s, velocity_resolution = algo.get_approx_fft_vels(metadata, sensor_config)
-        first_dvm = _distance_velocity_map(results[frame_indices[0]].subframes[subsweep_idx])
-        title = f"{h5_path.name} - sensor {sensor_id}, subsweep {subsweep_idx + 1}"
+        distances_m = algo.get_distances_m(subsweep, plot_inputs.metadata)
+        velocities_m_s, velocity_resolution = algo.get_approx_fft_vels(
+            plot_inputs.metadata, plot_inputs.sensor_config
+        )
+        first_dvm = _distance_velocity_map(
+            plot_inputs.results[frame_indices[0]].subframes[subsweep_idx]
+        )
+        title = f"{h5_path.name} - sensor {plot_inputs.sensor_id}, subsweep {subsweep_idx + 1}"
         fig, ax, image, timestamp_artist = _make_figure(
             first_dvm=first_dvm,
             distances_m=distances_m,
@@ -296,14 +296,16 @@ def export_heatmap_video(
                 color_max
                 if color_max is not None
                 else max(
-                    _color_max_for_dvm(_distance_velocity_map(results[i].subframes[subsweep_idx]))
+                    _color_max_for_dvm(
+                        _distance_velocity_map(plot_inputs.results[i].subframes[subsweep_idx])
+                    )
                     for i in frame_indices
                 )
             )
             image.set_clim(color_min, max_level)
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        effective_fps = fps / every_n
+        effective_fps = plot_inputs.fps / every_n
 
         if output_path.suffix.lower() == ".mp4":
             ffmpeg_path = _find_ffmpeg(ffmpeg)
@@ -321,14 +323,14 @@ def export_heatmap_video(
                         fixed_levels=fixed_levels,
                         color_min=color_min,
                         title=title,
-                        results=results,
+                        results=plot_inputs.results,
                         image=image,
                         ax=ax,
                         timestamp_artist=timestamp_artist,
                         timestamp_mode=timestamp_mode,
-                        record_timestamp=record_timestamp,
-                        ticks=ticks,
-                        ticks_per_second=ticks_per_second,
+                        record_timestamp=plot_inputs.record_timestamp,
+                        ticks=plot_inputs.ticks,
+                        ticks_per_second=plot_inputs.ticks_per_second,
                     )
                     writer.grab_frame()
         else:
@@ -340,14 +342,14 @@ def export_heatmap_video(
                     fixed_levels=fixed_levels,
                     color_min=color_min,
                     title=title,
-                    results=results,
+                    results=plot_inputs.results,
                     image=image,
                     ax=ax,
                     timestamp_artist=timestamp_artist,
                     timestamp_mode=timestamp_mode,
-                    record_timestamp=record_timestamp,
-                    ticks=ticks,
-                    ticks_per_second=ticks_per_second,
+                    record_timestamp=plot_inputs.record_timestamp,
+                    ticks=plot_inputs.ticks,
+                    ticks_per_second=plot_inputs.ticks_per_second,
                 )
                 pil_frames.append(_canvas_to_pil(fig))
 
@@ -361,10 +363,13 @@ def export_heatmap_video(
             )
 
         print(f"Wrote {output_path}")
-        print(f"Source FPS: {fps:.3f}; output FPS: {effective_fps:.3f}; frames: {len(frame_indices)}")
+        print(
+            f"Source FPS: {plot_inputs.fps:.3f}; output FPS: {effective_fps:.3f}; "
+            f"frames: {len(frame_indices)}"
+        )
     finally:
         plt.close("all")
-        record.close()
+        plot_inputs.record.close()
 
 
 def main() -> None:
