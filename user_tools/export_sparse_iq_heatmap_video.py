@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timedelta
+import os
 import shutil
 from pathlib import Path
 
@@ -151,17 +152,26 @@ def _load_plot_inputs(h5_path: Path, session_idx: int, group_idx: int, entry_idx
     )
 
 
-def _find_ffmpeg(explicit_ffmpeg: Path | None) -> str | None:
-    if explicit_ffmpeg is not None:
-        if explicit_ffmpeg.is_dir():
-            explicit_ffmpeg = explicit_ffmpeg / "ffmpeg.exe"
-        return str(explicit_ffmpeg) if explicit_ffmpeg.exists() else None
+def _resolve_ffmpeg_path(path: Path | None) -> str | None:
+    if path is None:
+        return None
 
-    bundled_bin = Path(
-        r"C:\Users\claub\Desktop\ffmpeg-master-latest-win64-gpl-shared\bin\ffmpeg.exe"
-    )
-    if bundled_bin.exists():
-        return str(bundled_bin)
+    if path.is_dir():
+        path = path / "ffmpeg.exe"
+
+    return str(path) if path.exists() else None
+
+
+def _find_ffmpeg(explicit_ffmpeg: Path | None) -> str | None:
+    ffmpeg_path = _resolve_ffmpeg_path(explicit_ffmpeg)
+    if ffmpeg_path is not None:
+        return ffmpeg_path
+
+    env_ffmpeg = os.getenv("FFMPEG_PATH")
+    if env_ffmpeg:
+        ffmpeg_path = _resolve_ffmpeg_path(Path(env_ffmpeg))
+        if ffmpeg_path is not None:
+            return ffmpeg_path
 
     return shutil.which("ffmpeg")
 
@@ -322,7 +332,7 @@ def main() -> None:
         "--ffmpeg",
         type=Path,
         default=None,
-        help="Path to ffmpeg.exe or its bin directory. The known Desktop ffmpeg path is auto-detected.",
+        help="Path to ffmpeg.exe or its bin directory. Falls back to FFMPEG_PATH, then PATH.",
     )
     parser.add_argument(
         "--color-max",
