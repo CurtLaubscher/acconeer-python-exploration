@@ -64,6 +64,7 @@ app = [
     "bs4",
     "docutils>=0.17,!=0.18",
     "matplotlib>3.5.1",
+    "opencv-python>=4.10,<5",
     "psutil",
     "pyperclip",
     "pyside6==6.8.3",
@@ -96,6 +97,7 @@ features = ["app"]
 launcher = "python -m acconeer.exptool.app {args}"
 new = "python -m acconeer.exptool.app.new {args}"
 old = "python -m acconeer.exptool.app.old {args}"
+heatmap-align = "python user_tools/heatmap_alignment_gui.py {args}"
 
 [tool.hatch.envs.mypy]
 features = ["app"]
