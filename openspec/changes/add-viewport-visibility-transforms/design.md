@@ -4,6 +4,8 @@ The heatmap alignment workbench currently rectifies the selected camera viewport
 
 This change adds lightweight viewport visibility transforms for manual comparison. It does not reintroduce xcorr. The goal is to make the human alignment task easier and to establish a better visual preprocessing path if xcorr is revisited later.
 
+The first implementation of viewport transforms is fast enough, but live evaluation showed that transform quality is hard to assess when the viewport frame itself comes from the low-resolution proxy preview. This change is therefore broadened to include a paused source-resolution viewport preview rendered from the original camera video, plus native original-video coordinate storage for viewport geometry.
+
 ## Goals / Non-Goals
 
 **Goals:**
@@ -13,6 +15,9 @@ This change adds lightweight viewport visibility transforms for manual compariso
 - Keep the raw viewport view available.
 - Persist enhancement enabled state and tuning values in alignment sessions.
 - Keep transforms fast enough for scrubbing and playback preview.
+- Store viewport geometry in original camera pixel coordinates.
+- Provide an automatic source-resolution viewport preview after the viewport state has been idle briefly.
+- Keep the source-resolution preview path responsive by invalidating stale work immediately and only accepting the latest result.
 
 **Non-Goals:**
 
@@ -22,6 +27,9 @@ This change adds lightweight viewport visibility transforms for manual compariso
 - Changing the rendered H5 truth heatmap color controls.
 - Adding grayscale or edge modes in the first implementation.
 - Adding a broad image-processing workbench with many advanced controls.
+- Building a general frame cache, predecode system, or source-resolution playback pipeline.
+- Rendering source-resolution viewport frames while playback is active.
+- Providing a visible source-resolution-render status indicator in the first implementation.
 
 ## Decisions
 
@@ -71,9 +79,66 @@ Transforms should operate after rectification, on the viewport preview frame, no
 
 Alternatives considered: transforming the camera source view would make geometry handles harder to interpret and would conflate source inspection with comparison rendering.
 
+### Store viewport geometry in original camera coordinates
+
+Viewport corners should be stored in original camera pixel coordinates. The proxy/display preview should map those native corners into the displayed camera coordinate space for drawing and hit testing. Low-resolution live viewport rendering should scale the native corners down to the current display/proxy camera frame before rectifying that frame. Source-resolution viewport rendering should use the native corners directly against the original camera frame.
+
+This gives one authoritative geometry coordinate space and makes source-resolution preview/export extensions less fragile. It also avoids accumulating future features on top of proxy-resolution coordinates.
+
+Known saved sessions from the early MVP period are limited to a small number of JSON files, so this change may handle those pragmatically with manual correction rather than a broad migration system.
+
+Alternatives considered: keeping proxy-coordinate session geometry and scaling only inside the source-resolution worker would be smaller, but it preserves an imprecise model and makes later original-resolution features harder to reason about.
+
+### Keep camera-video dragging display-local
+
+The camera-video quadrilateral editor should keep its drag math in the currently displayed camera image coordinate space. For center and edge drags, it should capture the cursor position and corners at mouse press, then compute each mouse-move frame from:
+
+```text
+delta = cursor_current - cursor_start
+new_corners = start_corners + bounded_delta
+```
+
+The widget should emit updated displayed-image corners, and the main window should convert those displayed corners back to native original-video coordinates. This keeps the interaction intuitive in the camera panel while preserving the native-coordinate session model.
+
+The camera-video editor should not accumulate deltas across mouse moves or apply the same delta twice. Corner dragging may remain direct-to-current-cursor because the user is placing one visible handle.
+
+### Render source-resolution viewport after idle
+
+The GUI should continue showing the fast low-resolution/proxy viewport immediately during scrubbing, playback, and geometry interaction. When viewport-relevant state changes, the GUI should immediately invalidate any pending source-resolution result, clear the source-resolution display source, show the low-resolution viewport, and restart a short debounce timer. If the state remains idle for approximately 200 ms and playback is not active, a background worker should render a source-resolution rectified viewport from the original camera video. The output image should remain sized for the current viewport preview; "source-resolution" refers to the input camera frame used before warping, not a large display image.
+
+The worker result should be accepted only if it still matches the latest request token and relevant state. If a newer request exists, the old result should be ignored. The implementation should not attempt to forcibly kill an in-flight OpenCV decode/warp; latest-request-wins tokening is the cancellation model.
+
+Playback state transitions should flow through a centralized helper or similarly controlled path. Starting playback should invalidate source-resolution viewport work immediately. Stopping playback should allow source-resolution scheduling through the same viewport refresh/debounce path used by other viewport-relevant updates.
+
+The conceptual flow is:
+
+```text
+viewport-relevant update
+    -> increment request token immediately
+    -> clear source-resolution viewport result
+    -> show low-resolution viewport immediately
+    -> restart 200 ms debounce timer
+
+debounce fires while paused
+    -> worker opens/uses original camera source
+    -> worker decodes current camera frame
+    -> worker warps native-coordinate viewport
+    -> GUI accepts result only if request token still matches
+```
+
+Viewport-relevant updates include shared time changes, offset changes, viewport geometry changes, camera source changes, and viewport output size changes. The implementation should centralize scheduling around the existing viewport preview refresh path where practical, instead of duplicating special-case scheduling in every input handler.
+
+Alternatives considered: a manual `Render Source Frame` button would be simpler but less ergonomic during alignment. A full background frame cache or predictive predecode system is more powerful but beyond the current need.
+
+### Apply enhancement after selecting preview source
+
+Viewport visibility transforms should apply after the GUI chooses which rectified viewport frame to display. If a current source-resolution viewport result is available, enhancement applies to that frame. Otherwise, enhancement applies to the low-resolution/proxy viewport frame. This keeps enhancement semantics stable and lets the user evaluate the same transform against the best available viewport source.
+
 ### Persist settings in the alignment session
 
 The enhancement enabled state and tuning values should be saved with the session so reloading a session reproduces the same comparison view. Existing sessions should load with defaults equivalent to current raw behavior.
+
+Viewport geometry should also roundtrip in the native original-video coordinate model once this broadened change is implemented.
 
 Alternatives considered: keeping transforms as UI-only state would be simpler but would make saved alignment work less reproducible.
 
@@ -90,3 +155,6 @@ Alternatives considered: using Matplotlib or PIL for transforms would add overhe
 - Viridis mapping from luminance may be imperfect under monitor/camera color shifts -> treat it as a manual visibility aid, not truth reconstruction.
 - Transform processing could affect playback smoothness -> keep transforms lightweight and measure if live playback becomes uneven.
 - Session schema changes can affect old files -> provide defaults when `viewport_visibility` is absent.
+- Source-resolution preview work could fight playback/scrubbing -> disable scheduling during playback and debounce while the viewport state is changing.
+- Worker cancellation is cooperative by obsolescence rather than forced interruption -> use request tokens and accept only the latest matching result.
+- Native-coordinate session changes can affect old files -> rely on manual correction for the small known set of saved sessions rather than building a broad migration system.

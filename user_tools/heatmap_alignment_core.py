@@ -773,6 +773,29 @@ def rectify_viewport(
     return cv2.warpPerspective(source_rgb, transform, (width, height), flags=interpolation)
 
 
+def scale_viewport_corners(
+    corners: np.ndarray | list[list[float]],
+    *,
+    from_size: tuple[int, int],
+    to_size: tuple[int, int],
+) -> np.ndarray:
+    src = np.asarray(corners, dtype=np.float32)
+    if src.shape != (4, 2):
+        raise ValueError("Viewport corners must have shape (4, 2).")
+
+    from_width, from_height = from_size
+    to_width, to_height = to_size
+    if from_width <= 0 or from_height <= 0:
+        raise ValueError("Source viewport size must be positive.")
+    if to_width <= 0 or to_height <= 0:
+        raise ValueError("Target viewport size must be positive.")
+
+    scaled = src.copy()
+    scaled[:, 0] *= to_width / from_width
+    scaled[:, 1] *= to_height / from_height
+    return scaled
+
+
 @lru_cache(maxsize=1)
 def _viridis_lookup_table_rgb() -> np.ndarray:
     values = np.arange(256, dtype=np.uint8).reshape(-1, 1)

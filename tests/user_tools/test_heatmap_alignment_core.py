@@ -29,6 +29,7 @@ from heatmap_alignment_core import (  # noqa: E402
     prepare_proxy_video,
     rectify_viewport,
     save_alignment_artifact,
+    scale_viewport_corners,
     validate_alignment_session,
 )
 
@@ -159,6 +160,45 @@ def test_rectify_viewport_preserves_identity_mapping() -> None:
 
     assert rectified.shape == frame.shape
     assert np.allclose(rectified, frame)
+
+
+def test_scale_viewport_corners_maps_native_geometry_to_proxy_size() -> None:
+    native_corners = np.array(
+        [[300.0, 150.0], [1700.0, 150.0], [1700.0, 930.0], [300.0, 930.0]],
+        dtype=np.float32,
+    )
+
+    scaled = scale_viewport_corners(
+        native_corners,
+        from_size=(2000, 1000),
+        to_size=(1000, 500),
+    )
+
+    expected = np.array(
+        [[150.0, 75.0], [850.0, 75.0], [850.0, 465.0], [150.0, 465.0]],
+        dtype=np.float32,
+    )
+    assert np.allclose(scaled, expected)
+
+
+def test_scale_viewport_corners_roundtrips_between_native_and_proxy_sizes() -> None:
+    native_corners = np.array(
+        [[120.5, 90.0], [1880.0, 110.0], [1790.0, 980.0], [140.0, 950.0]],
+        dtype=np.float32,
+    )
+
+    preview_corners = scale_viewport_corners(
+        native_corners,
+        from_size=(1920, 1080),
+        to_size=(960, 540),
+    )
+    restored = scale_viewport_corners(
+        preview_corners,
+        from_size=(960, 540),
+        to_size=(1920, 1080),
+    )
+
+    assert np.allclose(restored, native_corners)
 
 
 def test_apply_viewport_visibility_returns_raw_when_disabled() -> None:

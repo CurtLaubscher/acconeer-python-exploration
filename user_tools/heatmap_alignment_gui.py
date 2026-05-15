@@ -43,6 +43,7 @@ from heatmap_alignment_core import (
     prepare_proxy_video,
     rectify_viewport,
     save_alignment_artifact,
+    scale_viewport_corners,
     validate_alignment_session,
 )
 
@@ -988,8 +989,16 @@ class CornerEditorWidget(QtWidgets.QWidget):
         adjusted_dx = dx + min_dx + max_dx
         adjusted_dy = dy + min_dy + max_dy
         self._corners = self._start_drag_corners.copy()
-        self._corners[indices, 0] = np.clip(self._start_drag_corners[indices, 0] + dx + adjusted_dx, 0, width - 1)
-        self._corners[indices, 1] = np.clip(self._start_drag_corners[indices, 1] + dy + adjusted_dy, 0, height - 1)
+        self._corners[indices, 0] = np.clip(
+            self._start_drag_corners[indices, 0] + adjusted_dx,
+            0,
+            width - 1,
+        )
+        self._corners[indices, 1] = np.clip(
+            self._start_drag_corners[indices, 1] + adjusted_dy,
+            0,
+            height - 1,
+        )
         self.corners_changed.emit(self._corners.tolist())
         self.update()
 
@@ -1196,8 +1205,38 @@ class CornerEditorWidget(QtWidgets.QWidget):
         return math.hypot(point.x() - proj_x, point.y() - proj_y)
 
 
+class SourceResolutionViewportWorker(QtCore.QObject):
+    render_finished = QtCore.Signal(object)
+
+    @QtCore.Slot(object)
+    def render_request(self, request: object) -> None:
+        payload = dict(request) if isinstance(request, dict) else {}
+        result: dict[str, object] = {"token": payload.get("token"), "frame": None, "error": None}
+        try:
+            camera_path = Path(str(payload["camera_path"]))
+            source = CameraVideoSource(camera_path, max_preview_dimension=None)
+            try:
+                _, frame = source.frame_at_seconds(
+                    float(payload["camera_time_s"]),
+                    access_hint="random",
+                )
+            finally:
+                source.close()
+            viewport_frame = rectify_viewport(
+                frame,
+                np.asarray(payload["corners"], dtype=np.float32),
+                tuple(int(value) for value in payload["output_size"]),
+            )
+            result["frame"] = viewport_frame
+        except Exception as exc:
+            result["error"] = str(exc)
+        self.render_finished.emit(result)
+
+
 class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
     """Main window for the manual alignment workbench."""
+
+    source_resolution_viewport_render_requested = QtCore.Signal(object)
 
     def __init__(self) -> None:
         super().__init__()
@@ -1217,6 +1256,29 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._viewport_drag_start_corners: np.ndarray | None = None
         self._playback_started_at_s: float | None = None
         self._playback_started_video_time_s = 0.0
+        self._source_resolution_viewport_frame: np.ndarray | None = None
+        self._source_resolution_request_token = 0
+        self._source_resolution_worker_busy = False
+        self._pending_source_resolution_request: dict[str, object] | None = None
+
+        self.viewport_source_resolution_timer = QtCore.QTimer(self)
+        self.viewport_source_resolution_timer.setSingleShot(True)
+        self.viewport_source_resolution_timer.setInterval(200)
+        self.viewport_source_resolution_timer.timeout.connect(
+            self._start_debounced_source_resolution_viewport
+        )
+
+        self._source_resolution_thread = QtCore.QThread(self)
+        self._source_resolution_worker = SourceResolutionViewportWorker()
+        self._source_resolution_worker.moveToThread(self._source_resolution_thread)
+        self.source_resolution_viewport_render_requested.connect(
+            self._source_resolution_worker.render_request,
+            QtCore.Qt.ConnectionType.QueuedConnection,
+        )
+        self._source_resolution_worker.render_finished.connect(
+            self._handle_source_resolution_viewport_result
+        )
+        self._source_resolution_thread.start()
 
         self.play_timer = QtCore.QTimer(self)
         self.play_timer.timeout.connect(self._advance_playback)
@@ -1229,6 +1291,9 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage("Load camera video and H5 recording to begin.")
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
+        self.viewport_source_resolution_timer.stop()
+        self._source_resolution_thread.quit()
+        self._source_resolution_thread.wait()
         self._close_sources()
         super().closeEvent(event)
 
@@ -1455,7 +1520,11 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         return group
 
     def _close_sources(self) -> None:
-        self._stop_playback()
+        self._set_playback_active(False, refresh_viewport=False)
+        self.viewport_source_resolution_timer.stop()
+        self._source_resolution_request_token += 1
+        self._source_resolution_viewport_frame = None
+        self._pending_source_resolution_request = None
         if self.camera_source is not None:
             self.camera_source.close()
             self.camera_source = None
@@ -1467,6 +1536,8 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             self.heatmap_source.close()
             self.heatmap_source = None
         self.camera_view.set_export_overlay_preview_frame(None)
+        self.camera_view.set_corners(None)
+        self.viewport_view.set_frame(None)
 
     def _load_camera_video(self) -> None:
         start_path = self._dialog_start_path("last_camera_path")
@@ -1484,10 +1555,10 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.session.timeline.current_time_s = 0.0
         self._initialize_default_export_overlay_if_needed()
         self._load_current_camera_frame(access_hint="random")
-        if not self.session.viewport.corners:
-            self.camera_view.initialize_default_corners()
+        if self._native_viewport_corners() is None:
+            self._initialize_default_viewport_corners_native()
         else:
-            self.camera_view.set_corners(self.session.viewport.corners)
+            self._refresh_camera_view_corners()
         self.camera_view.set_export_overlay(self.session.export_overlay)
         self._update_controls_enabled_state()
         self._sync_previews(refresh_xcorr=False, camera_access_hint="auto")
@@ -1523,38 +1594,6 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._sync_previews(refresh_xcorr=False, camera_access_hint="auto")
         self.settings.setValue("last_h5_path", str(h5_path))
         self.statusBar().showMessage(f"Loaded H5 recording: {h5_path}")
-
-    def _adapt_loaded_viewport_corners_to_preview(self) -> None:
-        if self.camera_source is None or not self.session.viewport.corners:
-            return
-
-        corners = np.asarray(self.session.viewport.corners, dtype=np.float32)
-        if corners.shape != (4, 2):
-            return
-
-        preview_width = self.camera_source.preview_width
-        preview_height = self.camera_source.preview_height
-        if preview_width <= 0 or preview_height <= 0:
-            return
-
-        max_corner_x = float(np.max(corners[:, 0]))
-        max_corner_y = float(np.max(corners[:, 1]))
-        if max_corner_x <= preview_width and max_corner_y <= preview_height:
-            return
-
-        original_width = self._camera_reference_width
-        original_height = self._camera_reference_height
-        if (
-            original_width <= 0
-            or original_height <= 0
-            or max_corner_x > original_width
-            or max_corner_y > original_height
-        ):
-            return
-
-        corners[:, 0] *= preview_width / original_width
-        corners[:, 1] *= preview_height / original_height
-        self.session.viewport.corners = corners.tolist()
 
     def _save_artifact(self) -> None:
         try:
@@ -1592,7 +1631,6 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
 
         if session.camera_track.path:
             self._open_camera_source(Path(session.camera_track.path), update_session_track=False)
-            self._adapt_loaded_viewport_corners_to_preview()
             self._initialize_default_export_overlay_if_needed()
         if session.heatmap_track.path:
             self.heatmap_source = HeatmapTruthSource(
@@ -1609,7 +1647,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
 
         self._populate_controls_from_session()
         self._load_current_camera_frame(access_hint="random")
-        self.camera_view.set_corners(self.session.viewport.corners)
+        self._refresh_camera_view_corners()
         self.camera_view.set_export_overlay(self.session.export_overlay)
         self._update_controls_enabled_state()
         self._sync_previews(refresh_xcorr=False, camera_access_hint="auto")
@@ -1698,13 +1736,21 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         )
         self.session.viewport_visibility.gamma = self.viewport_gamma_spin.value()
         self._update_viewport_visibility_controls_enabled()
-        self._sync_previews(refresh_xcorr=False, camera_access_hint="auto")
+        self._sync_previews(
+            refresh_xcorr=False,
+            camera_access_hint="auto",
+            invalidate_source_resolution=False,
+        )
 
     def _viewport_visibility_range_changed(self, low: float, high: float) -> None:
         self.session.viewport_visibility.low = low
         self.session.viewport_visibility.high = high
         self._update_viewport_visibility_labels()
-        self._sync_previews(refresh_xcorr=False, camera_access_hint="auto")
+        self._sync_previews(
+            refresh_xcorr=False,
+            camera_access_hint="auto",
+            invalidate_source_resolution=False,
+        )
 
     def _update_viewport_visibility_labels(self) -> None:
         self.viewport_low_label.setText(f"Low {self.session.viewport_visibility.low:.2f}")
@@ -1737,9 +1783,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             self._playback_started_video_time_s = self.session.timeline.current_time_s
 
     def _stop_playback(self) -> None:
-        self.play_timer.stop()
-        self._playback_started_at_s = None
-        self.play_button.setText("Play")
+        self._set_playback_active(False)
 
     def _slider_to_time(self, slider_value: int) -> None:
         range_start_s, range_end_s = self._timeline_bounds_s()
@@ -1757,13 +1801,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.offset_spin.setValue(offset_s)
 
     def _toggle_playback(self) -> None:
-        if self.play_timer.isActive():
-            self._stop_playback()
-        else:
-            self._playback_started_at_s = time.perf_counter()
-            self._playback_started_video_time_s = self.session.timeline.current_time_s
-            self.play_timer.start(self.play_timer_interval_ms)
-            self.play_button.setText("Pause")
+        self._set_playback_active(not self.play_timer.isActive())
 
     def _advance_playback(self) -> None:
         if self._max_duration_s() <= 0:
@@ -1780,7 +1818,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._set_slider_from_current_time()
         self._sync_previews(refresh_xcorr=False, camera_access_hint="playback")
         if math.isclose(next_time, range_end_s) or next_time >= range_end_s:
-            self._stop_playback()
+            self._set_playback_active(False)
 
     def _render_settings_changed(self) -> None:
         self.session.render.color_min = self.color_min_spin.value()
@@ -1802,12 +1840,13 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.xcorr_curve.setData([], [])
 
     def _corners_changed(self, corners: list) -> None:
-        self.session.viewport.corners = corners
+        native_corners = self._display_corners_to_native(np.asarray(corners, dtype=np.float32))
+        self.session.viewport.corners = native_corners.tolist()
         self._sync_previews(refresh_xcorr=False, camera_access_hint="auto")
 
     def _set_viewport_corners(self, corners: np.ndarray) -> None:
         self.session.viewport.corners = corners.tolist()
-        self.camera_view.set_corners(self.session.viewport.corners)
+        self._refresh_camera_view_corners()
         self._sync_previews(refresh_xcorr=False, camera_access_hint="auto")
 
     def _export_overlay_changed(self, x: float, y: float, width: float, height: float) -> None:
@@ -1852,6 +1891,95 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         )
         self.current_camera_frame = frame
         self.camera_view.set_frame(frame)
+
+    def _invalidate_source_resolution_viewport(self) -> None:
+        self._source_resolution_request_token += 1
+        self._source_resolution_viewport_frame = None
+        self._pending_source_resolution_request = None
+        self.viewport_source_resolution_timer.stop()
+
+    def _source_resolution_request_payload(
+        self,
+        *,
+        viewport_size: tuple[int, int],
+    ) -> dict[str, object] | None:
+        native_corners = self._native_viewport_corners()
+        if self.camera_source is None or native_corners is None:
+            return None
+        if self.play_timer.isActive():
+            return None
+        width, height = viewport_size
+        if width <= 0 or height <= 0:
+            return None
+        camera_time_s = self.session.timeline.current_time_s + self.session.timeline.offset_s
+        if camera_time_s < 0.0 or camera_time_s > self.session.camera_track.duration_s:
+            return None
+        return {
+            "token": self._source_resolution_request_token,
+            "camera_path": self.session.camera_track.path,
+            "camera_time_s": camera_time_s,
+            "corners": native_corners.tolist(),
+            "output_size": viewport_size,
+        }
+
+    def _schedule_source_resolution_viewport_refresh(
+        self,
+        *,
+        viewport_size: tuple[int, int],
+    ) -> None:
+        request = self._source_resolution_request_payload(viewport_size=viewport_size)
+        if request is None:
+            self.viewport_source_resolution_timer.stop()
+            self._pending_source_resolution_request = None
+            return
+        self._pending_source_resolution_request = request
+        if not self.play_timer.isActive():
+            self.viewport_source_resolution_timer.start()
+
+    def _start_debounced_source_resolution_viewport(self) -> None:
+        request = self._pending_source_resolution_request
+        if request is None:
+            return
+        if self._source_resolution_worker_busy:
+            return
+        self._pending_source_resolution_request = None
+        self._source_resolution_worker_busy = True
+        self.source_resolution_viewport_render_requested.emit(request)
+
+    def _handle_source_resolution_viewport_result(self, result: object) -> None:
+        self._source_resolution_worker_busy = False
+        payload = dict(result) if isinstance(result, dict) else {}
+        if payload.get("token") == self._source_resolution_request_token:
+            frame = payload.get("frame")
+            self._source_resolution_viewport_frame = (
+                frame.copy() if isinstance(frame, np.ndarray) else None
+            )
+            if self._source_resolution_viewport_frame is not None:
+                self._sync_previews(
+                    refresh_xcorr=False,
+                    camera_access_hint="auto",
+                    invalidate_source_resolution=False,
+                )
+
+        if self._pending_source_resolution_request is not None and not self.play_timer.isActive():
+            self._start_debounced_source_resolution_viewport()
+
+    def _set_playback_active(self, active: bool, *, refresh_viewport: bool = True) -> None:
+        if active:
+            self._playback_started_at_s = time.perf_counter()
+            self._playback_started_video_time_s = self.session.timeline.current_time_s
+            self.play_timer.start(self.play_timer_interval_ms)
+            self.play_button.setText("Pause")
+            if refresh_viewport:
+                self._sync_previews(refresh_xcorr=False, camera_access_hint="playback")
+            return
+
+        was_active = self.play_timer.isActive()
+        self.play_timer.stop()
+        self._playback_started_at_s = None
+        self.play_button.setText("Play")
+        if refresh_viewport and was_active:
+            self._sync_previews(refresh_xcorr=False, camera_access_hint="auto")
 
     def _set_slider_from_current_time(self) -> None:
         range_start_s, range_end_s = self._timeline_bounds_s()
@@ -1907,6 +2035,75 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.session.export_overlay.width = width
         self.session.export_overlay.height = height
 
+    def _camera_native_size(self) -> tuple[int, int]:
+        return self._camera_reference_width, self._camera_reference_height
+
+    def _camera_display_size(self) -> tuple[int, int]:
+        if self.current_camera_frame is not None:
+            return self.current_camera_frame.shape[1], self.current_camera_frame.shape[0]
+        if self.camera_source is not None:
+            return self.camera_source.preview_width, self.camera_source.preview_height
+        return 0, 0
+
+    def _native_viewport_corners(self) -> np.ndarray | None:
+        if not self.session.viewport.corners:
+            return None
+        corners = np.asarray(self.session.viewport.corners, dtype=np.float32)
+        if corners.shape != (4, 2):
+            return None
+        return corners
+
+    def _display_corners_to_native(self, display_corners: np.ndarray) -> np.ndarray:
+        native_width, native_height = self._camera_native_size()
+        display_width, display_height = self._camera_display_size()
+        if native_width <= 0 or native_height <= 0:
+            return display_corners.astype(np.float32, copy=True)
+        if display_width <= 0 or display_height <= 0:
+            return display_corners.astype(np.float32, copy=True)
+        return scale_viewport_corners(
+            display_corners,
+            from_size=(display_width, display_height),
+            to_size=(native_width, native_height),
+        )
+
+    def _display_viewport_corners(self) -> np.ndarray | None:
+        native_corners = self._native_viewport_corners()
+        native_width, native_height = self._camera_native_size()
+        display_width, display_height = self._camera_display_size()
+        if native_corners is None:
+            return None
+        if native_width <= 0 or native_height <= 0:
+            return native_corners
+        if display_width <= 0 or display_height <= 0:
+            return native_corners
+        return scale_viewport_corners(
+            native_corners,
+            from_size=(native_width, native_height),
+            to_size=(display_width, display_height),
+        )
+
+    def _refresh_camera_view_corners(self) -> None:
+        display_corners = self._display_viewport_corners()
+        self.camera_view.set_corners(None if display_corners is None else display_corners.tolist())
+
+    def _initialize_default_viewport_corners_native(self) -> None:
+        native_width, native_height = self._camera_native_size()
+        if native_width <= 0 or native_height <= 0:
+            return
+        inset_x = native_width * 0.15
+        inset_y = native_height * 0.15
+        corners = np.array(
+            [
+                [inset_x, inset_y],
+                [native_width - inset_x, inset_y],
+                [native_width - inset_x, native_height - inset_y],
+                [inset_x, native_height - inset_y],
+            ],
+            dtype=np.float32,
+        )
+        self.session.viewport.corners = corners.tolist()
+        self._refresh_camera_view_corners()
+
     def _rebuild_overlay_plot_renderer(self) -> None:
         if self.heatmap_source is None:
             self._overlay_plot_renderer = None
@@ -1952,28 +2149,28 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         viewport_y: float,
         viewport_size: tuple[int, int],
     ) -> np.ndarray | None:
-        if self.current_camera_frame is None or not self.session.viewport.corners:
+        native_corners = self._native_viewport_corners()
+        native_width, native_height = self._camera_native_size()
+        if native_corners is None:
             return None
         width, height = viewport_size
-        src = np.asarray(self.session.viewport.corners, dtype=np.float32)
-        if src.shape != (4, 2) or width <= 0 or height <= 0:
+        if native_width <= 0 or native_height <= 0 or width <= 0 or height <= 0:
             return None
         dst = np.array(
             [[0.0, 0.0], [width - 1.0, 0.0], [width - 1.0, height - 1.0], [0.0, height - 1.0]],
             dtype=np.float32,
         )
-        transform = cv2.getPerspectiveTransform(src, dst)
+        transform = cv2.getPerspectiveTransform(native_corners, dst)
         inverse = np.linalg.inv(transform)
         point = np.array([viewport_x, viewport_y, 1.0], dtype=np.float64)
         mapped = inverse @ point
         if abs(mapped[2]) < 1e-9:
             return None
         mapped /= mapped[2]
-        frame_height, frame_width = self.current_camera_frame.shape[:2]
         return np.array(
             [
-                float(np.clip(mapped[0], 0, frame_width - 1)),
-                float(np.clip(mapped[1], 0, frame_height - 1)),
+                float(np.clip(mapped[0], 0, native_width - 1)),
+                float(np.clip(mapped[1], 0, native_height - 1)),
             ],
             dtype=np.float32,
         )
@@ -1986,14 +2183,14 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         *,
         base_corners: np.ndarray | None = None,
     ) -> None:
-        if self.current_camera_frame is None or not self.session.viewport.corners:
+        native_width, native_height = self._camera_native_size()
+        if native_width <= 0 or native_height <= 0 or not self.session.viewport.corners:
             return
         corners = (
             np.asarray(base_corners, dtype=np.float32).copy()
             if base_corners is not None
             else np.asarray(self.session.viewport.corners, dtype=np.float32)
         )
-        frame_height, frame_width = self.current_camera_frame.shape[:2]
         trial = corners.copy()
         trial[indices, 0] += dx
         trial[indices, 1] += dy
@@ -2007,15 +2204,15 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         max_y = float(np.max(subset[:, 1]))
         if min_x < 0.0:
             adjust_dx = -min_x
-        elif max_x > frame_width - 1:
-            adjust_dx = (frame_width - 1) - max_x
+        elif max_x > native_width - 1:
+            adjust_dx = (native_width - 1) - max_x
         if min_y < 0.0:
             adjust_dy = -min_y
-        elif max_y > frame_height - 1:
-            adjust_dy = (frame_height - 1) - max_y
+        elif max_y > native_height - 1:
+            adjust_dy = (native_height - 1) - max_y
 
-        corners[indices, 0] = np.clip(corners[indices, 0] + dx + adjust_dx, 0, frame_width - 1)
-        corners[indices, 1] = np.clip(corners[indices, 1] + dy + adjust_dy, 0, frame_height - 1)
+        corners[indices, 0] = np.clip(corners[indices, 0] + dx + adjust_dx, 0, native_width - 1)
+        corners[indices, 1] = np.clip(corners[indices, 1] + dy + adjust_dy, 0, native_height - 1)
         self._set_viewport_corners(corners)
 
     def _viewport_corner_dragged(
@@ -2038,10 +2235,10 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         delta = start_point - current_point
         corners = self._viewport_drag_start_corners.copy()
         corners[index] = self._viewport_drag_start_corners[index] + delta
-        if self.current_camera_frame is not None:
-            frame_height, frame_width = self.current_camera_frame.shape[:2]
-            corners[index, 0] = np.clip(corners[index, 0], 0, frame_width - 1)
-            corners[index, 1] = np.clip(corners[index, 1], 0, frame_height - 1)
+        native_width, native_height = self._camera_native_size()
+        if native_width > 0 and native_height > 0:
+            corners[index, 0] = np.clip(corners[index, 0], 0, native_width - 1)
+            corners[index, 1] = np.clip(corners[index, 1], 0, native_height - 1)
         self._set_viewport_corners(corners)
 
     def _viewport_edge_dragged(
@@ -2093,8 +2290,17 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             base_corners=self._viewport_drag_start_corners,
         )
 
-    def _sync_previews(self, *, refresh_xcorr: bool, camera_access_hint: str = "auto") -> None:
+    def _sync_previews(
+        self,
+        *,
+        refresh_xcorr: bool,
+        camera_access_hint: str = "auto",
+        invalidate_source_resolution: bool = True,
+    ) -> None:
+        if invalidate_source_resolution:
+            self._invalidate_source_resolution_viewport()
         self._load_current_camera_frame(access_hint=camera_access_hint)
+        self._refresh_camera_view_corners()
         self._set_slider_from_current_time()
         self._set_timeline_view_state()
         self.current_time_label.setText(
@@ -2128,24 +2334,38 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             self.camera_view.set_export_overlay_preview_frame(None)
 
         viewport_frame = None
+        low_resolution_viewport_frame = None
         if (
             self.current_camera_frame is not None
             and truth_frame is not None
             and self.session.viewport.corners
         ):
             viewport_size = self._viewport_output_size(truth_frame)
+            display_corners = self._display_viewport_corners()
             try:
-                viewport_frame = rectify_viewport(
-                    self.current_camera_frame,
-                    np.asarray(self.session.viewport.corners, dtype=np.float32),
-                    viewport_size,
-                )
-                viewport_frame = apply_viewport_visibility(
-                    viewport_frame,
-                    self.session.viewport_visibility,
-                )
+                if display_corners is not None:
+                    low_resolution_viewport_frame = rectify_viewport(
+                        self.current_camera_frame,
+                        display_corners,
+                        viewport_size,
+                    )
+            except ValueError:
+                low_resolution_viewport_frame = None
+            selected_viewport_frame = (
+                self._source_resolution_viewport_frame
+                if self._source_resolution_viewport_frame is not None
+                else low_resolution_viewport_frame
+            )
+            try:
+                if selected_viewport_frame is not None:
+                    viewport_frame = apply_viewport_visibility(
+                        selected_viewport_frame,
+                        self.session.viewport_visibility,
+                    )
             except ValueError:
                 viewport_frame = None
+            if invalidate_source_resolution:
+                self._schedule_source_resolution_viewport_refresh(viewport_size=viewport_size)
         self.viewport_view.set_frame(viewport_frame)
 
         if refresh_xcorr:
