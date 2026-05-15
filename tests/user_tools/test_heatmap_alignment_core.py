@@ -14,6 +14,8 @@ if str(USER_TOOLS_PATH) not in sys.path:
 
 from heatmap_alignment_core import (  # noqa: E402
     AlignmentSession,
+    ViewportVisibilitySettings,
+    apply_viewport_visibility,
     CameraTrack,
     CameraVideoSource,
     ExportOverlaySettings,
@@ -69,6 +71,13 @@ def test_alignment_artifact_roundtrip(tmp_path: Path) -> None:
             width=128.0,
             height=96.0,
         ),
+        viewport_visibility=ViewportVisibilitySettings(
+            enabled=True,
+            map_to_viridis=True,
+            low=0.1,
+            high=0.9,
+            gamma=1.4,
+        ),
     )
 
     artifact_path = tmp_path / "alignment.json"
@@ -81,6 +90,56 @@ def test_alignment_artifact_roundtrip(tmp_path: Path) -> None:
     assert loaded.export_overlay.visible is False
     assert loaded.export_overlay.preview_enabled is False
     assert loaded.export_overlay.width == pytest.approx(128.0)
+    assert loaded.viewport_visibility.enabled is True
+    assert loaded.viewport_visibility.map_to_viridis is True
+    assert loaded.viewport_visibility.low == pytest.approx(0.1)
+    assert loaded.viewport_visibility.gamma == pytest.approx(1.4)
+
+
+def test_alignment_artifact_defaults_missing_viewport_visibility_settings(tmp_path: Path) -> None:
+    camera_path = tmp_path / "camera.mp4"
+    heatmap_path = tmp_path / "truth.h5"
+    camera_path.write_bytes(b"")
+    heatmap_path.write_bytes(b"")
+    artifact_path = tmp_path / "alignment.json"
+    artifact_path.write_text(
+        """
+{
+  "version": 1,
+  "camera_track": {"path": "%CAMERA%", "fps": 30.0, "duration_s": 1.0, "frame_count": 30},
+  "heatmap_track": {
+    "path": "%HEATMAP%",
+    "session_idx": 0,
+    "group_idx": 0,
+    "entry_idx": 0,
+    "subsweep_idx": 0,
+    "duration_s": 1.0,
+    "fps": 10.0
+  },
+  "viewport": {
+    "corners": [[0.0, 0.0], [9.0, 0.0], [9.0, 5.0], [0.0, 5.0]],
+    "output_width": 10,
+    "output_height": 6
+  },
+  "render": {"color_min": 0.0, "color_max": 3000.0, "fixed_levels": true},
+  "preprocess": {
+    "blur_sigma": 0.0,
+    "downscale_factor": 1.0,
+    "lag_window_s": 2.0,
+    "sample_count": 30
+  },
+  "timeline": {"current_time_s": 0.0, "offset_s": 0.0},
+  "export_overlay": {"visible": true, "preview_enabled": true, "x": 0.0, "y": 0.0, "width": 0.0, "height": 0.0}
+}
+        """.strip()
+        .replace("%CAMERA%", str(camera_path).replace("\\", "\\\\"))
+        .replace("%HEATMAP%", str(heatmap_path).replace("\\", "\\\\")),
+        encoding="utf-8",
+    )
+
+    loaded = load_alignment_artifact(artifact_path)
+
+    assert loaded.viewport_visibility == ViewportVisibilitySettings()
 
 
 def test_validate_alignment_session_rejects_bad_corners() -> None:
@@ -100,6 +159,82 @@ def test_rectify_viewport_preserves_identity_mapping() -> None:
 
     assert rectified.shape == frame.shape
     assert np.allclose(rectified, frame)
+
+
+def test_apply_viewport_visibility_returns_raw_when_disabled() -> None:
+    frame = np.array(
+        [
+            [[10, 20, 30], [40, 50, 60]],
+            [[70, 80, 90], [100, 110, 120]],
+        ],
+        dtype=np.uint8,
+    )
+
+    transformed = apply_viewport_visibility(
+        frame,
+        ViewportVisibilitySettings(enabled=False),
+    )
+
+    assert np.array_equal(transformed, frame)
+
+
+def test_apply_viewport_visibility_corrects_original_colors_without_viridis_mapping() -> None:
+    frame = np.array(
+        [
+            [[64, 128, 255], [32, 96, 160]],
+        ],
+        dtype=np.uint8,
+    )
+
+    transformed = apply_viewport_visibility(
+        frame,
+        ViewportVisibilitySettings(
+            enabled=True,
+            map_to_viridis=False,
+            low=0.25,
+            high=1.0,
+            gamma=1.0,
+        ),
+    )
+
+    assert transformed.shape == frame.shape
+    assert transformed.dtype == np.uint8
+    expected = np.array(
+        [
+            [[0, 86, 255], [0, 43, 128]],
+        ],
+        dtype=np.uint8,
+    )
+    assert np.array_equal(transformed, expected)
+
+
+def test_apply_viewport_visibility_maps_corrected_luminance_to_viridis() -> None:
+    import heatmap_alignment_core as core
+
+    frame = np.array(
+        [
+            [[0, 0, 0], [128, 128, 128], [255, 255, 255]],
+        ],
+        dtype=np.uint8,
+    )
+
+    transformed = apply_viewport_visibility(
+        frame,
+        ViewportVisibilitySettings(
+            enabled=True,
+            map_to_viridis=True,
+            low=0.0,
+            high=1.0,
+            gamma=1.0,
+        ),
+    )
+
+    viridis = core._viridis_lookup_table_rgb()
+    expected = np.array([[viridis[0], viridis[128], viridis[255]]], dtype=np.uint8)
+
+    assert transformed.shape == frame.shape
+    assert transformed.dtype == np.uint8
+    assert np.array_equal(transformed, expected)
 
 
 class _FakeVideoCapture:

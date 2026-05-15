@@ -32,11 +32,13 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from heatmap_alignment_core import (
     AlignmentSession,
+    apply_viewport_visibility,
     CameraTrack,
     CameraVideoSource,
     ExportOverlaySettings,
     HeatmapTruthSource,
     HeatmapPlotRenderer,
+    ViewportVisibilitySettings,
     load_alignment_artifact,
     prepare_proxy_video,
     rectify_viewport,
@@ -107,6 +109,105 @@ class ImagePreview(QtWidgets.QLabel):
             painter.drawPixmap(contents_rect.topLeft(), scaled)
         finally:
             painter.end()
+
+
+class DoubleRangeSlider(QtWidgets.QWidget):
+    values_changed = QtCore.Signal(float, float)
+
+    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setMinimumHeight(26)
+        self.setMinimumWidth(140)
+        self._minimum = 0.0
+        self._maximum = 1.0
+        self._lower = 0.0
+        self._upper = 1.0
+        self._active_handle: Literal["lower", "upper"] | None = None
+        self._handle_radius = 7.0
+
+    def set_values(self, lower: float, upper: float) -> None:
+        lower = float(np.clip(lower, self._minimum, self._maximum))
+        upper = float(np.clip(upper, self._minimum, self._maximum))
+        if lower > upper:
+            lower, upper = upper, lower
+        self._lower = lower
+        self._upper = upper
+        self.update()
+
+    def values(self) -> tuple[float, float]:
+        return self._lower, self._upper
+
+    def paintEvent(self, event: QtGui.QPaintEvent) -> None:
+        del event
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+        try:
+            rect = self.contentsRect().adjusted(8, 6, -8, -6)
+            center_y = rect.center().y()
+            left_x = rect.left()
+            right_x = rect.right()
+            lower_x = self._value_to_x(self._lower, rect)
+            upper_x = self._value_to_x(self._upper, rect)
+
+            track_color = QtGui.QColor("#334155") if self.isEnabled() else QtGui.QColor("#1f2937")
+            active_color = QtGui.QColor("#38bdf8") if self.isEnabled() else QtGui.QColor("#475569")
+            handle_color = QtGui.QColor("#e2e8f0") if self.isEnabled() else QtGui.QColor("#64748b")
+
+            painter.setPen(QtGui.QPen(track_color, 3))
+            painter.drawLine(QtCore.QPointF(left_x, center_y), QtCore.QPointF(right_x, center_y))
+            painter.setPen(QtGui.QPen(active_color, 4))
+            painter.drawLine(QtCore.QPointF(lower_x, center_y), QtCore.QPointF(upper_x, center_y))
+
+            painter.setPen(QtGui.QPen(QtGui.QColor("#0f1720"), 1))
+            painter.setBrush(QtGui.QBrush(handle_color))
+            painter.drawEllipse(QtCore.QPointF(lower_x, center_y), self._handle_radius, self._handle_radius)
+            painter.drawEllipse(QtCore.QPointF(upper_x, center_y), self._handle_radius, self._handle_radius)
+        finally:
+            painter.end()
+
+    def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:
+        if not self.isEnabled():
+            return
+        rect = self.contentsRect().adjusted(8, 6, -8, -6)
+        lower_x = self._value_to_x(self._lower, rect)
+        upper_x = self._value_to_x(self._upper, rect)
+        x = event.position().x()
+        if abs(x - lower_x) <= abs(x - upper_x):
+            self._active_handle = "lower"
+        else:
+            self._active_handle = "upper"
+        self._update_active_handle(event.position().x(), rect)
+
+    def mouseMoveEvent(self, event: QtGui.QMouseEvent) -> None:
+        if not self.isEnabled() or self._active_handle is None:
+            return
+        rect = self.contentsRect().adjusted(8, 6, -8, -6)
+        self._update_active_handle(event.position().x(), rect)
+
+    def mouseReleaseEvent(self, event: QtGui.QMouseEvent) -> None:
+        del event
+        self._active_handle = None
+
+    def _update_active_handle(self, x: float, rect: QtCore.QRect) -> None:
+        value = self._x_to_value(x, rect)
+        min_gap = 1.0 / 255.0
+        if self._active_handle == "lower":
+            self._lower = min(value, self._upper - min_gap)
+        elif self._active_handle == "upper":
+            self._upper = max(value, self._lower + min_gap)
+        self.update()
+        self.values_changed.emit(self._lower, self._upper)
+
+    def _value_to_x(self, value: float, rect: QtCore.QRect) -> float:
+        span = max(self._maximum - self._minimum, 1e-6)
+        fraction = (value - self._minimum) / span
+        return rect.left() + fraction * rect.width()
+
+    def _x_to_value(self, x: float, rect: QtCore.QRect) -> float:
+        if rect.width() <= 0:
+            return self._minimum
+        fraction = np.clip((x - rect.left()) / rect.width(), 0.0, 1.0)
+        return float(self._minimum + fraction * (self._maximum - self._minimum))
 
 
 class AlignmentTimelineWidget(QtWidgets.QWidget):
@@ -1189,10 +1290,17 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.viewport_view = ViewportEditorWidget("Viewport")
         self.truth_view = ImagePreview("Rendered Heatmap")
         camera_group = self._wrap_group("Camera Video", self.camera_view)
+        viewport_group = QtWidgets.QGroupBox("Viewport")
+        viewport_layout = QtWidgets.QVBoxLayout(viewport_group)
+        viewport_layout.addWidget(self.viewport_view)
+        self.viewport_controls_widget = QtWidgets.QWidget()
+        viewport_controls_layout = QtWidgets.QGridLayout(self.viewport_controls_widget)
+        viewport_controls_layout.setContentsMargins(0, 0, 0, 0)
         right_panel = QtWidgets.QWidget()
         right_layout = QtWidgets.QVBoxLayout(right_panel)
         right_layout.setContentsMargins(0, 0, 0, 0)
-        right_layout.addWidget(self._wrap_group("Viewport", self.viewport_view))
+        viewport_layout.addWidget(self.viewport_controls_widget)
+        right_layout.addWidget(viewport_group)
         right_layout.addWidget(self._wrap_group("Rendered Heatmap", self.truth_view))
         preview_splitter.addWidget(camera_group)
         preview_splitter.addWidget(right_panel)
@@ -1255,6 +1363,16 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.sample_count_spin.setRange(5, 300)
         self.sample_count_spin.setValue(30)
         self.sample_count_spin.setEnabled(False)
+        self.viewport_enhance_checkbox = QtWidgets.QCheckBox("Enhance Viewport")
+        self.viewport_map_to_viridis_checkbox = QtWidgets.QCheckBox("Map to Viridis")
+        self.viewport_range_slider = DoubleRangeSlider()
+        self.viewport_low_label = QtWidgets.QLabel("Low 0.00")
+        self.viewport_high_label = QtWidgets.QLabel("High 1.00")
+        self.viewport_gamma_spin = QtWidgets.QDoubleSpinBox()
+        self.viewport_gamma_spin.setRange(0.1, 5.0)
+        self.viewport_gamma_spin.setSingleStep(0.05)
+        self.viewport_gamma_spin.setValue(1.0)
+        self.viewport_gamma_spin.setDecimals(2)
         self.refresh_xcorr_button = QtWidgets.QPushButton("XCorr Disabled")
         self.refresh_xcorr_button.setEnabled(False)
         self.xcorr_status_label = QtWidgets.QLabel("Cross-correlation is disabled for v1.")
@@ -1277,9 +1395,18 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         render_layout.addWidget(self.lag_window_spin, 1, 1)
         render_layout.addWidget(QtWidgets.QLabel("Sample Count"), 1, 2)
         render_layout.addWidget(self.sample_count_spin, 1, 3)
-        render_layout.addWidget(self.xcorr_status_label, 1, 4, 1, 3)
-        render_layout.addWidget(self.refresh_xcorr_button, 1, 7)
-        render_layout.addWidget(self.xcorr_plot, 2, 0, 1, 8)
+        render_layout.addWidget(self.xcorr_status_label, 2, 4, 1, 3)
+        render_layout.addWidget(self.refresh_xcorr_button, 2, 7)
+        render_layout.addWidget(self.xcorr_plot, 3, 0, 1, 8)
+        viewport_controls_layout.addWidget(self.viewport_enhance_checkbox, 0, 0, 1, 2)
+        viewport_controls_layout.addWidget(self.viewport_map_to_viridis_checkbox, 0, 2, 1, 2)
+        viewport_controls_layout.addWidget(QtWidgets.QLabel("Range"), 1, 0)
+        viewport_controls_layout.addWidget(self.viewport_low_label, 1, 1)
+        viewport_controls_layout.addWidget(self.viewport_range_slider, 1, 2, 1, 3)
+        viewport_controls_layout.addWidget(self.viewport_high_label, 1, 5)
+        viewport_controls_layout.addWidget(QtWidgets.QLabel("Gamma"), 2, 0)
+        viewport_controls_layout.addWidget(self.viewport_gamma_spin, 2, 1)
+        viewport_controls_layout.setColumnStretch(2, 1)
         layout.addWidget(render_group, stretch=1)
 
         self.setCentralWidget(central)
@@ -1301,6 +1428,10 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.nudge_right_large.clicked.connect(lambda: self._nudge_offset(0.100))
         self.color_min_spin.valueChanged.connect(self._render_settings_changed)
         self.color_max_spin.valueChanged.connect(self._render_settings_changed)
+        self.viewport_enhance_checkbox.toggled.connect(self._viewport_visibility_changed)
+        self.viewport_map_to_viridis_checkbox.toggled.connect(self._viewport_visibility_changed)
+        self.viewport_range_slider.values_changed.connect(self._viewport_visibility_range_changed)
+        self.viewport_gamma_spin.valueChanged.connect(self._viewport_visibility_changed)
         self.blur_spin.valueChanged.connect(self._preprocess_settings_changed)
         self.downscale_spin.valueChanged.connect(self._preprocess_settings_changed)
         self.lag_window_spin.valueChanged.connect(self._preprocess_settings_changed)
@@ -1526,22 +1657,72 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.offset_spin.blockSignals(False)
         self.color_min_spin.blockSignals(True)
         self.color_max_spin.blockSignals(True)
+        self.viewport_enhance_checkbox.blockSignals(True)
+        self.viewport_map_to_viridis_checkbox.blockSignals(True)
+        self.viewport_gamma_spin.blockSignals(True)
         self.blur_spin.blockSignals(True)
         self.downscale_spin.blockSignals(True)
         self.lag_window_spin.blockSignals(True)
         self.sample_count_spin.blockSignals(True)
         self.color_min_spin.setValue(self.session.render.color_min)
         self.color_max_spin.setValue(self.session.render.color_max or 0.0)
+        self.viewport_enhance_checkbox.setChecked(self.session.viewport_visibility.enabled)
+        self.viewport_map_to_viridis_checkbox.setChecked(
+            self.session.viewport_visibility.map_to_viridis
+        )
+        self.viewport_range_slider.set_values(
+            self.session.viewport_visibility.low,
+            self.session.viewport_visibility.high,
+        )
+        self.viewport_gamma_spin.setValue(self.session.viewport_visibility.gamma)
+        self._update_viewport_visibility_labels()
         self.blur_spin.setValue(self.session.preprocess.blur_sigma)
         self.downscale_spin.setValue(self.session.preprocess.downscale_factor)
         self.lag_window_spin.setValue(self.session.preprocess.lag_window_s)
         self.sample_count_spin.setValue(self.session.preprocess.sample_count)
         self.color_min_spin.blockSignals(False)
         self.color_max_spin.blockSignals(False)
+        self.viewport_enhance_checkbox.blockSignals(False)
+        self.viewport_map_to_viridis_checkbox.blockSignals(False)
+        self.viewport_gamma_spin.blockSignals(False)
         self.blur_spin.blockSignals(False)
         self.downscale_spin.blockSignals(False)
         self.lag_window_spin.blockSignals(False)
         self.sample_count_spin.blockSignals(False)
+        self._update_viewport_visibility_controls_enabled()
+
+    def _viewport_visibility_changed(self) -> None:
+        self.session.viewport_visibility.enabled = self.viewport_enhance_checkbox.isChecked()
+        self.session.viewport_visibility.map_to_viridis = (
+            self.viewport_map_to_viridis_checkbox.isChecked()
+        )
+        self.session.viewport_visibility.gamma = self.viewport_gamma_spin.value()
+        self._update_viewport_visibility_controls_enabled()
+        self._sync_previews(refresh_xcorr=False, camera_access_hint="auto")
+
+    def _viewport_visibility_range_changed(self, low: float, high: float) -> None:
+        self.session.viewport_visibility.low = low
+        self.session.viewport_visibility.high = high
+        self._update_viewport_visibility_labels()
+        self._sync_previews(refresh_xcorr=False, camera_access_hint="auto")
+
+    def _update_viewport_visibility_labels(self) -> None:
+        self.viewport_low_label.setText(f"Low {self.session.viewport_visibility.low:.2f}")
+        self.viewport_high_label.setText(f"High {self.session.viewport_visibility.high:.2f}")
+
+    def _update_viewport_visibility_controls_enabled(self) -> None:
+        enabled = (
+            self.camera_source is not None
+            and self.heatmap_source is not None
+            and self.viewport_enhance_checkbox.isChecked()
+        )
+        has_sources = self.camera_source is not None and self.heatmap_source is not None
+        self.viewport_enhance_checkbox.setEnabled(has_sources)
+        self.viewport_range_slider.setEnabled(enabled)
+        self.viewport_map_to_viridis_checkbox.setEnabled(enabled)
+        self.viewport_gamma_spin.setEnabled(enabled)
+        self.viewport_low_label.setEnabled(enabled)
+        self.viewport_high_label.setEnabled(enabled)
 
     def _offset_changed(self, value: float) -> None:
         self.session.timeline.offset_s = value
@@ -1959,6 +2140,10 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
                     np.asarray(self.session.viewport.corners, dtype=np.float32),
                     viewport_size,
                 )
+                viewport_frame = apply_viewport_visibility(
+                    viewport_frame,
+                    self.session.viewport_visibility,
+                )
             except ValueError:
                 viewport_frame = None
         self.viewport_view.set_frame(viewport_frame)
@@ -1984,6 +2169,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.nudge_right_large.setEnabled(enabled)
         self.save_artifact_button.setEnabled(has_camera and has_heatmap)
         self.export_synced_button.setEnabled(has_camera and has_heatmap and not self._export_in_progress)
+        self._update_viewport_visibility_controls_enabled()
 
     def _viewport_preview_resized(self) -> None:
         if (

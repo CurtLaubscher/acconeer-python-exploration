@@ -85,6 +85,15 @@ class ExportOverlaySettings:
     height: float = 0.0
 
 
+@dataclass
+class ViewportVisibilitySettings:
+    enabled: bool = False
+    map_to_viridis: bool = False
+    low: float = 0.0
+    high: float = 1.0
+    gamma: float = 1.0
+
+
 @dataclass(frozen=True)
 class VideoProbe:
     path: Path
@@ -116,6 +125,7 @@ class AlignmentSession:
     preprocess: PreprocessSettings = field(default_factory=PreprocessSettings)
     timeline: TimelineState = field(default_factory=TimelineState)
     export_overlay: ExportOverlaySettings = field(default_factory=ExportOverlaySettings)
+    viewport_visibility: ViewportVisibilitySettings = field(default_factory=ViewportVisibilitySettings)
 
     def to_json_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -138,6 +148,7 @@ class AlignmentSession:
             preprocess=PreprocessSettings(**payload["preprocess"]),
             timeline=TimelineState(**payload["timeline"]),
             export_overlay=ExportOverlaySettings(**payload.get("export_overlay", {})),
+            viewport_visibility=ViewportVisibilitySettings(**payload.get("viewport_visibility", {})),
         )
         validate_alignment_session(session)
         return session
@@ -187,6 +198,14 @@ def validate_alignment_session(
         raise ValueError("Sample count must be positive.")
     if session.export_overlay.width < 0 or session.export_overlay.height < 0:
         raise ValueError("Export overlay dimensions must be non-negative.")
+    if not 0.0 <= session.viewport_visibility.low <= 1.0:
+        raise ValueError("Viewport visibility low must be within [0, 1].")
+    if not 0.0 <= session.viewport_visibility.high <= 1.0:
+        raise ValueError("Viewport visibility high must be within [0, 1].")
+    if session.viewport_visibility.low >= session.viewport_visibility.high:
+        raise ValueError("Viewport visibility low must be less than high.")
+    if session.viewport_visibility.gamma <= 0.0:
+        raise ValueError("Viewport visibility gamma must be positive.")
 
 
 def probe_video(path: Path) -> VideoProbe:
@@ -752,6 +771,47 @@ def rectify_viewport(
     )
     transform = cv2.getPerspectiveTransform(src, dst)
     return cv2.warpPerspective(source_rgb, transform, (width, height), flags=interpolation)
+
+
+@lru_cache(maxsize=1)
+def _viridis_lookup_table_rgb() -> np.ndarray:
+    values = np.arange(256, dtype=np.uint8).reshape(-1, 1)
+    bgr = cv2.applyColorMap(values, cv2.COLORMAP_VIRIDIS)
+    return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB).reshape(256, 3)
+
+
+def _correct_viewport_rgb(
+    frame_rgb: np.ndarray,
+    settings: ViewportVisibilitySettings,
+) -> np.ndarray:
+    span = max(settings.high - settings.low, 1e-6)
+    normalized = frame_rgb.astype(np.float32) / 255.0
+    corrected = np.clip((normalized - settings.low) / span, 0.0, 1.0)
+    return np.power(corrected, settings.gamma, dtype=np.float32)
+
+
+def _viewport_luminance(corrected_rgb: np.ndarray) -> np.ndarray:
+    return np.tensordot(
+        corrected_rgb,
+        np.array([0.2126, 0.7152, 0.0722], dtype=np.float32),
+        axes=([-1], [0]),
+    )
+
+
+def apply_viewport_visibility(
+    frame_rgb: np.ndarray,
+    settings: ViewportVisibilitySettings,
+) -> np.ndarray:
+    if not settings.enabled:
+        return frame_rgb
+
+    corrected_rgb = _correct_viewport_rgb(frame_rgb, settings)
+    if not settings.map_to_viridis:
+        return np.ascontiguousarray(np.round(corrected_rgb * 255.0).astype(np.uint8))
+
+    luminance = _viewport_luminance(corrected_rgb)
+    mapped_idx = np.clip(np.round(luminance * 255.0), 0, 255).astype(np.uint8)
+    return np.ascontiguousarray(_viridis_lookup_table_rgb()[mapped_idx])
 
 
 def preprocess_frame(
