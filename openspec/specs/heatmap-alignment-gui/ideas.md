@@ -29,6 +29,7 @@ Useful implementation posture:
 - Prefer small, measured changes over architecture rewrites.
 - Preserve the simple one-camera/one-H5 workflow even if future abstractions support more sources.
 - Avoid putting raw brainstorm items into the accepted spec; use this file for ideas and OpenSpec changes for committed work.
+- When delegating implementation to another agent, include direct links/paths to the relevant OpenSpec proposal, design, spec, tasks, and this ideas file in addition to conversational context.
 
 ## Likely Next Candidates
 
@@ -68,6 +69,7 @@ Known issues:
 - Whitespace around axes can be tightened.
 - Label density and tick formatting may need tuning for small overlays.
 - The default lower-left overlay may need styling presets for readability.
+- The GUI preview should match the exported result closely enough that users can trust it before spending time on export.
 
 Possible directions:
 - Use a consistent style function for preview and export.
@@ -75,6 +77,18 @@ Possible directions:
 - Add compact and full plot presets.
 - Add optional colorbar support.
 - Tune margins with fixed minimums so labels do not get clipped.
+- Add preview/export visual parity checks for plot layout, font sizing, axes, and colorbar behavior.
+
+### Timeline polish
+
+The current timeline is intentionally compact and focused, but future polish could make temporal alignment easier and less ambiguous.
+
+Possible directions:
+- Add horizontal zoom and pan for longer recordings.
+- Add `Fit All` and `Fit Overlap` actions.
+- Add optional overlap shading if users still find the two-track relationship confusing.
+- Improve tick density and labels as zoom changes.
+- Preserve the simple H5-fixed, camera-draggable model unless a broader timeline model is explicitly needed.
 
 ## Useful But Lower Priority
 
@@ -83,7 +97,8 @@ Possible directions:
 Move long-running work off the main GUI path so the app remains interactive.
 
 Possible directions:
-- Load camera/H5 files without freezing the UI.
+- Load camera/H5 files without freezing the UI, especially for longer trials.
+- Show loading progress or a clear busy state when file probing, H5 loading, or proxy preparation takes noticeable time.
 - Export while the user can continue reviewing or preparing another session.
 - Generate or rebuild proxy videos in the background.
 - Decode likely-nearby frames around the current time in the background.
@@ -102,6 +117,17 @@ Possible directions:
 - Provide a clear proxy cache action.
 - Surface cache location and approximate cache size.
 - Track proxy generation errors in a user-visible way.
+
+### Export robustness
+
+Improve export behavior around unusual files, failures, and partial outputs.
+
+Possible directions:
+- Keep deleting partial output files on failure or cancellation.
+- Make export failure messages more specific when camera decode, H5 render, or video writer setup fails.
+- Add focused handling for camera files with unreadable trailing frames or inconsistent reported frame counts.
+- Add export smoke tests using synthetic videos with known bad/missing frames.
+- Keep codec-specific work measurement-driven rather than switching decode/export stacks speculatively.
 
 ### Source-resolution viewport processing
 
