@@ -10,7 +10,7 @@ Viewport geometry is already moving toward original camera coordinates. This cha
 
 - Make the GUI overlay preview and exported overlay use the same presentation model.
 - Base presentation sizing on original camera/source-resolution overlay geometry, not only the current preview widget size.
-- Centralize plot style derivation so font sizes, tick sizes, line widths, and margins are not scaled independently across call sites.
+- Centralize plot style selection so font sizes, tick sizes, line widths, and margins are not scaled independently across call sites.
 - Improve small-overlay readability without changing the export video workflow.
 - Keep the design compatible with future higher-resolution preview rendering.
 
@@ -31,9 +31,19 @@ Alternative considered: keep preview as scale `1.0` and multiply export styling 
 
 ### Centralize Style Derivation In The Renderer Layer
 
-`HeatmapPlotRenderer` should accept enough context to derive a plot style from logical/source overlay dimensions and actual render dimensions. The derived style should cover labels, tick labels, tick lengths, axis line widths, image interpolation, and subplot margins. Call sites should not manually scale individual Matplotlib properties.
+`HeatmapPlotRenderer` should accept enough context to apply one source-space plot style and scale that style for lower-resolution preview rendering. The shared style should cover labels, tick labels, tick lengths, axis line widths, image interpolation, and subplot margins. Call sites should not manually scale individual Matplotlib properties.
 
 Alternative considered: scale only `tick_params(labelsize=...)` during export. That is smaller, but it leaves margins, labels, tick marks, and future style properties inconsistent.
+
+### Use Explicit Source-Space Defaults Instead Of Auto-Growing With Overlay Size
+
+The default source-space plot style should be explicit, for example fixed font, tick, line, and source-space pixel margin values used by export/source rendering. Preview should scale those values by the render-to-source ratio. The implementation should not grow font sizes or margins automatically as the export overlay gets larger; future user-configurable plot styling can replace these defaults directly.
+
+Alternative considered: compute source font sizes from overlay dimensions with upper and lower clamps. That preserved parity after preview scaling, but it made normal output dependent on hidden saturation thresholds and would fight a future user-controlled font size setting.
+
+### Scale Margins Like Other Source-Space Style Values
+
+Margins should be defined as source-space pixel defaults, then scaled for lower-resolution preview rendering in the same way as fonts, tick marks, and line widths. Matplotlib requires fractional subplot margins, so the renderer should convert the scaled pixel margins into fractions for the actual render size. Compact overlays may shrink margins enough to preserve a valid plot body, but normal overlays should not allocate whitespace as a fixed percentage of overlay size.
 
 ### Keep Presentation Settings Internal For This Change
 
@@ -43,7 +53,7 @@ Alternative considered: include axes/colorbar toggles now. That expands UI, pers
 
 ## Risks / Trade-offs
 
-- Source-space styling may make the current low-resolution preview text look slightly smaller or tighter than before. Mitigation: clamp derived font and margin values so the preview remains readable at current overlay sizes.
+- Source-space styling may make the current low-resolution preview text look slightly smaller or tighter than before. Mitigation: choose readable source-space defaults and scale preview from them consistently.
 - Exact pixel parity is unrealistic because preview and export are rendered at different resolutions and then viewed/scaled differently. Mitigation: require matching visual proportions rather than byte-identical images.
-- Matplotlib layout can clip labels if margins are too aggressive. Mitigation: derive margins through one shared function with minimum pixel/relative bounds and cover small overlays in tests.
+- Matplotlib layout can clip labels if margins are too aggressive. Mitigation: keep margins in the shared source-space style, convert them consistently for each render size, and cover compact overlays in tests.
 - Rendering more carefully sized figures may expose performance cost during scrubbing. Mitigation: keep the existing overlay preview freeze behavior while dragging and reuse renderer/canvas rebuilds only when output size or style context changes.
