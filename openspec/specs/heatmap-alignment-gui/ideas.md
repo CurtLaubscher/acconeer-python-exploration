@@ -11,12 +11,14 @@ Current architecture notes:
 - Core session/video/heatmap logic lives in `user_tools/heatmap_alignment_core.py`.
 - Shared Sparse IQ heatmap rendering helpers live in `user_tools/sparse_iq_heatmap_common.py`.
 - The GUI uses a disposable local preview proxy for responsive camera playback, while sessions store the original camera video path.
-- Preview geometry is currently stored in preview-space coordinates.
+- Viewport geometry is now intended to be stored in original camera video coordinates; preview/proxy drawing maps it into display coordinates.
+- The viewport preview has a source-resolution paused render path: after interaction settles, the app can warp from the original camera frame into the current viewport preview size.
 - Export reopens the original-resolution camera video and composites a plotted H5 heatmap overlay into the scaled export rectangle.
 - Xcorr prototype code exists, but GUI xcorr is intentionally disabled for MVP due to performance and reliability concerns.
 
 Current priority signals:
-- Viewport visibility transforms are likely the most useful next alignment aid because manual spatial/temporal alignment was made harder by low-contrast camera-captured heatmap colors.
+- Basic viewport visibility transforms and source-resolution paused preview have been implemented, but the color match still does not feel right enough to call the enhancement algorithm solved.
+- A focused color-matching improvement is likely the next alignment-aid candidate if manual comparison remains difficult.
 - Export dialog settings and overlay plot formatting are plausible near-term changes because export is already useful and the output styling can be improved incrementally.
 - Background/async processing is attractive but not urgent for the current workflow of manually processing about 5-10 trials.
 - Batch workflows are intentionally not prioritized because each trial still needs manual review.
@@ -30,18 +32,19 @@ Useful implementation posture:
 
 ## Likely Next Candidates
 
-### Viewport visibility transforms
+### Viewport color matching
 
-Manual alignment can be difficult because the camera-captured monitor colors are sometimes hard to interpret after rectification. Add preview transforms that make the warped viewport easier to compare against the rendered H5 heatmap.
+Manual alignment can be difficult because the camera-captured monitor colors are sometimes hard to interpret after rectification. The first viewport enhancement pass provides low/high/gamma correction plus optional luminance-to-viridis mapping, but live use suggests that this is not enough to make the captured viewport closely resemble the rendered H5 heatmap.
 
 Possible directions:
-- Contrast/gamma adjustment for the rectified viewport.
-- Grayscale or luminance-only view.
-- Edge-emphasis view.
-- Colormap-like remapping to make low-contrast heatmap structure easier to see.
-- Side-by-side or toggleable comparison modes that preserve the current raw view.
+- Auto levels for the rectified viewport, probably percentile-based, as a quick starting point for low/high values.
+- Palette matching using an optimized 3D lookup table that maps camera RGB to nearest viridis colors.
+- Flicker comparison between the rectified viewport and rendered H5 heatmap in the same panel.
+- Sample-based calibration where the user marks low/background, mid, and high colors from the camera-captured heatmap.
+- Better preset defaults for the existing low/high/gamma controls.
+- Keep raw/enhanced toggling fast so transforms remain a comparison aid rather than hidden truth.
 
-This is a likely prerequisite before investing more time in xcorr, because xcorr quality depends on making the camera-derived viewport more comparable to the rendered truth.
+This is a likely prerequisite before investing more time in xcorr, because xcorr quality depends on making the camera-derived viewport more comparable to rendered truth.
 
 ### Export dialog settings
 
@@ -100,17 +103,17 @@ Possible directions:
 - Surface cache location and approximate cache size.
 - Track proxy generation errors in a user-visible way.
 
-### High-quality background viewport processing
+### Source-resolution viewport processing
 
-Precompute expensive high-quality derived video data while the user works.
+The current paused source-resolution viewport preview is a single-frame, latest-request-wins path. Future work could make this more proactive or cached if needed.
 
 Possible directions:
-- Pre-warp original-resolution camera footage into a high-quality viewport proxy.
-- Replace low-quality viewport preview with high-quality frames when ready.
-- Render high-quality paused frames after the user stops scrubbing or dragging.
+- Pre-warp original-resolution camera footage into a source-resolution viewport proxy.
+- Cache recently requested source-resolution viewport frames.
+- Render nearby paused frames after the user stops scrubbing or dragging.
 - Keep low-quality frames available immediately as the fallback interaction path.
 
-This is related to async processing, but specifically targets high-quality preview and not just responsiveness.
+This is related to async processing, but specifically targets viewport visual quality and not just responsiveness.
 
 ## Alignment Assistance
 
@@ -159,14 +162,14 @@ Considerations:
 - Avoid schema churn unless there is a concrete reason.
 - The existing `AlignmentSession` dataclass already uses the right conceptual name.
 
-### Source-coordinate geometry
+### Source-coordinate geometry follow-ups
 
-The MVP stores viewport and export overlay geometry in preview-space coordinates. Future higher-quality workflows may benefit from storing source-coordinate geometry too.
+Viewport geometry has moved toward original camera coordinates. Remaining geometry questions are mostly about consistency and future export/overlay behavior.
 
 Possible directions:
-- Store both preview and source dimensions in the session.
-- Store geometry normalized to source dimensions.
-- Add migration logic for existing sessions.
+- Decide whether export overlay geometry should remain preview-space or move to source/normalized coordinates.
+- Store source dimensions explicitly in the session if future compatibility needs it.
+- Consider normalized geometry if sessions need to survive source video transcoding/resizing.
 - Keep proxy files disposable and excluded from session state.
 
 ### More general data source framework
