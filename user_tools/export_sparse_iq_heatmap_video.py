@@ -20,19 +20,18 @@ from PIL import Image
 
 from acconeer.exptool import a121
 from acconeer.exptool.a121 import algo
-
-
-@dataclass
-class _PlotInputs:
-    record: a121.Record
-    sensor_config: a121.SensorConfig
-    metadata: a121.Metadata
-    results: list[a121.Result]
-    ticks: np.ndarray
-    ticks_per_second: int
-    fps: float
-    sensor_id: int
-    record_timestamp: str
+from sparse_iq_heatmap_common import (
+    HeatmapRecord,
+    color_max_for_dvm,
+    distance_velocity_map,
+    fixed_color_level,
+    load_heatmap_record,
+    recording_fps,
+    resolve_selection_indices,
+    select_frame_indices,
+    select_subsweep,
+    timestamp_text,
+)
 
 
 @dataclass
@@ -42,46 +41,6 @@ class _PreparedPlot:
     ax: plt.Axes
     image: matplotlib.image.AxesImage
     timestamp_artist: matplotlib.text.Text
-
-
-def _recording_fps(ticks: np.ndarray, ticks_per_second: int) -> float:
-    if len(ticks) < 2:
-        return 1.0
-
-    intervals_s = np.diff(ticks) / ticks_per_second
-    return float(1.0 / np.mean(intervals_s))
-
-
-def _timestamp_text(
-    timestamp_mode: str,
-    record_timestamp: str,
-    ticks: np.ndarray,
-    ticks_per_second: int,
-    frame_idx: int,
-) -> str:
-    elapsed_s = float((ticks[frame_idx] - ticks[0]) / ticks_per_second)
-
-    if timestamp_mode == "none":
-        return ""
-    if timestamp_mode == "absolute":
-        try:
-            absolute_time = datetime.fromisoformat(record_timestamp) + timedelta(seconds=elapsed_s)
-            return absolute_time.isoformat(timespec="milliseconds")
-        except ValueError:
-            return f"{record_timestamp} + {elapsed_s:.3f} s"
-
-    return f"t = {elapsed_s:.3f} s"
-
-
-def _distance_velocity_map(subframe: np.ndarray) -> np.ndarray:
-    hanning_window = np.hanning(subframe.shape[0])[:, np.newaxis]
-    z_ft = np.fft.fftshift(np.fft.fft(subframe * hanning_window, axis=0), axes=(0,))
-    return np.abs(z_ft)
-
-
-def _color_max_for_dvm(dvm: np.ndarray) -> float:
-    return max(float(1.05 * np.max(dvm)), 1e-12)
-
 
 def _make_figure(
     first_dvm: np.ndarray,
@@ -145,14 +104,14 @@ def _update_frame_plot(
     ticks: np.ndarray,
     ticks_per_second: int,
 ) -> None:
-    dvm = _distance_velocity_map(results[frame_idx].subframes[subsweep_idx])
+    dvm = distance_velocity_map(results[frame_idx].subframes[subsweep_idx])
     image.set_data(dvm)
     if not fixed_levels:
-        image.set_clim(color_min, _color_max_for_dvm(dvm))
+        image.set_clim(color_min, color_max_for_dvm(dvm))
 
     ax.set_title(f"{title} - frame {frame_idx + 1}/{len(results)}")
     timestamp_artist.set_text(
-        _timestamp_text(
+        timestamp_text(
             timestamp_mode,
             record_timestamp,
             ticks,
@@ -169,180 +128,10 @@ def _canvas_to_pil(fig: plt.Figure) -> Image.Image:
     return Image.fromarray(rgba[:, :, :3])
 
 
-def _load_plot_inputs(
-    h5_path: Path, session_idx: int, group_idx: int, entry_idx: int
-) -> _PlotInputs:
-    record = a121.open_record(h5_path)
-
-    try:
-        session = record.session(session_idx)
-        session_config = session.session_config
-        sensor_items = list(session_config.groups[group_idx].items())
-        sensor_id, sensor_config = sensor_items[entry_idx]
-    except IndexError as exc:
-        record.close()
-        msg = f"Could not find group {group_idx}, entry {entry_idx} in session {session_idx}."
-        raise ValueError(msg) from exc
-    except Exception:
-        record.close()
-        raise
-
-    metadata = session.extended_metadata[group_idx][sensor_id]
-    results = [extended_result[group_idx][sensor_id] for extended_result in session.extended_results]
-    ticks = np.array([result.tick for result in results], dtype=np.int64)
-    ticks_per_second = record.server_info.ticks_per_second
-    fps = _recording_fps(ticks, ticks_per_second)
-    record_timestamp = record.timestamp
-
-    return _PlotInputs(
-        record=record,
-        sensor_config=sensor_config,
-        metadata=metadata,
-        results=results,
-        ticks=ticks,
-        ticks_per_second=ticks_per_second,
-        fps=fps,
-        sensor_id=sensor_id,
-        record_timestamp=record_timestamp,
-    )
-
-
-def _resolve_index(
-    *,
-    requested_idx: int | None,
-    count: int,
-    option_name: str,
-    item_name: str,
-    parent_description: str,
-) -> int:
-    if count == 0:
-        msg = f"{parent_description} does not contain any {item_name}s."
-        raise ValueError(msg)
-
-    if requested_idx is None:
-        if count > 1:
-            print(
-                f"Warning: {parent_description} contains {count} {item_name}s; "
-                f"defaulting to --{option_name} 0.",
-                file=sys.stderr,
-            )
-        return 0
-
-    if 0 <= requested_idx < count:
-        return requested_idx
-
-    msg = (
-        f"{parent_description} does not contain {item_name} {requested_idx}. "
-        f"Valid indices are 0 to {count - 1}."
-    )
-    raise ValueError(msg)
-
-
-def _resolve_selection_indices(
-    *,
-    h5_path: Path,
-    session_idx: int | None,
-    group_idx: int | None,
-    entry_idx: int | None,
-    subsweep_idx: int | None,
-) -> tuple[int, int, int, int]:
-    record = a121.open_record(h5_path)
-
-    try:
-        resolved_session_idx = _resolve_index(
-            requested_idx=session_idx,
-            count=record.num_sessions,
-            option_name="session",
-            item_name="session",
-            parent_description="recording",
-        )
-
-        session = record.session(resolved_session_idx)
-        resolved_group_idx = _resolve_index(
-            requested_idx=group_idx,
-            count=len(session.session_config.groups),
-            option_name="group",
-            item_name="group",
-            parent_description=f"session {resolved_session_idx}",
-        )
-
-        sensor_items = list(session.session_config.groups[resolved_group_idx].items())
-        resolved_entry_idx = _resolve_index(
-            requested_idx=entry_idx,
-            count=len(sensor_items),
-            option_name="entry",
-            item_name="entry",
-            parent_description=f"group {resolved_group_idx} in session {resolved_session_idx}",
-        )
-
-        sensor_id, sensor_config = sensor_items[resolved_entry_idx]
-        resolved_subsweep_idx = _resolve_index(
-            requested_idx=subsweep_idx,
-            count=len(sensor_config.subsweeps),
-            option_name="subsweep",
-            item_name="subsweep",
-            parent_description=f"sensor {sensor_id} in group {resolved_group_idx}",
-        )
-    finally:
-        record.close()
-
-    return (
-        resolved_session_idx,
-        resolved_group_idx,
-        resolved_entry_idx,
-        resolved_subsweep_idx,
-    )
-
-
-def _select_subsweep(plot_inputs: _PlotInputs, subsweep_idx: int) -> a121.SubsweepConfig:
-    if len(plot_inputs.results) == 0:
-        msg = "The selected sensor entry does not contain any frames to export."
-        raise ValueError(msg)
-
-    try:
-        return plot_inputs.sensor_config.subsweeps[subsweep_idx]
-    except IndexError as exc:
-        msg = f"Could not find subsweep {subsweep_idx} for sensor {plot_inputs.sensor_id}."
-        raise ValueError(msg) from exc
-
-
-def _select_frame_indices(
-    results: list[a121.Result], every_n: int, max_frames: int | None
-) -> list[int]:
-    if max_frames is not None and max_frames < 0:
-        msg = f"--max-frames must be non-negative, got {max_frames}."
-        raise ValueError(msg)
-
-    frame_indices = list(range(0, len(results), every_n))
-    if max_frames is not None:
-        frame_indices = frame_indices[:max_frames]
-
-    if len(frame_indices) == 0:
-        msg = (
-            "No frames were selected for export. Adjust --max-frames or choose a recording "
-            "with available frames."
-        )
-        raise ValueError(msg)
-
-    return frame_indices
-
-
-def _fixed_color_level(
-    *, color_max: float | None, results: list[a121.Result], subsweep_idx: int, frame_indices: list[int]
-) -> float:
-    if color_max is not None:
-        return color_max
-
-    return max(
-        _color_max_for_dvm(_distance_velocity_map(results[i].subframes[subsweep_idx]))
-        for i in frame_indices
-    )
-
-
 def _prepare_plot(
     *,
     h5_path: Path,
-    plot_inputs: _PlotInputs,
+    plot_inputs: HeatmapRecord,
     subsweep_idx: int,
     subsweep: a121.SubsweepConfig,
     color_min: float,
@@ -353,7 +142,7 @@ def _prepare_plot(
     velocities_m_s, velocity_resolution = algo.get_approx_fft_vels(
         plot_inputs.metadata, plot_inputs.sensor_config
     )
-    first_dvm = _distance_velocity_map(plot_inputs.results[frame_indices[0]].subframes[subsweep_idx])
+    first_dvm = distance_velocity_map(plot_inputs.results[frame_indices[0]].subframes[subsweep_idx])
     title = f"{h5_path.name} - sensor {plot_inputs.sensor_id}, subsweep {subsweep_idx + 1}"
     fig, ax, image, timestamp_artist = _make_figure(
         first_dvm=first_dvm,
@@ -379,7 +168,7 @@ def _write_mp4(
     ffmpeg: Path | None,
     effective_fps: float,
     prepared_plot: _PreparedPlot,
-    plot_inputs: _PlotInputs,
+    plot_inputs: HeatmapRecord,
     subsweep_idx: int,
     frame_indices: list[int],
     fixed_levels: bool,
@@ -418,7 +207,7 @@ def _write_gif(
     output_path: Path,
     effective_fps: float,
     prepared_plot: _PreparedPlot,
-    plot_inputs: _PlotInputs,
+    plot_inputs: HeatmapRecord,
     subsweep_idx: int,
     frame_indices: list[int],
     fixed_levels: bool,
@@ -502,11 +291,11 @@ def export_heatmap_video(
     theme: str,
 ) -> None:
     _apply_theme(theme)
-    plot_inputs = _load_plot_inputs(h5_path, session_idx, group_idx, entry_idx)
+    plot_inputs = load_heatmap_record(h5_path, session_idx, group_idx, entry_idx)
 
     try:
-        subsweep = _select_subsweep(plot_inputs, subsweep_idx)
-        frame_indices = _select_frame_indices(plot_inputs.results, every_n, max_frames)
+        subsweep = select_subsweep(plot_inputs, subsweep_idx)
+        frame_indices = select_frame_indices(plot_inputs.results, every_n, max_frames)
         prepared_plot = _prepare_plot(
             h5_path=h5_path,
             plot_inputs=plot_inputs,
@@ -518,7 +307,7 @@ def export_heatmap_video(
         )
 
         if fixed_levels:
-            max_level = _fixed_color_level(
+            max_level = fixed_color_level(
                 color_max=color_max,
                 results=plot_inputs.results,
                 subsweep_idx=subsweep_idx,
@@ -562,7 +351,7 @@ def export_heatmap_video(
         )
     finally:
         plt.close("all")
-        plot_inputs.record.close()
+        plot_inputs.close()
 
 
 def main() -> None:
@@ -640,7 +429,7 @@ def main() -> None:
     args = parser.parse_args()
 
     output = args.output or args.input.with_name(f"{args.input.stem}_velocity_distance.gif")
-    session_idx, group_idx, entry_idx, subsweep_idx = _resolve_selection_indices(
+    session_idx, group_idx, entry_idx, subsweep_idx = resolve_selection_indices(
         h5_path=args.input,
         session_idx=args.session,
         group_idx=args.group,
