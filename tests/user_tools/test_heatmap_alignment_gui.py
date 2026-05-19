@@ -5,6 +5,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+
 from PySide6 import QtCore
 from PySide6.QtWidgets import QApplication
 
@@ -14,13 +15,21 @@ USER_TOOLS_PATH = REPO_ROOT / "user_tools"
 if str(USER_TOOLS_PATH) not in sys.path:
     sys.path.insert(0, str(USER_TOOLS_PATH))
 
-from heatmap_alignment_gui import CornerEditorWidget  # noqa: E402
+from heatmap_alignment_gui import CornerEditorWidget, build_argument_parser  # noqa: E402
 
 
 @pytest.fixture(autouse=True, scope="module")
 def qapplication() -> QApplication:
     app = QApplication.instance()
     return app if app is not None else QApplication()
+
+
+def test_build_argument_parser_accepts_peaks() -> None:
+    parser = build_argument_parser()
+    args = parser.parse_args(["--h5", "trial.h5", "--peaks", "peaks.json"])
+
+    assert args.h5 == Path("trial.h5")
+    assert args.peaks == Path("peaks.json")
 
 
 def test_corner_editor_edge_drag_applies_delta_once() -> None:

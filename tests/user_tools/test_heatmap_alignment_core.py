@@ -17,8 +17,8 @@ from heatmap_alignment_core import (  # noqa: E402
     CameraTrack,
     CameraVideoSource,
     ExportOverlaySettings,
-    HeatmapTrack,
     HeatmapPlotRenderer,
+    HeatmapTrack,
     PreprocessSettings,
     RenderSettings,
     TimelineState,
@@ -26,12 +26,22 @@ from heatmap_alignment_core import (  # noqa: E402
     ViewportVisibilitySettings,
     apply_viewport_visibility,
     compute_xcorr_diagnostics,
+    import_peak_distance_json_for_heatmap,
     load_alignment_artifact,
     prepare_proxy_video,
     rectify_viewport,
     save_alignment_artifact,
     scale_viewport_corners,
     validate_alignment_session,
+)
+from sparse_iq_peak_distance_core import (  # noqa: E402
+    DEFAULT_PEAK_THRESHOLD,
+    STATUS_DETECTED,
+    FramePeakMeasurement,
+    PeakDistanceDatasourceSettings,
+    PeakDistanceExportResult,
+    PeakDistanceMetadata,
+    write_peak_distance_json,
 )
 
 
@@ -106,6 +116,31 @@ def test_alignment_artifact_roundtrip(tmp_path: Path) -> None:
     assert loaded.viewport_visibility.map_to_viridis is True
     assert loaded.viewport_visibility.low == pytest.approx(0.1)
     assert loaded.viewport_visibility.gamma == pytest.approx(1.4)
+
+
+def test_alignment_artifact_roundtrip_with_peak_distance_datasource(tmp_path: Path) -> None:
+    camera_path = tmp_path / "camera.mp4"
+    heatmap_path = tmp_path / "truth.h5"
+    peak_json_path = tmp_path / "peaks.json"
+    camera_path.write_bytes(b"")
+    heatmap_path.write_bytes(b"")
+    peak_json_path.write_text("{}", encoding="utf-8")
+
+    session = AlignmentSession(
+        camera_track=CameraTrack(path=str(camera_path), fps=30.0, duration_s=2.0, frame_count=60),
+        heatmap_track=HeatmapTrack(path=str(heatmap_path), duration_s=2.0, fps=10.0),
+        peak_distance_datasource=PeakDistanceDatasourceSettings(
+            path=str(peak_json_path),
+            visible=False,
+        ),
+    )
+
+    artifact_path = tmp_path / "alignment_with_peaks.json"
+    save_alignment_artifact(session, artifact_path)
+    loaded = load_alignment_artifact(artifact_path)
+
+    assert loaded.peak_distance_datasource.path == str(peak_json_path)
+    assert loaded.peak_distance_datasource.visible is False
 
 
 def test_alignment_artifact_defaults_missing_viewport_visibility_settings(tmp_path: Path) -> None:
@@ -648,3 +683,54 @@ def test_compute_xcorr_diagnostics_peaks_near_zero_lag() -> None:
 
     best_lag = lag_values[np.nanargmax(scores)]
     assert best_lag == pytest.approx(0.0, abs=0.11)
+
+
+def _sample_peak_distance_export_result() -> PeakDistanceExportResult:
+    metadata = PeakDistanceMetadata(
+        source_path=str(Path("C:/logs/recording.h5")),
+        source_name="recording.h5",
+        session_index=0,
+        group_index=0,
+        entry_index=0,
+        sensor_id=1,
+        subsweep_index=0,
+        source_frame_count=2,
+        source_duration_s=0.1,
+        ticks_per_second=100,
+        threshold=DEFAULT_PEAK_THRESHOLD,
+        zero_velocity_bin_index=4,
+        zero_velocity_m_s=0.0,
+    )
+    measurements = (
+        FramePeakMeasurement(
+            frame_index=0,
+            source_tick=10,
+            time_s=0.0,
+            absolute_time=None,
+            status=STATUS_DETECTED,
+            peak_distance_m=1.2,
+            candidate_peak_distance_m=1.2,
+            peak_strength=800.0,
+        ),
+        FramePeakMeasurement(
+            frame_index=1,
+            source_tick=20,
+            time_s=0.1,
+            absolute_time=None,
+            status=STATUS_DETECTED,
+            peak_distance_m=1.3,
+            candidate_peak_distance_m=1.3,
+            peak_strength=700.0,
+        ),
+    )
+    return PeakDistanceExportResult(metadata=metadata, measurements=measurements)
+
+
+def test_import_peak_distance_json_without_heatmap_defers_validation(tmp_path: Path) -> None:
+    json_path = tmp_path / "peaks.json"
+    write_peak_distance_json(_sample_peak_distance_export_result(), json_path)
+
+    datasource, warnings = import_peak_distance_json_for_heatmap(json_path, None)
+
+    assert warnings == []
+    assert len(datasource.measurements) == 2
