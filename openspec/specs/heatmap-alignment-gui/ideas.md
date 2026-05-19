@@ -75,8 +75,10 @@ Possible directions:
 - Use a consistent style function for preview and export.
 - Scale fonts based on overlay pixel size.
 - Add compact and full plot presets.
+- Add user-editable overlay plot styling for font sizes, tick styling, margins/padding, and related readability settings.
 - Add optional colorbar support.
 - Tune margins with fixed minimums so labels do not get clipped.
+- Re-render the overlay heatmap while the user drags to resize the export overlay, possibly throttled or lower quality if needed.
 - Add preview/export visual parity checks for plot layout, font sizing, axes, and colorbar behavior.
 
 ### Timeline polish
@@ -117,6 +119,16 @@ Possible directions:
 - Provide a clear proxy cache action.
 - Surface cache location and approximate cache size.
 - Track proxy generation errors in a user-visible way.
+
+### Session launch shortcuts
+
+Make it faster to resume a saved alignment session directly from the command line.
+
+Possible directions:
+- Add a CLI argument for launching the workbench with an existing session JSON file.
+- Restore the saved session after startup using the same load behavior as the GUI session picker.
+- Keep existing camera/H5 startup arguments working for new sessions.
+- Define precedence clearly if both a session file and individual source paths are provided.
 
 ### Export robustness
 

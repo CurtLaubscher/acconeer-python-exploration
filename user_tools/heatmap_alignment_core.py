@@ -113,6 +113,20 @@ class ProxyVideoResult:
     state: Literal["original", "proxy_reused", "proxy_built", "proxy_unavailable"]
 
 
+@dataclass(frozen=True)
+class OverlayPlotPresentation:
+    source_size: tuple[int, int]
+    render_size: tuple[int, int]
+    font_size_pt: float
+    tick_label_size_pt: float
+    tick_length_pt: float
+    axis_line_width_pt: float
+    left_margin: float
+    right_margin: float
+    bottom_margin: float
+    top_margin: float
+
+
 @dataclass
 class AlignmentSession:
     """Serializable state for one alignment session."""
@@ -125,7 +139,9 @@ class AlignmentSession:
     preprocess: PreprocessSettings = field(default_factory=PreprocessSettings)
     timeline: TimelineState = field(default_factory=TimelineState)
     export_overlay: ExportOverlaySettings = field(default_factory=ExportOverlaySettings)
-    viewport_visibility: ViewportVisibilitySettings = field(default_factory=ViewportVisibilitySettings)
+    viewport_visibility: ViewportVisibilitySettings = field(
+        default_factory=ViewportVisibilitySettings
+    )
 
     def to_json_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -148,7 +164,9 @@ class AlignmentSession:
             preprocess=PreprocessSettings(**payload["preprocess"]),
             timeline=TimelineState(**payload["timeline"]),
             export_overlay=ExportOverlaySettings(**payload.get("export_overlay", {})),
-            viewport_visibility=ViewportVisibilitySettings(**payload.get("viewport_visibility", {})),
+            viewport_visibility=ViewportVisibilitySettings(
+                **payload.get("viewport_visibility", {})
+            ),
         )
         validate_alignment_session(session)
         return session
@@ -537,12 +555,8 @@ class CameraVideoSource:
         return self._prepare_frame(frame)
 
     def _prepare_frame(self, frame_bgr: np.ndarray) -> np.ndarray:
-        if (
-            self.preview_scale < 1.0
-            and (
-                frame_bgr.shape[1] != self.preview_width
-                or frame_bgr.shape[0] != self.preview_height
-            )
+        if self.preview_scale < 1.0 and (
+            frame_bgr.shape[1] != self.preview_width or frame_bgr.shape[0] != self.preview_height
         ):
             frame_bgr = cv2.resize(
                 frame_bgr,
@@ -623,7 +637,9 @@ class HeatmapTruthSource:
             fps=self.record.fps,
         )
 
-    def update_render_settings(self, color_min: float, color_max: float | None, fixed_levels: bool) -> None:
+    def update_render_settings(
+        self, color_min: float, color_max: float | None, fixed_levels: bool
+    ) -> None:
         self.color_min = color_min
         self.color_max = color_max
         self.fixed_levels = fixed_levels
@@ -653,6 +669,18 @@ class HeatmapTruthSource:
 class HeatmapPlotRenderer:
     """Reusable Matplotlib-backed heatmap plot renderer with axes."""
 
+    _MIN_SOURCE_DIMENSION = 32
+    _DEFAULT_SOURCE_FONT_SIZE_PT = 30.0
+    _DEFAULT_SOURCE_TICK_LABEL_SIZE_PT = 22.0
+    _DEFAULT_SOURCE_TICK_LENGTH_PT = 8.0
+    _DEFAULT_SOURCE_AXIS_LINE_WIDTH_PT = 2.0
+    _DEFAULT_SOURCE_LEFT_MARGIN_PX = 170.0
+    _DEFAULT_SOURCE_RIGHT_MARGIN_PX = 35.0
+    _DEFAULT_SOURCE_BOTTOM_MARGIN_PX = 115.0
+    _DEFAULT_SOURCE_TOP_MARGIN_PX = 35.0
+    _MIN_PLOT_BODY_SOURCE_WIDTH_PX = 32.0
+    _MIN_PLOT_BODY_SOURCE_HEIGHT_PX = 32.0
+
     def __init__(
         self,
         heatmap_source: HeatmapTruthSource,
@@ -669,7 +697,9 @@ class HeatmapPlotRenderer:
         self._color_max_for_dvm = color_max_for_dvm
 
         subsweep = select_subsweep(heatmap_source.record, heatmap_source.subsweep_idx)
-        axes = heatmap_axes(heatmap_source.record.metadata, heatmap_source.record.sensor_config, subsweep)
+        axes = heatmap_axes(
+            heatmap_source.record.metadata, heatmap_source.record.sensor_config, subsweep
+        )
         distance_step = np.median(np.diff(axes.distances_m)) if len(axes.distances_m) > 1 else 1.0
         self.extent = (
             float(axes.distances_m[0] - 0.5 * distance_step),
@@ -683,14 +713,110 @@ class HeatmapPlotRenderer:
         self._ax = None
         self._image = None
         self._output_size = (0, 0)
+        self._presentation: OverlayPlotPresentation | None = None
         self._rebuild_canvas(output_size)
 
-    def render_frame(self, frame_idx: int, *, output_size: tuple[int, int]) -> np.ndarray:
-        if output_size != self._output_size:
-            self._rebuild_canvas(output_size)
+    @classmethod
+    def derive_presentation(
+        cls,
+        *,
+        source_size: tuple[int, int],
+        render_size: tuple[int, int],
+    ) -> OverlayPlotPresentation:
+        source_width = max(cls._MIN_SOURCE_DIMENSION, int(round(source_size[0])))
+        source_height = max(cls._MIN_SOURCE_DIMENSION, int(round(source_size[1])))
+        render_width = max(1, int(round(render_size[0])))
+        render_height = max(1, int(round(render_size[1])))
+
+        render_scale = max(
+            0.01,
+            min(
+                render_width / source_width,
+                render_height / source_height,
+            ),
+        )
+
+        font_size_pt = max(0.1, cls._DEFAULT_SOURCE_FONT_SIZE_PT * render_scale)
+        tick_label_size_pt = max(0.1, cls._DEFAULT_SOURCE_TICK_LABEL_SIZE_PT * render_scale)
+        tick_length_pt = max(0.1, cls._DEFAULT_SOURCE_TICK_LENGTH_PT * render_scale)
+        axis_line_width_pt = max(0.05, cls._DEFAULT_SOURCE_AXIS_LINE_WIDTH_PT * render_scale)
+        left_margin_px, right_margin_px = cls._resolve_margin_pair(
+            before_px=cls._DEFAULT_SOURCE_LEFT_MARGIN_PX * render_scale,
+            after_px=cls._DEFAULT_SOURCE_RIGHT_MARGIN_PX * render_scale,
+            size_px=render_width,
+            min_body_px=min(
+                render_width,
+                max(1.0, cls._MIN_PLOT_BODY_SOURCE_WIDTH_PX * render_scale),
+            ),
+        )
+        bottom_margin_px, top_margin_px = cls._resolve_margin_pair(
+            before_px=cls._DEFAULT_SOURCE_BOTTOM_MARGIN_PX * render_scale,
+            after_px=cls._DEFAULT_SOURCE_TOP_MARGIN_PX * render_scale,
+            size_px=render_height,
+            min_body_px=min(
+                render_height,
+                max(1.0, cls._MIN_PLOT_BODY_SOURCE_HEIGHT_PX * render_scale),
+            ),
+        )
+
+        return OverlayPlotPresentation(
+            source_size=(source_width, source_height),
+            render_size=(render_width, render_height),
+            font_size_pt=font_size_pt,
+            tick_label_size_pt=tick_label_size_pt,
+            tick_length_pt=tick_length_pt,
+            axis_line_width_pt=axis_line_width_pt,
+            left_margin=left_margin_px / render_width,
+            right_margin=1.0 - (right_margin_px / render_width),
+            bottom_margin=bottom_margin_px / render_height,
+            top_margin=1.0 - (top_margin_px / render_height),
+        )
+
+    @staticmethod
+    def _resolve_margin_pair(
+        *,
+        before_px: float,
+        after_px: float,
+        size_px: int,
+        min_body_px: float,
+    ) -> tuple[float, float]:
+        if size_px <= 0:
+            return 0.0, 0.0
+
+        available_margin_px = max(0.0, float(size_px) - min_body_px)
+        total_margin_px = max(0.0, before_px) + max(0.0, after_px)
+        if total_margin_px <= 0.0 or available_margin_px <= 0.0:
+            return 0.0, 0.0
+
+        margin_scale = min(1.0, available_margin_px / total_margin_px)
+        return before_px * margin_scale, after_px * margin_scale
+
+    def presentation_for(
+        self,
+        *,
+        output_size: tuple[int, int],
+        source_size: tuple[int, int] | None = None,
+    ) -> OverlayPlotPresentation:
+        return self.derive_presentation(
+            source_size=source_size or output_size,
+            render_size=output_size,
+        )
+
+    def render_frame(
+        self,
+        frame_idx: int,
+        *,
+        output_size: tuple[int, int],
+        source_size: tuple[int, int] | None = None,
+    ) -> np.ndarray:
+        presentation = self.presentation_for(output_size=output_size, source_size=source_size)
+        if output_size != self._output_size or presentation != self._presentation:
+            self._rebuild_canvas(output_size, presentation)
 
         dvm = self._distance_velocity_map(
-            self.heatmap_source.record.results[frame_idx].subframes[self.heatmap_source.subsweep_idx]
+            self.heatmap_source.record.results[frame_idx].subframes[
+                self.heatmap_source.subsweep_idx
+            ]
         )
         self._image.set_data(dvm)
         if self.heatmap_source.fixed_levels:
@@ -714,11 +840,16 @@ class HeatmapPlotRenderer:
         rgba = np.frombuffer(self._canvas.buffer_rgba(), dtype=np.uint8).reshape(height, width, 4)
         return np.ascontiguousarray(rgba[:, :, :3].copy())
 
-    def _rebuild_canvas(self, output_size: tuple[int, int]) -> None:
-        width, height = output_size
-        width = max(32, int(width))
-        height = max(32, int(height))
-        self._output_size = (width, height)
+    def _rebuild_canvas(
+        self,
+        output_size: tuple[int, int],
+        presentation: OverlayPlotPresentation | None = None,
+    ) -> None:
+        if presentation is None:
+            presentation = self.presentation_for(output_size=output_size)
+        width, height = presentation.render_size
+        self._output_size = presentation.render_size
+        self._presentation = presentation
         dpi = 100.0
         figure = Figure(figsize=(width / dpi, height / dpi), dpi=dpi)
         canvas = FigureCanvasAgg(figure)
@@ -732,12 +863,30 @@ class HeatmapPlotRenderer:
             interpolation="nearest",
             cmap="viridis",
             vmin=self.heatmap_source.color_min,
-            vmax=max(self.heatmap_source.color_min + 1e-12, float(self.heatmap_source.color_max or 1.0)),
+            vmax=max(
+                self.heatmap_source.color_min + 1e-12, float(self.heatmap_source.color_max or 1.0)
+            ),
         )
         ax.set_xlabel("Distance (m)")
         ax.set_ylabel("Velocity (m/s)")
-        ax.tick_params(labelsize=8)
-        figure.subplots_adjust(left=0.20, right=0.98, bottom=0.22, top=0.98)
+        ax.xaxis.label.set_size(presentation.font_size_pt)
+        ax.yaxis.label.set_size(presentation.font_size_pt)
+        ax.tick_params(
+            axis="both",
+            which="both",
+            labelsize=presentation.tick_label_size_pt,
+            length=presentation.tick_length_pt,
+            width=presentation.axis_line_width_pt,
+            pad=max(1.0, presentation.tick_label_size_pt * 0.3),
+        )
+        for spine in ax.spines.values():
+            spine.set_linewidth(presentation.axis_line_width_pt)
+        figure.subplots_adjust(
+            left=presentation.left_margin,
+            right=presentation.right_margin,
+            bottom=presentation.bottom_margin,
+            top=presentation.top_margin,
+        )
 
         self._figure = figure
         self._canvas = canvas
@@ -888,7 +1037,9 @@ def compute_xcorr_diagnostics(
 
     sample_count = session.preprocess.sample_count
     center_time_s = session.timeline.current_time_s
-    base_truth_times = center_time_s + np.arange(sample_count) / max(heatmap_source.record.fps, 1.0)
+    base_truth_times = center_time_s + np.arange(sample_count) / max(
+        heatmap_source.record.fps, 1.0
+    )
     max_heatmap_time = heatmap_source.record.duration_s
     base_truth_times = base_truth_times[base_truth_times <= max_heatmap_time]
     if len(base_truth_times) == 0:

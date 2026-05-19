@@ -1,9 +1,7 @@
 ## Purpose
 
 Provide a standalone workbench for manually aligning one camera video track with one H5-rendered Sparse IQ heatmap track, saving that alignment as a session, and exporting a synced video with a plotted heatmap overlay.
-
 ## Requirements
-
 ### Requirement: Standalone alignment workbench
 The system SHALL provide a standalone PySide6 user tool for aligning one camera video track with one H5-rendered Sparse IQ heatmap track.
 
@@ -201,7 +199,7 @@ The system SHALL save and load JSON alignment session files containing the state
 - **THEN** the system restores the source selections, viewport geometry, render settings, temporal offset, and preview state described by the session file
 
 ### Requirement: Synced video export overlay
-The system SHALL let the user place a rectangular export overlay on the camera preview and use it to export a synced video with an H5 heatmap plot composited onto original-resolution camera footage.
+The system SHALL let the user place a rectangular export overlay on the camera preview and use it to export a synced video with an H5 heatmap plot composited onto original-resolution camera footage. The plotted heatmap overlay presentation SHALL be derived from a shared source-space style model so the GUI overlay preview and exported overlay have matching visual proportions for labels, ticks, margins, axes, and heatmap content.
 
 #### Scenario: Adjust export overlay
 - **WHEN** the user drags the export overlay center, edge, or corner on the camera preview
@@ -213,7 +211,15 @@ The system SHALL let the user place a rectangular export overlay on the camera p
 
 #### Scenario: Preview export overlay content
 - **WHEN** the export overlay and overlay preview are visible
-- **THEN** the system renders a low-quality plotted H5 heatmap with axes inside the overlay rectangle on top of the camera preview
+- **THEN** the system renders a low-quality plotted H5 heatmap with axes inside the overlay rectangle on top of the camera preview using the same source-space presentation model as export
+
+#### Scenario: Match exported overlay presentation
+- **WHEN** the export overlay preview is visible and the user exports a synced video using the same overlay rectangle
+- **THEN** the exported plotted heatmap overlay uses matching visual proportions for plot labels, tick labels, tick marks, axes, margins, and heatmap body relative to the overlay shown in the GUI preview
+
+#### Scenario: Bound compact overlay presentation
+- **WHEN** the export overlay rectangle is too small to fit the normal plot presentation cleanly
+- **THEN** the system uses bounded plot styling so labels, ticks, margins, and heatmap body remain inside the plotted overlay image while preserving preview/export visual parity
 
 #### Scenario: Export synced video
 - **WHEN** the user exports a synced video
@@ -233,3 +239,4 @@ The system SHALL structure alignment state so the MVP's camera video and H5 heat
 #### Scenario: Persist MVP tracks
 - **WHEN** the system saves an alignment session
 - **THEN** the session file represents the camera video and H5 heatmap as distinct tracks with their source configuration and timing state
+

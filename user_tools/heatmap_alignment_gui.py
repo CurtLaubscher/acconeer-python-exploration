@@ -161,8 +161,12 @@ class DoubleRangeSlider(QtWidgets.QWidget):
 
             painter.setPen(QtGui.QPen(QtGui.QColor("#0f1720"), 1))
             painter.setBrush(QtGui.QBrush(handle_color))
-            painter.drawEllipse(QtCore.QPointF(lower_x, center_y), self._handle_radius, self._handle_radius)
-            painter.drawEllipse(QtCore.QPointF(upper_x, center_y), self._handle_radius, self._handle_radius)
+            painter.drawEllipse(
+                QtCore.QPointF(lower_x, center_y), self._handle_radius, self._handle_radius
+            )
+            painter.drawEllipse(
+                QtCore.QPointF(upper_x, center_y), self._handle_radius, self._handle_radius
+            )
         finally:
             painter.end()
 
@@ -301,7 +305,9 @@ class AlignmentTimelineWidget(QtWidgets.QWidget):
                     f"{tick_time:.1f}",
                 )
 
-            camera_rect = self._track_rect(self._camera_track_start_s(), self._camera_duration_s, row=0)
+            camera_rect = self._track_rect(
+                self._camera_track_start_s(), self._camera_duration_s, row=0
+            )
             heatmap_rect = self._track_rect(0.0, self._heatmap_duration_s, row=1)
 
             if camera_rect.width() > 0:
@@ -326,7 +332,9 @@ class AlignmentTimelineWidget(QtWidgets.QWidget):
         if event.button() != QtCore.Qt.MouseButton.LeftButton:
             return
         press_time_s = self._time_at_x(event.position().x(), clamp=True)
-        camera_rect = self._track_rect(self._camera_track_start_s(), self._camera_duration_s, row=0)
+        camera_rect = self._track_rect(
+            self._camera_track_start_s(), self._camera_duration_s, row=0
+        )
         if camera_rect.contains(event.position()) and self._camera_duration_s > 0:
             self._dragging_camera = True
             self._frozen_range_start_s = self._range_start_s
@@ -402,7 +410,9 @@ class AlignmentTimelineWidget(QtWidgets.QWidget):
 
     def _plot_rect(self) -> QtCore.QRectF:
         rect = self.contentsRect()
-        return QtCore.QRectF(rect.left() + 72, rect.top() + 6, max(1, rect.width() - 84), max(1, rect.height() - 12))
+        return QtCore.QRectF(
+            rect.left() + 72, rect.top() + 6, max(1, rect.width() - 84), max(1, rect.height() - 12)
+        )
 
     def _track_rect(self, start_s: float, duration_s: float, *, row: int) -> QtCore.QRectF:
         plot_rect = self._plot_rect()
@@ -545,8 +555,12 @@ class ViewportEditorWidget(ImagePreview):
 
     def _center_hit_test(self, widget_pos: QtCore.QPointF) -> bool:
         rect = self.contentsRect()
-        center_width = min(rect.width(), max(rect.width() * self._center_fraction, self._center_min_size))
-        center_height = min(rect.height(), max(rect.height() * self._center_fraction, self._center_min_size))
+        center_width = min(
+            rect.width(), max(rect.width() * self._center_fraction, self._center_min_size)
+        )
+        center_height = min(
+            rect.height(), max(rect.height() * self._center_fraction, self._center_min_size)
+        )
         center_rect = QtCore.QRectF(
             rect.center().x() - center_width / 2.0,
             rect.center().y() - center_height / 2.0,
@@ -716,8 +730,7 @@ class CornerEditorWidget(QtWidgets.QWidget):
                 return
 
             display_corners = [
-                self._image_to_widget(QtCore.QPointF(float(x), float(y)))
-                for x, y in self._corners
+                self._image_to_widget(QtCore.QPointF(float(x), float(y))) for x, y in self._corners
             ]
             pen = QtGui.QPen(QtGui.QColor("#ff4d4f"), 2)
             painter.setPen(pen)
@@ -902,14 +915,15 @@ class CornerEditorWidget(QtWidgets.QWidget):
         rect = self._target_rect()
         scale_x = width / rect.width()
         scale_y = height / rect.height()
-        return QtCore.QPointF((point.x() - rect.left()) * scale_x, (point.y() - rect.top()) * scale_y)
+        return QtCore.QPointF(
+            (point.x() - rect.left()) * scale_x, (point.y() - rect.top()) * scale_y
+        )
 
     def _display_corners(self) -> list[QtCore.QPointF]:
         if self._corners is None:
             return []
         return [
-            self._image_to_widget(QtCore.QPointF(float(x), float(y)))
-            for x, y in self._corners
+            self._image_to_widget(QtCore.QPointF(float(x), float(y))) for x, y in self._corners
         ]
 
     def _handle_hit_test(self, widget_pos: QtCore.QPointF) -> int | None:
@@ -1051,7 +1065,10 @@ class CornerEditorWidget(QtWidgets.QWidget):
             QtCore.QPointF(self._export_overlay_rect.right(), self._export_overlay_rect.bottom())
         )
         display_rect = QtCore.QRectF(top_left, bottom_right).normalized()
-        if self._export_overlay_preview_enabled and self._export_overlay_preview_pixmap is not None:
+        if (
+            self._export_overlay_preview_enabled
+            and self._export_overlay_preview_pixmap is not None
+        ):
             painter.drawPixmap(display_rect.toRect(), self._export_overlay_preview_pixmap)
 
         pen = QtGui.QPen(QtGui.QColor("#38bdf8"), 2)
@@ -1093,7 +1110,9 @@ class CornerEditorWidget(QtWidgets.QWidget):
         return None
 
     def _export_overlay_center_hit_test(self, image_pos: QtCore.QPointF) -> bool:
-        return self._export_overlay_rect is not None and self._export_overlay_rect.contains(image_pos)
+        return self._export_overlay_rect is not None and self._export_overlay_rect.contains(
+            image_pos
+        )
 
     def _translate_export_overlay(self, image_pos: QtCore.QPointF) -> None:
         if (
@@ -1503,10 +1522,16 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.sample_count_spin.valueChanged.connect(self._preprocess_settings_changed)
         self.camera_view.corners_changed.connect(self._corners_changed)
         self.camera_view.export_overlay_changed.connect(self._export_overlay_changed)
-        self.camera_view.export_overlay_visibility_changed.connect(self._set_export_overlay_visible)
-        self.camera_view.export_overlay_preview_toggled.connect(self._set_export_overlay_preview_enabled)
+        self.camera_view.export_overlay_visibility_changed.connect(
+            self._set_export_overlay_visible
+        )
+        self.camera_view.export_overlay_preview_toggled.connect(
+            self._set_export_overlay_preview_enabled
+        )
         self.camera_view.export_overlay_reset_requested.connect(self._reset_export_overlay)
-        self.camera_view.export_overlay_drag_active_changed.connect(self._set_export_overlay_drag_active)
+        self.camera_view.export_overlay_drag_active_changed.connect(
+            self._set_export_overlay_drag_active
+        )
         self.viewport_view.resized.connect(self._viewport_preview_resized)
         self.viewport_view.corner_dragged.connect(self._viewport_corner_dragged)
         self.viewport_view.edge_dragged.connect(self._viewport_edge_dragged)
@@ -1788,7 +1813,9 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
     def _slider_to_time(self, slider_value: int) -> None:
         range_start_s, range_end_s = self._timeline_bounds_s()
         span_s = range_end_s - range_start_s
-        self.session.timeline.current_time_s = range_start_s if span_s <= 0 else range_start_s + span_s * slider_value / 10000.0
+        self.session.timeline.current_time_s = (
+            range_start_s if span_s <= 0 else range_start_s + span_s * slider_value / 10000.0
+        )
         self._reanchor_playback_clock()
         self._sync_previews(refresh_xcorr=False, camera_access_hint="scrub")
 
@@ -1985,7 +2012,13 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         range_start_s, range_end_s = self._timeline_bounds_s()
         span_s = range_end_s - range_start_s
         self.current_time_slider.blockSignals(True)
-        value = 0 if span_s <= 0 else int(round(10000 * (self.session.timeline.current_time_s - range_start_s) / span_s))
+        value = (
+            0
+            if span_s <= 0
+            else int(
+                round(10000 * (self.session.timeline.current_time_s - range_start_s) / span_s)
+            )
+        )
         self.current_time_slider.setValue(int(np.clip(value, 0, 10000)))
         self.current_time_slider.blockSignals(False)
 
@@ -2022,7 +2055,11 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
     def _initialize_default_export_overlay(self, *, force: bool = False) -> None:
         if self.camera_source is None:
             return
-        if not force and self.session.export_overlay.width > 0.0 and self.session.export_overlay.height > 0.0:
+        if (
+            not force
+            and self.session.export_overlay.width > 0.0
+            and self.session.export_overlay.height > 0.0
+        ):
             return
         preview_width = self.camera_source.preview_width
         preview_height = self.camera_source.preview_height
@@ -2108,7 +2145,17 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         if self.heatmap_source is None:
             self._overlay_plot_renderer = None
             return
-        self._overlay_plot_renderer = HeatmapPlotRenderer(self.heatmap_source, output_size=(160, 120))
+        self._overlay_plot_renderer = HeatmapPlotRenderer(
+            self.heatmap_source, output_size=(160, 120)
+        )
+
+    def _overlay_presentation_source_size(self) -> tuple[int, int] | None:
+        source_rect = self._scaled_export_overlay_rect(original=True)
+        source_width = int(round(source_rect.width()))
+        source_height = int(round(source_rect.height()))
+        if source_width <= 0 or source_height <= 0:
+            return None
+        return source_width, source_height
 
     def _scaled_export_overlay_rect(self, *, original: bool) -> QtCore.QRectF:
         overlay = self.session.export_overlay
@@ -2227,7 +2274,9 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         if not self.session.viewport.corners:
             return
         if self._viewport_drag_start_corners is None:
-            self._viewport_drag_start_corners = np.asarray(self.session.viewport.corners, dtype=np.float32)
+            self._viewport_drag_start_corners = np.asarray(
+                self.session.viewport.corners, dtype=np.float32
+            )
         start_point = self._camera_point_from_viewport_point(start_x, start_y, viewport_size)
         current_point = self._camera_point_from_viewport_point(current_x, current_y, viewport_size)
         if start_point is None or current_point is None:
@@ -2253,7 +2302,9 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         if not self.session.viewport.corners:
             return
         if self._viewport_drag_start_corners is None:
-            self._viewport_drag_start_corners = np.asarray(self.session.viewport.corners, dtype=np.float32)
+            self._viewport_drag_start_corners = np.asarray(
+                self.session.viewport.corners, dtype=np.float32
+            )
         prev_point = self._camera_point_from_viewport_point(prev_x, prev_y, viewport_size)
         current_point = self._camera_point_from_viewport_point(current_x, current_y, viewport_size)
         if prev_point is None or current_point is None:
@@ -2277,7 +2328,9 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         if not self.session.viewport.corners:
             return
         if self._viewport_drag_start_corners is None:
-            self._viewport_drag_start_corners = np.asarray(self.session.viewport.corners, dtype=np.float32)
+            self._viewport_drag_start_corners = np.asarray(
+                self.session.viewport.corners, dtype=np.float32
+            )
         prev_point = self._camera_point_from_viewport_point(prev_x, prev_y, viewport_size)
         current_point = self._camera_point_from_viewport_point(current_x, current_y, viewport_size)
         if prev_point is None or current_point is None:
@@ -2309,10 +2362,19 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
 
         truth_frame = None
         if self.heatmap_source is not None:
-            if 0.0 <= self.session.timeline.current_time_s <= self.session.heatmap_track.duration_s:
-                _, truth_frame = self.heatmap_source.frame_at_seconds(self.session.timeline.current_time_s)
+            if (
+                0.0
+                <= self.session.timeline.current_time_s
+                <= self.session.heatmap_track.duration_s
+            ):
+                _, truth_frame = self.heatmap_source.frame_at_seconds(
+                    self.session.timeline.current_time_s
+                )
         self.truth_view.set_frame(truth_frame)
-        if not self.session.export_overlay.visible or not self.session.export_overlay.preview_enabled:
+        if (
+            not self.session.export_overlay.visible
+            or not self.session.export_overlay.preview_enabled
+        ):
             self.camera_view.set_export_overlay_preview_frame(None)
         elif (
             not self._freeze_export_overlay_preview
@@ -2321,13 +2383,17 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             and self.session.export_overlay.width > 0.0
             and self.session.export_overlay.height > 0.0
         ):
-            frame_idx, _ = self.heatmap_source.frame_at_seconds(self.session.timeline.current_time_s)
+            frame_idx, _ = self.heatmap_source.frame_at_seconds(
+                self.session.timeline.current_time_s
+            )
+            presentation_source_size = self._overlay_presentation_source_size()
             preview_frame = self._overlay_plot_renderer.render_frame(
                 frame_idx,
                 output_size=(
                     int(round(self.session.export_overlay.width)),
                     int(round(self.session.export_overlay.height)),
                 ),
+                source_size=presentation_source_size,
             )
             self.camera_view.set_export_overlay_preview_frame(preview_frame)
         elif not self._freeze_export_overlay_preview:
@@ -2388,7 +2454,9 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.nudge_left_large.setEnabled(enabled)
         self.nudge_right_large.setEnabled(enabled)
         self.save_artifact_button.setEnabled(has_camera and has_heatmap)
-        self.export_synced_button.setEnabled(has_camera and has_heatmap and not self._export_in_progress)
+        self.export_synced_button.setEnabled(
+            has_camera and has_heatmap and not self._export_in_progress
+        )
         self._update_viewport_visibility_controls_enabled()
 
     def _viewport_preview_resized(self) -> None:
@@ -2477,11 +2545,15 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         assert self.heatmap_source is not None
         output_path.parent.mkdir(parents=True, exist_ok=True)
         export_succeeded = False
-        original_camera_source = CameraVideoSource(Path(self.session.camera_track.path), max_preview_dimension=None)
+        original_camera_source = CameraVideoSource(
+            Path(self.session.camera_track.path), max_preview_dimension=None
+        )
         try:
             export_rect = self._scaled_export_overlay_rect(original=True)
             export_fps = max(self.session.camera_track.fps, self.session.heatmap_track.fps, 1.0)
-            output_frame_count = max(1, int(math.ceil(self.session.heatmap_track.duration_s * export_fps)))
+            output_frame_count = max(
+                1, int(math.ceil(self.session.heatmap_track.duration_s * export_fps))
+            )
             writer = cv2.VideoWriter(
                 str(output_path),
                 cv2.VideoWriter_fourcc(*"mp4v"),
@@ -2495,7 +2567,10 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             if export_rect.width() > 0.0 and export_rect.height() > 0.0:
                 plot_renderer = HeatmapPlotRenderer(
                     self.heatmap_source,
-                    output_size=(int(round(export_rect.width())), int(round(export_rect.height()))),
+                    output_size=(
+                        int(round(export_rect.width())),
+                        int(round(export_rect.height())),
+                    ),
                 )
             first_camera_frame = self._first_usable_frame(original_camera_source)
             last_camera_frame = self._last_usable_frame(original_camera_source)
@@ -2517,9 +2592,14 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
                     composed = camera_frame.copy()
                     if plot_renderer is not None:
                         heatmap_frame_idx, _ = self.heatmap_source.frame_at_seconds(h5_time_s)
+                        presentation_source_size = (
+                            int(round(export_rect.width())),
+                            int(round(export_rect.height())),
+                        )
                         overlay_rgb = plot_renderer.render_frame(
                             heatmap_frame_idx,
-                            output_size=(int(round(export_rect.width())), int(round(export_rect.height()))),
+                            output_size=presentation_source_size,
+                            source_size=presentation_source_size,
                         )
                         left = int(round(export_rect.x()))
                         top = int(round(export_rect.y()))
@@ -2535,7 +2615,10 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
                                 source_left : source_left + (right - left),
                             ]
                     writer.write(cv2.cvtColor(composed, cv2.COLOR_RGB2BGR))
-                    if frame_idx % max(1, output_frame_count // 100) == 0 or frame_idx == output_frame_count - 1:
+                    if (
+                        frame_idx % max(1, output_frame_count // 100) == 0
+                        or frame_idx == output_frame_count - 1
+                    ):
                         progress.setValue(int(round(100 * (frame_idx + 1) / output_frame_count)))
                         QtWidgets.QApplication.processEvents()
             finally:

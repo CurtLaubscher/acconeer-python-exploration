@@ -14,16 +14,17 @@ if str(USER_TOOLS_PATH) not in sys.path:
 
 from heatmap_alignment_core import (  # noqa: E402
     AlignmentSession,
-    ViewportVisibilitySettings,
-    apply_viewport_visibility,
     CameraTrack,
     CameraVideoSource,
     ExportOverlaySettings,
     HeatmapTrack,
+    HeatmapPlotRenderer,
     PreprocessSettings,
     RenderSettings,
     TimelineState,
     ViewportGeometry,
+    ViewportVisibilitySettings,
+    apply_viewport_visibility,
     compute_xcorr_diagnostics,
     load_alignment_artifact,
     prepare_proxy_video,
@@ -32,6 +33,16 @@ from heatmap_alignment_core import (  # noqa: E402
     scale_viewport_corners,
     validate_alignment_session,
 )
+
+
+def _resolved_margin_pixels(presentation: object) -> tuple[float, float, float, float]:
+    render_width, render_height = presentation.render_size
+    return (
+        presentation.left_margin * render_width,
+        (1.0 - presentation.right_margin) * render_width,
+        presentation.bottom_margin * render_height,
+        (1.0 - presentation.top_margin) * render_height,
+    )
 
 
 def test_alignment_artifact_roundtrip(tmp_path: Path) -> None:
@@ -145,7 +156,9 @@ def test_alignment_artifact_defaults_missing_viewport_visibility_settings(tmp_pa
 
 def test_validate_alignment_session_rejects_bad_corners() -> None:
     session = AlignmentSession(
-        viewport=ViewportGeometry(corners=[[0.0, 0.0], [1.0, 1.0]], output_width=1, output_height=1)
+        viewport=ViewportGeometry(
+            corners=[[0.0, 0.0], [1.0, 1.0]], output_width=1, output_height=1
+        )
     )
 
     with pytest.raises(ValueError, match="exactly four"):
@@ -199,6 +212,144 @@ def test_scale_viewport_corners_roundtrips_between_native_and_proxy_sizes() -> N
     )
 
     assert np.allclose(restored, native_corners)
+
+
+def test_heatmap_plot_renderer_uses_matching_style_proportions_for_preview_and_export() -> None:
+    source_size = (360, 270)
+    preview_render_size = (240, 180)
+    export_render_size = source_size
+
+    preview = HeatmapPlotRenderer.derive_presentation(
+        source_size=source_size,
+        render_size=preview_render_size,
+    )
+    export = HeatmapPlotRenderer.derive_presentation(
+        source_size=source_size,
+        render_size=export_render_size,
+    )
+
+    preview_scale = min(
+        preview.render_size[0] / preview.source_size[0],
+        preview.render_size[1] / preview.source_size[1],
+    )
+
+    assert preview.font_size_pt == pytest.approx(export.font_size_pt * preview_scale, rel=0.05)
+    assert preview.tick_label_size_pt == pytest.approx(
+        export.tick_label_size_pt * preview_scale,
+        rel=0.05,
+    )
+    assert preview.tick_length_pt == pytest.approx(export.tick_length_pt * preview_scale, rel=0.05)
+    assert preview.axis_line_width_pt == pytest.approx(
+        export.axis_line_width_pt * preview_scale,
+        rel=0.10,
+    )
+    preview_left, preview_right, preview_bottom, preview_top = _resolved_margin_pixels(preview)
+    export_left, export_right, export_bottom, export_top = _resolved_margin_pixels(export)
+    assert preview_left == pytest.approx(export_left * preview_scale, rel=0.05)
+    assert preview_right == pytest.approx(export_right * preview_scale, rel=0.05)
+    assert preview_bottom == pytest.approx(export_bottom * preview_scale, rel=0.05)
+    assert preview_top == pytest.approx(export_top * preview_scale, rel=0.05)
+
+
+def test_heatmap_plot_renderer_keeps_fixed_source_style_across_overlay_sizes() -> None:
+    small_export = HeatmapPlotRenderer.derive_presentation(
+        source_size=(360, 270),
+        render_size=(360, 270),
+    )
+    large_export = HeatmapPlotRenderer.derive_presentation(
+        source_size=(1280, 960),
+        render_size=(1280, 960),
+    )
+
+    assert small_export.font_size_pt == pytest.approx(30.0)
+    assert small_export.tick_label_size_pt == pytest.approx(22.0)
+    assert small_export.tick_length_pt == pytest.approx(8.0)
+    assert small_export.axis_line_width_pt == pytest.approx(2.0)
+    assert _resolved_margin_pixels(small_export) == pytest.approx((170.0, 35.0, 115.0, 35.0))
+    assert large_export.font_size_pt == pytest.approx(small_export.font_size_pt)
+    assert large_export.tick_label_size_pt == pytest.approx(small_export.tick_label_size_pt)
+    assert large_export.tick_length_pt == pytest.approx(small_export.tick_length_pt)
+    assert large_export.axis_line_width_pt == pytest.approx(small_export.axis_line_width_pt)
+    assert _resolved_margin_pixels(large_export) == pytest.approx((170.0, 35.0, 115.0, 35.0))
+
+
+def test_heatmap_plot_renderer_scales_fixed_source_style_for_preview() -> None:
+    source_size = (1280, 960)
+    preview_render_size = (512, 384)
+
+    preview = HeatmapPlotRenderer.derive_presentation(
+        source_size=source_size,
+        render_size=preview_render_size,
+    )
+    export = HeatmapPlotRenderer.derive_presentation(
+        source_size=source_size,
+        render_size=source_size,
+    )
+
+    preview_scale = min(
+        preview.render_size[0] / preview.source_size[0],
+        preview.render_size[1] / preview.source_size[1],
+    )
+
+    assert export.font_size_pt == pytest.approx(30.0)
+    assert export.tick_label_size_pt == pytest.approx(22.0)
+    assert export.tick_length_pt == pytest.approx(8.0)
+    assert export.axis_line_width_pt == pytest.approx(2.0)
+    assert preview.font_size_pt == pytest.approx(export.font_size_pt * preview_scale)
+    assert preview.tick_label_size_pt == pytest.approx(export.tick_label_size_pt * preview_scale)
+    assert preview.tick_length_pt == pytest.approx(export.tick_length_pt * preview_scale)
+    assert preview.axis_line_width_pt == pytest.approx(export.axis_line_width_pt * preview_scale)
+    preview_left, preview_right, preview_bottom, preview_top = _resolved_margin_pixels(preview)
+    export_left, export_right, export_bottom, export_top = _resolved_margin_pixels(export)
+    assert preview_left == pytest.approx(export_left * preview_scale)
+    assert preview_right == pytest.approx(export_right * preview_scale)
+    assert preview_bottom == pytest.approx(export_bottom * preview_scale)
+    assert preview_top == pytest.approx(export_top * preview_scale)
+
+
+def test_heatmap_plot_renderer_bounds_compact_overlay_presentation() -> None:
+    compact = HeatmapPlotRenderer.derive_presentation(
+        source_size=(72, 54),
+        render_size=(72, 54),
+    )
+
+    left_margin_px, right_margin_px, bottom_margin_px, top_margin_px = _resolved_margin_pixels(
+        compact
+    )
+
+    assert compact.font_size_pt == pytest.approx(30.0)
+    assert compact.tick_label_size_pt == pytest.approx(22.0)
+    assert compact.tick_length_pt == pytest.approx(8.0)
+    assert compact.axis_line_width_pt == pytest.approx(2.0)
+    assert left_margin_px + right_margin_px == pytest.approx(40.0)
+    assert bottom_margin_px + top_margin_px == pytest.approx(22.0)
+    assert compact.render_size[0] * (compact.right_margin - compact.left_margin) == pytest.approx(
+        32.0
+    )
+    assert compact.render_size[1] * (compact.top_margin - compact.bottom_margin) == pytest.approx(
+        32.0
+    )
+
+
+def test_heatmap_plot_renderer_preserves_tiny_render_size() -> None:
+    tiny = HeatmapPlotRenderer.derive_presentation(
+        source_size=(16, 12),
+        render_size=(12, 9),
+    )
+
+    assert tiny.source_size == (32, 32)
+    assert tiny.render_size == (12, 9)
+    assert tiny.font_size_pt == pytest.approx(8.4375)
+    assert tiny.tick_label_size_pt == pytest.approx(6.1875)
+    assert tiny.tick_length_pt == pytest.approx(2.25)
+    assert tiny.axis_line_width_pt == pytest.approx(0.5625)
+    left_margin_px, right_margin_px, bottom_margin_px, top_margin_px = _resolved_margin_pixels(
+        tiny
+    )
+    assert left_margin_px + right_margin_px == pytest.approx(3.0)
+    assert bottom_margin_px + top_margin_px == pytest.approx(0.0)
+    assert tiny.render_size[0] * (tiny.right_margin - tiny.left_margin) == pytest.approx(9.0)
+    assert tiny.render_size[1] * (tiny.top_margin - tiny.bottom_margin) == pytest.approx(9.0)
 
 
 def test_apply_viewport_visibility_returns_raw_when_disabled() -> None:
@@ -280,10 +431,7 @@ def test_apply_viewport_visibility_maps_corrected_luminance_to_viridis() -> None
 class _FakeVideoCapture:
     def __init__(self, path: str) -> None:
         del path
-        self.frames = [
-            np.full((2, 3, 3), fill_value=value, dtype=np.uint8)
-            for value in range(6)
-        ]
+        self.frames = [np.full((2, 3, 3), fill_value=value, dtype=np.uint8) for value in range(6)]
         self.pos = 0
         self.set_calls = 0
         self.read_calls = 0
@@ -329,7 +477,9 @@ class _FakeVideoCapture:
         return None
 
 
-def test_camera_video_source_prefers_sequential_decode_for_playback(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_camera_video_source_prefers_sequential_decode_for_playback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     import heatmap_alignment_core as core
 
     fake_capture = _FakeVideoCapture("dummy")
@@ -378,7 +528,9 @@ def test_camera_video_source_uses_grab_for_skipped_playback_frames(
     assert fake_capture.read_calls == 2
 
 
-def test_prepare_proxy_video_skips_proxy_for_small_sources(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_prepare_proxy_video_skips_proxy_for_small_sources(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     import heatmap_alignment_core as core
 
     source_path = Path("small.mp4")
