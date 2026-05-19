@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+
 """Core models and services for the heatmap alignment GUI.
 
 This module is intended to be used from the Hatch-managed `app` environment
@@ -11,18 +12,23 @@ import os
 import shutil
 import subprocess
 import tempfile
-from hashlib import sha256
 from collections import OrderedDict
 from dataclasses import asdict, dataclass, field
 from functools import lru_cache
+from hashlib import sha256
 from pathlib import Path
-from typing import Any
-from typing import Literal
+from typing import Any, Literal
 
 import cv2
+import numpy as np
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
-import numpy as np
+from sparse_iq_peak_distance_core import (
+    LoadedPeakDistanceDatasource,
+    PeakDistanceDatasourceSettings,
+    load_peak_distance_json,
+    validate_peak_distance_import,
+)
 
 
 ARTIFACT_VERSION = 1
@@ -142,6 +148,9 @@ class AlignmentSession:
     viewport_visibility: ViewportVisibilitySettings = field(
         default_factory=ViewportVisibilitySettings
     )
+    peak_distance_datasource: PeakDistanceDatasourceSettings = field(
+        default_factory=PeakDistanceDatasourceSettings
+    )
 
     def to_json_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -166,6 +175,9 @@ class AlignmentSession:
             export_overlay=ExportOverlaySettings(**payload.get("export_overlay", {})),
             viewport_visibility=ViewportVisibilitySettings(
                 **payload.get("viewport_visibility", {})
+            ),
+            peak_distance_datasource=PeakDistanceDatasourceSettings(
+                **payload.get("peak_distance_datasource", {})
             ),
         )
         validate_alignment_session(session)
@@ -687,10 +699,12 @@ class HeatmapPlotRenderer:
         *,
         output_size: tuple[int, int],
     ) -> None:
-        from sparse_iq_heatmap_common import color_max_for_dvm
-        from sparse_iq_heatmap_common import distance_velocity_map
-        from sparse_iq_heatmap_common import heatmap_axes
-        from sparse_iq_heatmap_common import select_subsweep
+        from sparse_iq_heatmap_common import (
+            color_max_for_dvm,
+            distance_velocity_map,
+            heatmap_axes,
+            select_subsweep,
+        )
 
         self.heatmap_source = heatmap_source
         self._distance_velocity_map = distance_velocity_map
@@ -712,6 +726,7 @@ class HeatmapPlotRenderer:
         self._canvas: FigureCanvasAgg | None = None
         self._ax = None
         self._image = None
+        self._peak_artists: list[object] = []
         self._output_size = (0, 0)
         self._presentation: OverlayPlotPresentation | None = None
         self._rebuild_canvas(output_size)
@@ -808,6 +823,8 @@ class HeatmapPlotRenderer:
         *,
         output_size: tuple[int, int],
         source_size: tuple[int, int] | None = None,
+        peak_distance_m: float | None = None,
+        zero_velocity_m_s: float | None = None,
     ) -> np.ndarray:
         presentation = self.presentation_for(output_size=output_size, source_size=source_size)
         if output_size != self._output_size or presentation != self._presentation:
@@ -834,6 +851,7 @@ class HeatmapPlotRenderer:
         if resolved_max is None or resolved_max <= self.heatmap_source.color_min:
             resolved_max = self.heatmap_source.color_min + 1e-12
         self._image.set_clim(self.heatmap_source.color_min, resolved_max)
+        self._draw_peak_marker(peak_distance_m, zero_velocity_m_s)
 
         self._canvas.draw()
         width, height = self._canvas.get_width_height()
@@ -892,6 +910,62 @@ class HeatmapPlotRenderer:
         self._canvas = canvas
         self._ax = ax
         self._image = image
+        self._peak_artists = []
+
+    def _clear_peak_artists(self) -> None:
+        if self._ax is None:
+            self._peak_artists = []
+            return
+        for artist in self._peak_artists:
+            artist.remove()
+        self._peak_artists = []
+
+    def _draw_peak_marker(
+        self,
+        peak_distance_m: float | None,
+        zero_velocity_m_s: float | None,
+    ) -> None:
+        self._clear_peak_artists()
+        if self._ax is None or peak_distance_m is None or zero_velocity_m_s is None:
+            return
+        line = self._ax.axvline(
+            peak_distance_m,
+            color="#ff4040",
+            linewidth=1.5,
+            alpha=0.9,
+        )
+        marker = self._ax.plot(
+            peak_distance_m,
+            zero_velocity_m_s,
+            marker="o",
+            color="#ffdc40",
+            markersize=6,
+            markeredgecolor="#202020",
+            markeredgewidth=0.5,
+        )[0]
+        self._peak_artists = [line, marker]
+
+
+def import_peak_distance_json_for_heatmap(
+    json_path: Path,
+    heatmap_source: HeatmapTruthSource | None = None,
+) -> tuple[LoadedPeakDistanceDatasource, list[str]]:
+    datasource = load_peak_distance_json(json_path)
+    if heatmap_source is None:
+        return datasource, []
+
+    warnings = validate_peak_distance_import(
+        datasource,
+        heatmap_frame_count=len(heatmap_source.record.results),
+        heatmap_duration_s=heatmap_source.record.duration_s,
+        heatmap_path=heatmap_source.path,
+        session_idx=heatmap_source.record.session_idx,
+        group_idx=heatmap_source.record.group_idx,
+        entry_idx=heatmap_source.record.entry_idx,
+        subsweep_idx=heatmap_source.subsweep_idx,
+        sensor_id=heatmap_source.record.sensor_id,
+    )
+    return datasource, warnings
 
 
 def rectify_viewport(

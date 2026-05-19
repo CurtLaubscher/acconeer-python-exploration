@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+
 """PySide6 workbench for manual camera-to-heatmap alignment.
 
 Launch this tool through Hatch so it uses the repo-managed GUI/runtime
@@ -17,6 +18,7 @@ locations.
 Startup file arguments are supported, for example:
 
     hatch run app:heatmap-align -- --camera path\\to\\video.mp4 --h5 path\\to\\record.h5
+    hatch run app:heatmap-align -- --h5 path\\to\\record.h5 --peaks path\\to\\peaks.json
 """
 
 import argparse
@@ -24,21 +26,20 @@ import math
 import sys
 import time
 from pathlib import Path
+from typing import Literal
 
 import cv2
 import numpy as np
-import pyqtgraph as pg
-from PySide6 import QtCore, QtGui, QtWidgets
-
 from heatmap_alignment_core import (
     AlignmentSession,
-    apply_viewport_visibility,
     CameraTrack,
     CameraVideoSource,
     ExportOverlaySettings,
-    HeatmapTruthSource,
     HeatmapPlotRenderer,
-    ViewportVisibilitySettings,
+    HeatmapTruthSource,
+    LoadedPeakDistanceDatasource,
+    apply_viewport_visibility,
+    import_peak_distance_json_for_heatmap,
     load_alignment_artifact,
     prepare_proxy_video,
     rectify_viewport,
@@ -46,6 +47,17 @@ from heatmap_alignment_core import (
     scale_viewport_corners,
     validate_alignment_session,
 )
+from sparse_iq_heatmap_common import heatmap_axes, select_subsweep
+from sparse_iq_peak_distance_core import (
+    STATUS_DETECTED,
+    PeakDistanceJsonImportError,
+    annotate_heatmap_rgb_with_peak,
+    measurement_for_frame,
+)
+
+from PySide6 import QtCore, QtGui, QtWidgets
+
+import pyqtgraph as pg
 
 
 def rgb_to_qpixmap(frame_rgb: np.ndarray) -> QtGui.QPixmap:
@@ -1269,6 +1281,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._camera_reference_width = 0
         self._camera_reference_height = 0
         self._overlay_plot_renderer: HeatmapPlotRenderer | None = None
+        self.peak_distance_datasource: LoadedPeakDistanceDatasource | None = None
         self._freeze_export_overlay_preview = False
         self._export_in_progress = False
         self.settings = QtCore.QSettings("Acconeer", "HeatmapAlignmentWorkbench")
@@ -1326,6 +1339,14 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         load_h5_action = QtGui.QAction("Load H5...", self)
         load_h5_action.triggered.connect(self._load_h5_recording)
         file_menu.addAction(load_h5_action)
+
+        import_peak_action = QtGui.QAction("Import Peak-Distance JSON...", self)
+        import_peak_action.triggered.connect(self._import_peak_distance_json)
+        file_menu.addAction(import_peak_action)
+
+        clear_peak_action = QtGui.QAction("Clear Peak-Distance Datasource", self)
+        clear_peak_action.triggered.connect(self._clear_peak_distance_datasource)
+        file_menu.addAction(clear_peak_action)
 
         file_menu.addSeparator()
 
@@ -1457,6 +1478,12 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.viewport_gamma_spin.setSingleStep(0.05)
         self.viewport_gamma_spin.setValue(1.0)
         self.viewport_gamma_spin.setDecimals(2)
+        self.import_peak_json_button = QtWidgets.QPushButton("Import Peak JSON")
+        self.clear_peak_json_button = QtWidgets.QPushButton("Clear Peak JSON")
+        self.show_peak_marker_checkbox = QtWidgets.QCheckBox("Show Peak Marker")
+        self.show_peak_marker_checkbox.setChecked(True)
+        self.peak_datasource_label = QtWidgets.QLabel("No peak-distance JSON loaded.")
+        self.peak_datasource_label.setWordWrap(True)
         self.refresh_xcorr_button = QtWidgets.QPushButton("XCorr Disabled")
         self.refresh_xcorr_button.setEnabled(False)
         self.xcorr_status_label = QtWidgets.QLabel("Cross-correlation is disabled for v1.")
@@ -1479,9 +1506,13 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         render_layout.addWidget(self.lag_window_spin, 1, 1)
         render_layout.addWidget(QtWidgets.QLabel("Sample Count"), 1, 2)
         render_layout.addWidget(self.sample_count_spin, 1, 3)
-        render_layout.addWidget(self.xcorr_status_label, 2, 4, 1, 3)
-        render_layout.addWidget(self.refresh_xcorr_button, 2, 7)
-        render_layout.addWidget(self.xcorr_plot, 3, 0, 1, 8)
+        render_layout.addWidget(self.import_peak_json_button, 2, 0)
+        render_layout.addWidget(self.clear_peak_json_button, 2, 1)
+        render_layout.addWidget(self.show_peak_marker_checkbox, 2, 2)
+        render_layout.addWidget(self.peak_datasource_label, 2, 3, 1, 3)
+        render_layout.addWidget(self.xcorr_status_label, 3, 4, 1, 3)
+        render_layout.addWidget(self.refresh_xcorr_button, 3, 7)
+        render_layout.addWidget(self.xcorr_plot, 4, 0, 1, 8)
         viewport_controls_layout.addWidget(self.viewport_enhance_checkbox, 0, 0, 1, 2)
         viewport_controls_layout.addWidget(self.viewport_map_to_viridis_checkbox, 0, 2, 1, 2)
         viewport_controls_layout.addWidget(QtWidgets.QLabel("Range"), 1, 0)
@@ -1501,6 +1532,9 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.load_artifact_button.clicked.connect(self._load_artifact)
         self.save_artifact_button.clicked.connect(self._save_artifact)
         self.export_synced_button.clicked.connect(self._export_synced_video)
+        self.import_peak_json_button.clicked.connect(self._import_peak_distance_json)
+        self.clear_peak_json_button.clicked.connect(self._clear_peak_distance_datasource)
+        self.show_peak_marker_checkbox.toggled.connect(self._peak_marker_visibility_changed)
         self.play_button.clicked.connect(self._toggle_playback)
         self.timeline_view.playhead_changed.connect(self._timeline_playhead_changed)
         self.timeline_view.camera_offset_changed.connect(self._timeline_camera_offset_changed)
@@ -1560,6 +1594,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         if self.heatmap_source is not None:
             self.heatmap_source.close()
             self.heatmap_source = None
+        self.peak_distance_datasource = None
         self.camera_view.set_export_overlay_preview_frame(None)
         self.camera_view.set_corners(None)
         self.viewport_view.set_frame(None)
@@ -1618,7 +1653,192 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._update_controls_enabled_state()
         self._sync_previews(refresh_xcorr=False, camera_access_hint="auto")
         self.settings.setValue("last_h5_path", str(h5_path))
+        self._reload_peak_distance_datasource_from_session()
         self.statusBar().showMessage(f"Loaded H5 recording: {h5_path}")
+
+    def _peak_csv_rejection_message(self) -> str:
+        return (
+            "Reduced CSV peak-distance exports cannot be imported here. "
+            "Use the canonical JSON export from `hatch run app:peak-distances`."
+        )
+
+    def load_peak_distance_from_path(
+        self,
+        json_path: Path,
+        *,
+        show_dialogs: bool = False,
+        require_heatmap: bool = False,
+    ) -> bool:
+        if require_heatmap and self.heatmap_source is None:
+            if show_dialogs:
+                QtWidgets.QMessageBox.information(
+                    self,
+                    "Import peak-distance JSON",
+                    "Load an H5 recording before importing a peak-distance JSON file.",
+                )
+            return False
+
+        if json_path.suffix.lower() == ".csv":
+            message = self._peak_csv_rejection_message()
+            if show_dialogs:
+                QtWidgets.QMessageBox.warning(self, "Import peak-distance JSON", message)
+            else:
+                self.statusBar().showMessage(message)
+            return False
+
+        try:
+            datasource, warnings = import_peak_distance_json_for_heatmap(
+                json_path,
+                self.heatmap_source,
+            )
+        except ValueError as exc:
+            if isinstance(exc, PeakDistanceJsonImportError):
+                message = exc.user_message()
+                status_message = exc.primary_message
+            else:
+                message = str(exc)
+                status_message = f"Could not load peak-distance JSON: {exc}"
+            if show_dialogs:
+                QtWidgets.QMessageBox.warning(self, "Import failed", message)
+            else:
+                self.statusBar().showMessage(status_message)
+            return False
+
+        self.peak_distance_datasource = datasource
+        self.session.peak_distance_datasource.path = str(json_path)
+        self.session.peak_distance_datasource.visible = self.show_peak_marker_checkbox.isChecked()
+        self.settings.setValue("last_peak_json_path", str(json_path))
+        self._update_peak_datasource_controls()
+        self._sync_previews(refresh_xcorr=False, camera_access_hint="auto")
+
+        if self.heatmap_source is None:
+            message = (
+                f"Loaded peak-distance JSON: {json_path.name} "
+                "(H5 validation pending until a recording is loaded)."
+            )
+        else:
+            message = f"Loaded peak-distance JSON: {json_path.name}"
+        if warnings:
+            warning_text = "\n".join(f"- {warning}" for warning in warnings)
+            message = f"{message}\n\nWarnings:\n{warning_text}"
+            if show_dialogs:
+                QtWidgets.QMessageBox.warning(self, "Import warnings", message)
+        self.statusBar().showMessage(message.splitlines()[0])
+        return True
+
+    def _import_peak_distance_json(self) -> None:
+        filename, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Import peak-distance JSON",
+            self._dialog_start_path("last_peak_json_path"),
+            "Peak-distance JSON (*.json);;All files (*)",
+        )
+        if not filename:
+            return
+
+        self.load_peak_distance_from_path(
+            Path(filename),
+            show_dialogs=True,
+            require_heatmap=True,
+        )
+
+    def _clear_peak_distance_datasource(self) -> None:
+        self.peak_distance_datasource = None
+        self.session.peak_distance_datasource.path = ""
+        self.session.peak_distance_datasource.visible = True
+        self._update_peak_datasource_controls()
+        self._sync_previews(refresh_xcorr=False, camera_access_hint="auto")
+        self.statusBar().showMessage("Cleared imported peak-distance datasource.")
+
+    def _reload_peak_distance_datasource_from_session(self) -> None:
+        self.peak_distance_datasource = None
+        json_path_text = self.session.peak_distance_datasource.path
+        if not json_path_text or self.heatmap_source is None:
+            self._update_peak_datasource_controls()
+            return
+
+        json_path = Path(json_path_text)
+        if not json_path.exists():
+            self.statusBar().showMessage(
+                f"Peak-distance JSON not found and was not loaded: {json_path}"
+            )
+            self._update_peak_datasource_controls()
+            return
+
+        try:
+            datasource, warnings = import_peak_distance_json_for_heatmap(
+                json_path,
+                self.heatmap_source,
+            )
+        except ValueError as exc:
+            if isinstance(exc, PeakDistanceJsonImportError):
+                self.statusBar().showMessage(exc.primary_message)
+            else:
+                self.statusBar().showMessage(f"Could not reload peak-distance JSON: {exc}")
+            self._update_peak_datasource_controls()
+            return
+
+        self.peak_distance_datasource = datasource
+        if warnings:
+            self.statusBar().showMessage(
+                "Reloaded peak-distance JSON with warnings: " + "; ".join(warnings)
+            )
+        self._update_peak_datasource_controls()
+
+    def _peak_marker_visibility_changed(self, visible: bool) -> None:
+        self.session.peak_distance_datasource.visible = visible
+        self._sync_previews(refresh_xcorr=False, camera_access_hint="auto")
+
+    def _update_peak_datasource_controls(self) -> None:
+        datasource = self.peak_distance_datasource
+        has_datasource = datasource is not None
+        self.clear_peak_json_button.setEnabled(has_datasource)
+        self.show_peak_marker_checkbox.setEnabled(has_datasource)
+        if datasource is not None:
+            detected = sum(1 for row in datasource.measurements if row.status == STATUS_DETECTED)
+            self.peak_datasource_label.setText(
+                f"{datasource.path.name} ({detected}/{len(datasource.measurements)} detected)"
+            )
+        else:
+            self.peak_datasource_label.setText("No peak-distance JSON loaded.")
+
+    def _peak_overlay_for_frame(self, frame_idx: int) -> tuple[float, float] | None:
+        if (
+            self.peak_distance_datasource is None
+            or not self.session.peak_distance_datasource.visible
+        ):
+            return None
+        measurement = measurement_for_frame(self.peak_distance_datasource, frame_idx)
+        if measurement is None or measurement.status != STATUS_DETECTED:
+            return None
+        if measurement.peak_distance_m is None:
+            return None
+        return (
+            measurement.peak_distance_m,
+            self.peak_distance_datasource.metadata.zero_velocity_m_s,
+        )
+
+    def _annotate_truth_frame_with_peak(
+        self,
+        truth_frame: np.ndarray,
+        frame_idx: int,
+    ) -> np.ndarray:
+        peak_overlay = self._peak_overlay_for_frame(frame_idx)
+        if peak_overlay is None or self.heatmap_source is None:
+            return truth_frame
+        peak_distance_m, zero_velocity_m_s = peak_overlay
+        subsweep = select_subsweep(self.heatmap_source.record, self.heatmap_source.subsweep_idx)
+        axes = heatmap_axes(
+            self.heatmap_source.record.metadata,
+            self.heatmap_source.record.sensor_config,
+            subsweep,
+        )
+        return annotate_heatmap_rgb_with_peak(
+            truth_frame,
+            axes=axes,
+            peak_distance_m=peak_distance_m,
+            zero_velocity_m_s=zero_velocity_m_s,
+        )
 
     def _save_artifact(self) -> None:
         try:
@@ -1669,6 +1889,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
                 fixed_levels=session.render.fixed_levels,
             )
             self._rebuild_overlay_plot_renderer()
+            self._reload_peak_distance_datasource_from_session()
 
         self._populate_controls_from_session()
         self._load_current_camera_frame(access_hint="random")
@@ -1752,6 +1973,10 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.downscale_spin.blockSignals(False)
         self.lag_window_spin.blockSignals(False)
         self.sample_count_spin.blockSignals(False)
+        self.show_peak_marker_checkbox.blockSignals(True)
+        self.show_peak_marker_checkbox.setChecked(self.session.peak_distance_datasource.visible)
+        self.show_peak_marker_checkbox.blockSignals(False)
+        self._update_peak_datasource_controls()
         self._update_viewport_visibility_controls_enabled()
 
     def _viewport_visibility_changed(self) -> None:
@@ -2367,9 +2592,10 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
                 <= self.session.timeline.current_time_s
                 <= self.session.heatmap_track.duration_s
             ):
-                _, truth_frame = self.heatmap_source.frame_at_seconds(
+                frame_idx, truth_frame = self.heatmap_source.frame_at_seconds(
                     self.session.timeline.current_time_s
                 )
+                truth_frame = self._annotate_truth_frame_with_peak(truth_frame, frame_idx)
         self.truth_view.set_frame(truth_frame)
         if (
             not self.session.export_overlay.visible
@@ -2387,6 +2613,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
                 self.session.timeline.current_time_s
             )
             presentation_source_size = self._overlay_presentation_source_size()
+            peak_overlay = self._peak_overlay_for_frame(frame_idx)
             preview_frame = self._overlay_plot_renderer.render_frame(
                 frame_idx,
                 output_size=(
@@ -2394,6 +2621,8 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
                     int(round(self.session.export_overlay.height)),
                 ),
                 source_size=presentation_source_size,
+                peak_distance_m=None if peak_overlay is None else peak_overlay[0],
+                zero_velocity_m_s=None if peak_overlay is None else peak_overlay[1],
             )
             self.camera_view.set_export_overlay_preview_frame(preview_frame)
         elif not self._freeze_export_overlay_preview:
@@ -2457,6 +2686,8 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.export_synced_button.setEnabled(
             has_camera and has_heatmap and not self._export_in_progress
         )
+        self.import_peak_json_button.setEnabled(has_heatmap)
+        self._update_peak_datasource_controls()
         self._update_viewport_visibility_controls_enabled()
 
     def _viewport_preview_resized(self) -> None:
@@ -2596,10 +2827,13 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
                             int(round(export_rect.width())),
                             int(round(export_rect.height())),
                         )
+                        peak_overlay = self._peak_overlay_for_frame(heatmap_frame_idx)
                         overlay_rgb = plot_renderer.render_frame(
                             heatmap_frame_idx,
                             output_size=presentation_source_size,
                             source_size=presentation_source_size,
+                            peak_distance_m=None if peak_overlay is None else peak_overlay[0],
+                            zero_velocity_m_s=None if peak_overlay is None else peak_overlay[1],
                         )
                         left = int(round(export_rect.x()))
                         top = int(round(export_rect.y()))
@@ -2633,9 +2867,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
                 progress.setValue(100)
 
 
-def main() -> None:
-    """Launch the alignment GUI in the current Python environment."""
-
+def build_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Launch the Heatmap Alignment Workbench. "
@@ -2661,7 +2893,19 @@ def main() -> None:
         default=None,
         help="Optional H5 recording to load on startup.",
     )
-    args = parser.parse_args()
+    parser.add_argument(
+        "--peaks",
+        type=Path,
+        default=None,
+        help="Optional canonical peak-distance JSON to load on startup.",
+    )
+    return parser
+
+
+def main() -> None:
+    """Launch the alignment GUI in the current Python environment."""
+
+    args = build_argument_parser().parse_args()
 
     app = QtWidgets.QApplication(sys.argv)
     app.setApplicationName("Heatmap Alignment Workbench")
@@ -2673,6 +2917,10 @@ def main() -> None:
             window.load_camera_from_path(args.camera)
         if args.h5 is not None:
             window.load_h5_from_path(args.h5)
+
+    if args.peaks is not None:
+        window.load_peak_distance_from_path(args.peaks)
+
     window.show()
     sys.exit(app.exec())
 

@@ -98,6 +98,7 @@ launcher = "python -m acconeer.exptool.app {args}"
 new = "python -m acconeer.exptool.app.new {args}"
 old = "python -m acconeer.exptool.app.old {args}"
 heatmap-align = "python user_tools/heatmap_alignment_gui.py {args}"
+peak-distances = "python user_tools/export_sparse_iq_peak_distances.py {args}"
 
 [tool.hatch.envs.mypy]
 features = ["app"]
