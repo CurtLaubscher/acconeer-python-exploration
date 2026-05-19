@@ -124,11 +124,31 @@ Future in-app direction:
 Possible rendering directions:
 - Overlay the current frame's peak marker directly on the heatmap plot at `(peak_distance_m, 0 m/s)`.
 - Add a small time-series plot of peak distance over H5 time for reviewing continuity and dropouts.
+- Keep peak-distance visualization colors consistent with the source track color. The H5 timeline bar is currently green, so the H5-derived peak marker and any H5 peak-distance time-series should use the same green rather than an unrelated yellow.
+- Fix the current rendered-heatmap peak marker scaling: the marker can appear as a large yellow vertical strip in the rendered heatmap preview, which is visually noisy and likely caused by marker/line scaling relative to the preview size. Prefer a bounded marker style that remains legible without dominating the heatmap.
+- When adding a time-series plot, align its x-axis with the shared timeline. The plot can span the full available width while automatically updating its x-limits from the timeline view/zoom state so signal features line up with the timeline playhead and duration bars.
 - Add compact markers or a thin strip on the H5 timeline bar to show detection/no-detection regions.
 - For synced video export, optionally render the peak marker on the heatmap overlay before adding a separate time-series visualization.
 
 Open UX question:
 - The best first visualization is likely the heatmap marker plus a show/hide toggle, because it directly explains how the peak relates to the rendered heatmap and keeps the timeline uncluttered. A separate time-series plot becomes more useful once users need to inspect continuity across the whole recording.
+
+### Leg2 `.mat` ultrasonic datasource
+
+Import a Leg2 `.mat` log as an additional signal datasource for manual alignment against the H5 radar recording and camera video.
+
+Initial direction:
+- Treat the Leg2 `.mat` file as its own track on the shared timeline, with its own offset relative to the H5 reference track. Do not model it as an H5-attached peak-distance datasource.
+- For the first pass, hard-code the expected Leg2 ultrasonic paths rather than building a generic `.mat` variable browser. Use `record.common.timeOut` as the correct time axis conceptually, while accepting that exported `.mat` files may expose this as `DataRecordCommon.timeOut`.
+- Plot both raw and filtered ultrasonic distance when available. In the sample hierarchy, these correspond to `Ultrasonic.Distance` and `DataRecordCommon.ultrasonic_filtered`.
+- Do not include `stance_Dist` or `swing_Dist` in the first Leg2 ultrasonic import.
+- Use a distinct color for the Leg2 `.mat` track and reuse that color for its plotted signal(s), matching the visual convention proposed for H5 peak distance.
+- Keep the first workflow manual: load `.mat`, view ultrasonic signal(s), drag/nudge the `.mat` track offset until signal features align with the H5 peak-distance time-series and video.
+
+Future directions:
+- Add a `.mat` variable picker that lets the user select multiple variables for display instead of relying on hard-coded ultrasonic paths.
+- Allow selected `.mat` variables to be shown/hidden independently and possibly assigned colors or plotted on separate axes when units differ.
+- Consider assisted offset suggestions only if many files need to be synced; manual visual alignment should remain the authority unless a later change explicitly adds accepted automated suggestions.
 
 ### Resource loading organization
 
@@ -138,6 +158,7 @@ Possible directions:
 - Move camera, H5, session, and peak-distance load/unload actions into a single resource-oriented menu.
 - Provide explicit unload/clear actions for optional resources.
 - Show a clear loaded/not-loaded indicator for each resource type, including the current file name/path when loaded.
+- Associate each loaded resource or track with a stable semantic color, and reuse that color family consistently across timeline bars, signal plots, legends, warnings, and future resource controls.
 - Make failed, missing, or incompatible resources visually distinct from resources that were simply never loaded.
 - Consider a compact resources panel or status table with one row per resource, such as camera video, H5 recording, peak-distance JSON, and session.
 - Include resource-specific details in that panel where useful, such as camera duration/FPS, H5 frame count/duration, peak detection count, and session path.
@@ -183,6 +204,19 @@ Possible directions:
 - Provide a clear proxy cache action.
 - Surface cache location and approximate cache size.
 - Track proxy generation errors in a user-visible way.
+
+### Resource loading and quality modes
+
+Large recordings and future large `.mat` files may need explicit resource-quality choices so the GUI can stay responsive without forcing every source to be fully loaded at native fidelity.
+
+Possible directions:
+- Let the user choose between on-demand loading and eager/full loading for supported resource types.
+- For large `.mat` files, load only selected variables or extracted signal arrays instead of materializing the entire file in memory.
+- Allow signal downsampling or multi-resolution signal previews so very long traces can be plotted interactively while preserving full-resolution data for detailed inspection when needed.
+- Expose video preview quality choices, such as proxy resolution or lower-quality interactive preview, separately from export quality.
+- Show approximate memory/disk impact for loaded resources, proxies, and caches when practical.
+- Make resource quality/loading mode visible in a resource panel so the user can tell whether they are seeing full-resolution data, a proxy, or a downsampled preview.
+- Keep export and saved alignment data tied to original sources unless the user explicitly chooses a derived/exported resource.
 
 ### Session launch shortcuts
 
@@ -305,6 +339,7 @@ The current implementation is conceptually track-based but practically hard-code
 Possible future directions:
 - Add pluggable source adapters for additional data formats.
 - Allow additional video-like or signal-like tracks.
+- Add a generic track/resource color assignment layer for arbitrary data sources, including automatic palette assignment, stable persisted colors, and readable light/dark theme variants derived from each resource's base color.
 - Preserve the simple two-track workflow as the default.
 
 This is not needed for current H5/camera workflows, but it may matter if future data sources need alignment.
