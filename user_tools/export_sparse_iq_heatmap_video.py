@@ -3,9 +3,7 @@ from __future__ import annotations
 import argparse
 import os
 import shutil
-import sys
 from dataclasses import dataclass
-from datetime import datetime, timedelta
 from pathlib import Path
 
 import matplotlib
@@ -17,21 +15,20 @@ import matplotlib.pyplot as plt
 from matplotlib import rcParams
 from matplotlib.animation import FFMpegWriter
 from PIL import Image
-
-from acconeer.exptool import a121
-from acconeer.exptool.a121 import algo
 from sparse_iq_heatmap_common import (
     HeatmapRecord,
     color_max_for_dvm,
     distance_velocity_map,
     fixed_color_level,
     load_heatmap_record,
-    recording_fps,
     resolve_selection_indices,
     select_frame_indices,
     select_subsweep,
     timestamp_text,
 )
+
+from acconeer.exptool import a121
+from acconeer.exptool.a121 import algo
 
 
 @dataclass

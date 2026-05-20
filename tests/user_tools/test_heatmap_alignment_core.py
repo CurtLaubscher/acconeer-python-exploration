@@ -21,22 +21,28 @@ from heatmap_alignment_core import (  # noqa: E402
     HeatmapTrack,
     PreprocessSettings,
     RenderSettings,
+    SignalPlotViewSettings,
     TimelineState,
     ViewportGeometry,
     ViewportVisibilitySettings,
     apply_viewport_visibility,
+    build_peak_distance_signal_series,
     compute_xcorr_diagnostics,
+    derive_h5_signal_plot_color,
     import_peak_distance_json_for_heatmap,
     load_alignment_artifact,
     prepare_proxy_video,
     rectify_viewport,
     save_alignment_artifact,
     scale_viewport_corners,
+    timeline_view_bounds_s,
     validate_alignment_session,
+    visible_signal_y_range,
 )
 from sparse_iq_peak_distance_core import (  # noqa: E402
     DEFAULT_PEAK_THRESHOLD,
     STATUS_DETECTED,
+    STATUS_NO_DETECTION,
     FramePeakMeasurement,
     PeakDistanceDatasourceSettings,
     PeakDistanceExportResult,
@@ -141,6 +147,179 @@ def test_alignment_artifact_roundtrip_with_peak_distance_datasource(tmp_path: Pa
 
     assert loaded.peak_distance_datasource.path == str(peak_json_path)
     assert loaded.peak_distance_datasource.visible is False
+
+
+def test_alignment_artifact_roundtrip_with_signal_plot_view_settings(tmp_path: Path) -> None:
+    camera_path = tmp_path / "camera.mp4"
+    heatmap_path = tmp_path / "truth.h5"
+    camera_path.write_bytes(b"")
+    heatmap_path.write_bytes(b"")
+
+    session = AlignmentSession(
+        camera_track=CameraTrack(path=str(camera_path), fps=30.0, duration_s=2.0, frame_count=60),
+        heatmap_track=HeatmapTrack(path=str(heatmap_path), duration_s=2.0, fps=10.0),
+        signal_plot_view=SignalPlotViewSettings(
+            x_range_mode="manual",
+            y_range_mode="manual",
+            manual_x_range=(0.5, 4.5),
+            manual_y_range=(0.1, 2.5),
+        ),
+    )
+
+    artifact_path = tmp_path / "alignment_with_signal_plot.json"
+    save_alignment_artifact(session, artifact_path)
+    loaded = load_alignment_artifact(artifact_path)
+
+    assert loaded.signal_plot_view.x_range_mode == "manual"
+    assert loaded.signal_plot_view.y_range_mode == "manual"
+    assert loaded.signal_plot_view.manual_x_range == pytest.approx((0.5, 4.5))
+    assert loaded.signal_plot_view.manual_y_range == pytest.approx((0.1, 2.5))
+
+
+def test_alignment_artifact_defaults_missing_signal_plot_view_settings(tmp_path: Path) -> None:
+    camera_path = tmp_path / "camera.mp4"
+    heatmap_path = tmp_path / "truth.h5"
+    camera_path.write_bytes(b"")
+    heatmap_path.write_bytes(b"")
+    artifact_path = tmp_path / "alignment.json"
+    artifact_path.write_text(
+        """
+{
+  "version": 1,
+  "camera_track": {"path": "%CAMERA%", "fps": 30.0, "duration_s": 1.0, "frame_count": 30},
+  "heatmap_track": {
+    "path": "%HEATMAP%",
+    "session_idx": 0,
+    "group_idx": 0,
+    "entry_idx": 0,
+    "subsweep_idx": 0,
+    "duration_s": 1.0,
+    "fps": 10.0
+  },
+  "viewport": {
+    "corners": [[0.0, 0.0], [9.0, 0.0], [9.0, 5.0], [0.0, 5.0]],
+    "output_width": 10,
+    "output_height": 6
+  },
+  "render": {"color_min": 0.0, "color_max": 3000.0, "fixed_levels": true},
+  "preprocess": {
+    "blur_sigma": 0.0,
+    "downscale_factor": 1.0,
+    "lag_window_s": 2.0,
+    "sample_count": 30
+  },
+  "timeline": {"current_time_s": 0.0, "offset_s": 0.0},
+  "export_overlay": {"visible": true, "preview_enabled": true, "x": 0.0, "y": 0.0, "width": 0.0, "height": 0.0}
+}
+        """.strip()
+        .replace("%CAMERA%", str(camera_path).replace("\\", "\\\\"))
+        .replace("%HEATMAP%", str(heatmap_path).replace("\\", "\\\\")),
+        encoding="utf-8",
+    )
+
+    loaded = load_alignment_artifact(artifact_path)
+
+    assert loaded.signal_plot_view == SignalPlotViewSettings()
+
+
+def test_build_peak_distance_signal_series_segments_status_and_gaps() -> None:
+    measurements = (
+        FramePeakMeasurement(
+            frame_index=0,
+            source_tick=0,
+            time_s=0.0,
+            absolute_time=None,
+            status=STATUS_DETECTED,
+            peak_distance_m=1.0,
+            candidate_peak_distance_m=1.0,
+            peak_strength=10.0,
+        ),
+        FramePeakMeasurement(
+            frame_index=1,
+            source_tick=1,
+            time_s=0.1,
+            absolute_time=None,
+            status=STATUS_NO_DETECTION,
+            peak_distance_m=None,
+            candidate_peak_distance_m=1.2,
+            peak_strength=5.0,
+        ),
+        FramePeakMeasurement(
+            frame_index=2,
+            source_tick=2,
+            time_s=0.2,
+            absolute_time=None,
+            status=STATUS_DETECTED,
+            peak_distance_m=None,
+            candidate_peak_distance_m=float("nan"),
+            peak_strength=0.0,
+        ),
+        FramePeakMeasurement(
+            frame_index=3,
+            source_tick=3,
+            time_s=0.3,
+            absolute_time=None,
+            status=STATUS_DETECTED,
+            peak_distance_m=1.4,
+            candidate_peak_distance_m=1.4,
+            peak_strength=12.0,
+        ),
+    )
+
+    series = build_peak_distance_signal_series(measurements)
+
+    assert np.allclose(series.detected_time_s, [0.0, np.nan, 0.3], equal_nan=True)
+    assert np.allclose(series.detected_distance_m, [1.0, np.nan, 1.4], equal_nan=True)
+    assert np.allclose(series.candidate_time_s, [0.0, 0.1, np.nan], equal_nan=True)
+    assert np.allclose(series.candidate_distance_m, [1.0, 1.2, np.nan], equal_nan=True)
+
+
+def test_visible_signal_y_range_uses_active_x_window_and_includes_zero() -> None:
+    series = build_peak_distance_signal_series(
+        (
+            FramePeakMeasurement(
+                frame_index=0,
+                source_tick=0,
+                time_s=0.0,
+                absolute_time=None,
+                status=STATUS_DETECTED,
+                peak_distance_m=1.0,
+                candidate_peak_distance_m=1.0,
+                peak_strength=1.0,
+            ),
+            FramePeakMeasurement(
+                frame_index=1,
+                source_tick=1,
+                time_s=1.0,
+                absolute_time=None,
+                status=STATUS_DETECTED,
+                peak_distance_m=3.0,
+                candidate_peak_distance_m=3.0,
+                peak_strength=1.0,
+            ),
+        )
+    )
+
+    y_range = visible_signal_y_range(series, x_min_s=-0.1, x_max_s=0.5)
+
+    assert y_range is not None
+    assert y_range[0] == pytest.approx(-0.05)
+    assert y_range[1] == pytest.approx(1.05)
+
+
+def test_derive_h5_signal_plot_color_lightens_on_dark_background() -> None:
+    assert derive_h5_signal_plot_color() != "#22c55e"
+
+
+def test_timeline_view_bounds_s_adds_padding() -> None:
+    bounds = timeline_view_bounds_s(
+        heatmap_duration_s=10.0,
+        camera_duration_s=0.0,
+        camera_offset_s=0.0,
+    )
+
+    assert bounds[0] < 0.0
+    assert bounds[1] > 10.0
 
 
 def test_alignment_artifact_defaults_missing_viewport_visibility_settings(tmp_path: Path) -> None:
