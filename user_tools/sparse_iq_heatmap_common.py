@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+
 """Shared Sparse IQ heatmap helpers used by exporter and alignment tooling.
 
 Keep this module compatible with the repo's Hatch-managed environments so the
