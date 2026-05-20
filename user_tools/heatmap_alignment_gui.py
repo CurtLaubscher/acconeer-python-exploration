@@ -19,6 +19,7 @@ Startup file arguments are supported, for example:
 
     hatch run app:heatmap-align -- --camera path\\to\\video.mp4 --h5 path\\to\\record.h5
     hatch run app:heatmap-align -- --h5 path\\to\\record.h5 --peaks path\\to\\peaks.json
+    hatch run app:heatmap-align -- --mat path\\to\\leg2.mat
 """
 
 import argparse
@@ -32,8 +33,11 @@ from typing import Literal
 import cv2
 import numpy as np
 from heatmap_alignment_core import (
+    H5_TIMELINE_TRACK_COLOR_HEX,
+    LEG2_TIMELINE_TRACK_COLOR_HEX,
     SIGNAL_PLOT_BACKGROUND_HEX,
     SIGNAL_PLOT_NO_DETECTION_ALPHA,
+    SIGNAL_PLOT_PRIMARY_SEGMENT_ALPHA,
     SIGNAL_PLAYHEAD_ALPHA,
     TIMELINE_PLAYHEAD_COLOR_HEX,
     AlignmentSession,
@@ -42,12 +46,18 @@ from heatmap_alignment_core import (
     ExportOverlaySettings,
     HeatmapPlotRenderer,
     HeatmapTruthSource,
+    Leg2MatImportError,
+    Leg2UltrasonicSignalKind,
+    Leg2UltrasonicSignalSeries,
+    LoadedLeg2UltrasonicDatasource,
     LoadedPeakDistanceDatasource,
     PeakDistanceSignalSeries,
     SignalPlotViewSettings,
     apply_viewport_visibility,
+    build_leg2_ultrasonic_signal_series,
     build_peak_distance_signal_series,
-    derive_h5_signal_plot_color,
+    derive_signal_plot_color,
+    import_leg2_mat_for_heatmap,
     import_peak_distance_json_for_heatmap,
     load_alignment_artifact,
     prepare_proxy_video,
@@ -255,7 +265,74 @@ def _make_h5_signal_plot_pens(plot_color_hex: str) -> tuple[QtGui.QPen, QtGui.QP
     return detected_pen, candidate_pen
 
 
+def _make_leg2_signal_plot_pens(plot_color_hex: str) -> tuple[QtGui.QPen, QtGui.QPen]:
+    """Build primary (ReliableFlag) and faded segment pens for Leg2 ultrasonic curves."""
+    primary_pen = pg.mkPen(
+        _plot_color_with_alpha(plot_color_hex, SIGNAL_PLOT_PRIMARY_SEGMENT_ALPHA),
+        width=2.5,
+    )
+    faded_pen = pg.mkPen(
+        _plot_color_with_alpha(plot_color_hex, SIGNAL_PLOT_NO_DETECTION_ALPHA),
+        width=2.5,
+    )
+    return primary_pen, faded_pen
+
+
 TIMELINE_LABEL_GUTTER_PX = 72
+TIMELINE_TRACK_OFFSET_LABEL_MARGIN_PX = 6.0
+TIMELINE_OFFSET_LABEL_COLOR_HEX = "#94a3b8"
+
+
+def format_track_offset_label(track_start_s: float) -> str:
+    """Format a track's aligned start time relative to the H5 reference (shared timeline)."""
+    # Negating a zero offset yields -0.0, which compares >= 0 but still formats with a minus sign.
+    if math.isclose(track_start_s, 0.0, abs_tol=1e-9):
+        return "+0.000 s"
+    if track_start_s > 0.0:
+        return f"+{track_start_s:.3f} s"
+    return f"{track_start_s:.3f} s"
+
+
+def track_offset_label_should_show(
+    plot_rect: QtCore.QRectF,
+    track_rect: QtCore.QRectF,
+    *,
+    label_width_px: float,
+    margin_px: float = TIMELINE_TRACK_OFFSET_LABEL_MARGIN_PX,
+) -> bool:
+    if track_rect.width() <= 0.0:
+        return False
+    if track_rect.right() < plot_rect.left():
+        return False
+    if track_rect.left() > plot_rect.right():
+        return False
+    label_right_px = track_rect.left() - margin_px
+    label_left_px = label_right_px - label_width_px
+    return label_left_px >= plot_rect.left()
+
+
+def track_offset_label_rect(
+    plot_rect: QtCore.QRectF,
+    track_rect: QtCore.QRectF,
+    label_width_px: float,
+    *,
+    margin_px: float = TIMELINE_TRACK_OFFSET_LABEL_MARGIN_PX,
+) -> QtCore.QRectF | None:
+    if not track_offset_label_should_show(
+        plot_rect,
+        track_rect,
+        label_width_px=label_width_px,
+        margin_px=margin_px,
+    ):
+        return None
+    label_right_px = track_rect.left() - margin_px
+    label_left_px = label_right_px - label_width_px
+    return QtCore.QRectF(
+        label_left_px,
+        track_rect.top(),
+        label_width_px,
+        track_rect.height(),
+    )
 
 
 @dataclass(frozen=True)
@@ -276,6 +353,8 @@ class TimelineRangeModel(QtCore.QObject):
         self._camera_duration_s = 0.0
         self._heatmap_duration_s = 0.0
         self._camera_offset_s = 0.0
+        self._leg2_duration_s = 0.0
+        self._leg2_offset_s = 0.0
         self._fit_padding_fraction = 0.12
         self._freeze_depth = 0
         self._frozen_range_start_s: float | None = None
@@ -299,16 +378,28 @@ class TimelineRangeModel(QtCore.QObject):
     def camera_offset_s(self) -> float:
         return self._camera_offset_s
 
+    @property
+    def leg2_duration_s(self) -> float:
+        return self._leg2_duration_s
+
+    @property
+    def leg2_offset_s(self) -> float:
+        return self._leg2_offset_s
+
     def set_track_state(
         self,
         *,
         camera_duration_s: float,
         heatmap_duration_s: float,
         camera_offset_s: float,
+        leg2_duration_s: float = 0.0,
+        leg2_offset_s: float = 0.0,
     ) -> None:
         self._camera_duration_s = max(0.0, camera_duration_s)
         self._heatmap_duration_s = max(0.0, heatmap_duration_s)
         self._camera_offset_s = camera_offset_s
+        self._leg2_duration_s = max(0.0, leg2_duration_s)
+        self._leg2_offset_s = leg2_offset_s
 
     def begin_visible_range_freeze(self) -> None:
         if self._freeze_depth == 0:
@@ -334,6 +425,8 @@ class TimelineRangeModel(QtCore.QObject):
                 heatmap_duration_s=self._heatmap_duration_s,
                 camera_duration_s=self._camera_duration_s,
                 camera_offset_s=self._camera_offset_s,
+                leg2_duration_s=self._leg2_duration_s,
+                leg2_offset_s=self._leg2_offset_s,
                 fit_padding_fraction=self._fit_padding_fraction,
             )
         )
@@ -362,11 +455,15 @@ class SignalPlotWidget(pg.PlotWidget):
         self.showGrid(x=True, y=True, alpha=0.2)
         self._view_settings = SignalPlotViewSettings()
         self._timeline_range_model: TimelineRangeModel | None = None
-        self._signal_series: PeakDistanceSignalSeries | None = None
-        self._has_visible_signal = False
+        self._peak_series: PeakDistanceSignalSeries | None = None
+        self._leg2_series: Leg2UltrasonicSignalSeries | None = None
+        self._peak_visible = False
+        self._leg2_visible = False
         self._applying_view = False
-        self._plot_color = derive_h5_signal_plot_color()
-        detected_pen, candidate_pen = _make_h5_signal_plot_pens(self._plot_color)
+        h5_plot_color = derive_signal_plot_color(H5_TIMELINE_TRACK_COLOR_HEX)
+        leg2_plot_color = derive_signal_plot_color(LEG2_TIMELINE_TRACK_COLOR_HEX)
+        detected_pen, candidate_pen = _make_h5_signal_plot_pens(h5_plot_color)
+        primary_pen, faded_pen = _make_leg2_signal_plot_pens(leg2_plot_color)
         self._candidate_curve = self.plot(
             pen=candidate_pen,
             connect="finite",
@@ -376,6 +473,16 @@ class SignalPlotWidget(pg.PlotWidget):
             pen=detected_pen,
             connect="finite",
             name="H5 peak (detected)",
+        )
+        self._leg2_faded_curve = self.plot(
+            pen=faded_pen,
+            connect="finite",
+            name="Leg2 ultrasonic (not valid)",
+        )
+        self._leg2_primary_curve = self.plot(
+            pen=primary_pen,
+            connect="finite",
+            name="Leg2 ultrasonic (valid)",
         )
         self.addLegend(offset=(8, 8))
         self._current_time_line = pg.InfiniteLine(
@@ -452,24 +559,71 @@ class SignalPlotWidget(pg.PlotWidget):
         del range_start_s, range_end_s
         self.sync_x_if_following()
 
-    def set_signal_series(
+    def set_plotted_signals(
         self,
-        series: PeakDistanceSignalSeries | None,
         *,
-        visible: bool,
+        peak_series: PeakDistanceSignalSeries | None,
+        peak_visible: bool,
+        leg2_series: Leg2UltrasonicSignalSeries | None,
+        leg2_visible: bool,
+        leg2_legend_name: str,
     ) -> None:
-        self._signal_series = series
-        self._has_visible_signal = visible and series is not None
-        if not self._has_visible_signal or series is None:
+        self._peak_series = peak_series
+        self._leg2_series = leg2_series
+        self._peak_visible = peak_visible and peak_series is not None
+        self._leg2_visible = leg2_visible and leg2_series is not None
+
+        if self._peak_visible and peak_series is not None:
+            self._detected_curve.setData(
+                peak_series.detected_time_s,
+                peak_series.detected_distance_m,
+            )
+            self._candidate_curve.setData(
+                peak_series.candidate_time_s,
+                peak_series.candidate_distance_m,
+            )
+        else:
             self._detected_curve.setData([], [])
             self._candidate_curve.setData([], [])
-            self.getPlotItem().legend.setVisible(False)
+
+        if self._leg2_visible and leg2_series is not None:
+            self._leg2_primary_curve.setData(
+                leg2_series.primary_time_s,
+                leg2_series.primary_distance_m,
+            )
+            self._leg2_faded_curve.setData(
+                leg2_series.faded_time_s,
+                leg2_series.faded_distance_m,
+            )
+            self._leg2_primary_curve.opts["name"] = f"{leg2_legend_name} (valid)"
+            self._leg2_faded_curve.opts["name"] = f"{leg2_legend_name} (not valid)"
         else:
-            self._detected_curve.setData(series.detected_time_s, series.detected_distance_m)
-            self._candidate_curve.setData(series.candidate_time_s, series.candidate_distance_m)
-            self.getPlotItem().legend.setVisible(True)
+            self._leg2_primary_curve.setData([], [])
+            self._leg2_faded_curve.setData([], [])
+
+        self._sync_signal_plot_legend()
         self._apply_view_settings()
         self.axis_geometry_sync_requested.emit()
+
+    def _sync_signal_plot_legend(self) -> None:
+        """Rebuild the compact legend so names and visibility match plotted curves."""
+        legend = self.getPlotItem().legend
+        if legend is None:
+            return
+        legend.clear()
+        if self._peak_visible:
+            legend.addItem(self._detected_curve, "H5 peak (detected)")
+            legend.addItem(self._candidate_curve, "H5 peak (no detection)")
+        if self._leg2_visible:
+            legend.addItem(
+                self._leg2_primary_curve,
+                str(self._leg2_primary_curve.opts.get("name", "Leg2 ultrasonic (valid)")),
+            )
+            legend.addItem(
+                self._leg2_faded_curve,
+                str(self._leg2_faded_curve.opts.get("name", "Leg2 ultrasonic (not valid)")),
+            )
+        legend.setVisible(self._peak_visible or self._leg2_visible)
 
     def _configure_range_mode_menu(self, view_box: pg.ViewBox) -> None:
         menu = view_box.menu
@@ -605,14 +759,31 @@ class SignalPlotWidget(pg.PlotWidget):
             self._applying_view = False
 
     def _apply_y_auto_range(self) -> None:
-        if not self._has_visible_signal or self._signal_series is None:
+        if not self._peak_visible and not self._leg2_visible:
             return
         x_range, _ = self.getViewBox().viewRange()
-        y_range = visible_signal_y_range(
-            self._signal_series,
-            x_min_s=float(x_range[0]),
-            x_max_s=float(x_range[1]),
-        )
+        if self._peak_visible and self._peak_series is not None:
+            y_range = visible_signal_y_range(
+                self._peak_series,
+                x_min_s=float(x_range[0]),
+                x_max_s=float(x_range[1]),
+                leg2_series=self._leg2_series if self._leg2_visible else None,
+            )
+        elif self._leg2_visible and self._leg2_series is not None:
+            empty_peak = PeakDistanceSignalSeries(
+                detected_time_s=np.asarray([], dtype=np.float64),
+                detected_distance_m=np.asarray([], dtype=np.float64),
+                candidate_time_s=np.asarray([], dtype=np.float64),
+                candidate_distance_m=np.asarray([], dtype=np.float64),
+            )
+            y_range = visible_signal_y_range(
+                empty_peak,
+                x_min_s=float(x_range[0]),
+                x_max_s=float(x_range[1]),
+                leg2_series=self._leg2_series,
+            )
+        else:
+            return
         if y_range is None:
             return
         self.setYRange(y_range[0], y_range[1], padding=0.0)
@@ -645,6 +816,7 @@ class SignalPlotWidget(pg.PlotWidget):
 class AlignmentTimelineWidget(QtWidgets.QWidget):
     playhead_changed = QtCore.Signal(float)
     camera_offset_changed = QtCore.Signal(float)
+    leg2_offset_changed = QtCore.Signal(float)
 
     def __init__(
         self,
@@ -654,13 +826,16 @@ class AlignmentTimelineWidget(QtWidgets.QWidget):
         super().__init__(parent)
         self._range_model = range_model
         self._range_model.range_changed.connect(lambda *_args: self.update())
-        self.setMinimumHeight(96)
+        self.setMinimumHeight(124)
         self.setMouseTracking(True)
         self._current_time_s = 0.0
         self._dragging_camera = False
+        self._dragging_leg2 = False
         self._dragging_playhead = False
         self._camera_drag_anchor_s = 0.0
+        self._leg2_drag_anchor_s = 0.0
         self._hover_on_camera_bar = False
+        self._hover_on_leg2_bar = False
         self._hover_on_playhead = False
         self._playhead_hit_half_width_px = 8.0
         self._time_axis_left_px: float | None = None
@@ -694,7 +869,8 @@ class AlignmentTimelineWidget(QtWidgets.QWidget):
             axis_pen = QtGui.QPen(QtGui.QColor("#334155"), 1)
             tick_pen = QtGui.QPen(QtGui.QColor("#475569"), 1)
             camera_brush = QtGui.QBrush(QtGui.QColor("#f97316"))
-            heatmap_brush = QtGui.QBrush(QtGui.QColor("#22c55e"))
+            heatmap_brush = QtGui.QBrush(QtGui.QColor(H5_TIMELINE_TRACK_COLOR_HEX))
+            leg2_brush = QtGui.QBrush(QtGui.QColor(LEG2_TIMELINE_TRACK_COLOR_HEX))
             playhead_pen = QtGui.QPen(QtGui.QColor(TIMELINE_PLAYHEAD_COLOR_HEX), 2.5)
 
             painter.setPen(label_pen)
@@ -702,6 +878,8 @@ class AlignmentTimelineWidget(QtWidgets.QWidget):
             painter.drawText(QtCore.QRectF(8, axis_y - 10, 60, 20), "Time")
             painter.drawText(QtCore.QRectF(8, plot_rect.top() + 30, 60, 20), "Camera")
             painter.drawText(QtCore.QRectF(8, plot_rect.top() + 58, 60, 20), "H5")
+            if self._range_model.leg2_duration_s > 0.0:
+                painter.drawText(QtCore.QRectF(8, plot_rect.top() + 86, 60, 20), "Leg2")
 
             painter.setPen(axis_pen)
             painter.drawLine(
@@ -732,6 +910,11 @@ class AlignmentTimelineWidget(QtWidgets.QWidget):
                 row=0,
             )
             heatmap_rect = self._track_rect(0.0, self._range_model.heatmap_duration_s, row=1)
+            leg2_rect = self._track_rect(
+                self._leg2_track_start_s(),
+                self._range_model.leg2_duration_s,
+                row=2,
+            )
 
             if camera_rect.width() > 0:
                 painter.setPen(QtCore.Qt.PenStyle.NoPen)
@@ -741,6 +924,26 @@ class AlignmentTimelineWidget(QtWidgets.QWidget):
                 painter.setPen(QtCore.Qt.PenStyle.NoPen)
                 painter.setBrush(heatmap_brush)
                 painter.drawRoundedRect(heatmap_rect, 4, 4)
+            if leg2_rect.width() > 0:
+                painter.setPen(QtCore.Qt.PenStyle.NoPen)
+                painter.setBrush(leg2_brush)
+                painter.drawRoundedRect(leg2_rect, 4, 4)
+
+            offset_label_pen = QtGui.QPen(QtGui.QColor(TIMELINE_OFFSET_LABEL_COLOR_HEX))
+            painter.setPen(offset_label_pen)
+            self._draw_track_offset_label(
+                painter,
+                plot_rect,
+                camera_rect,
+                self._camera_track_start_s(),
+            )
+            if self._range_model.leg2_duration_s > 0.0:
+                self._draw_track_offset_label(
+                    painter,
+                    plot_rect,
+                    leg2_rect,
+                    self._leg2_track_start_s(),
+                )
 
             playhead_x = self._time_to_x(self._current_time_s)
             painter.setPen(playhead_pen)
@@ -767,6 +970,18 @@ class AlignmentTimelineWidget(QtWidgets.QWidget):
             self.setCursor(QtCore.Qt.CursorShape.ClosedHandCursor)
             return
 
+        leg2_rect = self._track_rect(
+            self._leg2_track_start_s(),
+            self._range_model.leg2_duration_s,
+            row=2,
+        )
+        if leg2_rect.contains(event.position()) and self._range_model.leg2_duration_s > 0:
+            self._dragging_leg2 = True
+            self._range_model.begin_visible_range_freeze()
+            self._leg2_drag_anchor_s = press_time_s - self._leg2_track_start_s()
+            self.setCursor(QtCore.Qt.CursorShape.ClosedHandCursor)
+            return
+
         self._dragging_playhead = True
         self.setCursor(QtCore.Qt.CursorShape.SizeHorCursor)
         self.playhead_changed.emit(press_time_s)
@@ -776,6 +991,11 @@ class AlignmentTimelineWidget(QtWidgets.QWidget):
             position_time_s = self._time_at_x(event.position().x(), clamp=False)
             camera_track_start_s = position_time_s - self._camera_drag_anchor_s
             self.camera_offset_changed.emit(-camera_track_start_s)
+            return
+        if self._dragging_leg2:
+            position_time_s = self._time_at_x(event.position().x(), clamp=False)
+            leg2_track_start_s = position_time_s - self._leg2_drag_anchor_s
+            self.leg2_offset_changed.emit(-leg2_track_start_s)
             return
         if self._dragging_playhead:
             position_time_s = self._time_at_x(event.position().x(), clamp=True)
@@ -791,33 +1011,43 @@ class AlignmentTimelineWidget(QtWidgets.QWidget):
             self._range_model.camera_duration_s,
             row=0,
         ).contains(event.position())
+        hover_on_leg2_bar = self._track_rect(
+            self._leg2_track_start_s(),
+            self._range_model.leg2_duration_s,
+            row=2,
+        ).contains(event.position())
         if hover_on_playhead != self._hover_on_playhead:
             self._hover_on_playhead = hover_on_playhead
             self._update_hover_cursor()
         if hover_on_camera_bar != self._hover_on_camera_bar:
             self._hover_on_camera_bar = hover_on_camera_bar
             self._update_hover_cursor()
+        if hover_on_leg2_bar != self._hover_on_leg2_bar:
+            self._hover_on_leg2_bar = hover_on_leg2_bar
+            self._update_hover_cursor()
 
     def mouseReleaseEvent(self, event: QtGui.QMouseEvent) -> None:
         del event
-        was_dragging_camera = self._dragging_camera
+        was_dragging_track = self._dragging_camera or self._dragging_leg2
         self._dragging_camera = False
+        self._dragging_leg2 = False
         self._dragging_playhead = False
-        if was_dragging_camera:
+        if was_dragging_track:
             self._range_model.end_visible_range_freeze(recompute=True)
         self.update()
         self._update_hover_cursor()
 
     def leaveEvent(self, event: QtCore.QEvent) -> None:
-        if not self._dragging_camera and not self._dragging_playhead:
+        if not self._dragging_camera and not self._dragging_leg2 and not self._dragging_playhead:
             self.unsetCursor()
             self._hover_on_camera_bar = False
+            self._hover_on_leg2_bar = False
         super().leaveEvent(event)
 
     def _update_hover_cursor(self) -> None:
         if self._hover_on_playhead:
             self.setCursor(QtCore.Qt.CursorShape.SizeHorCursor)
-        elif self._hover_on_camera_bar:
+        elif self._hover_on_camera_bar or self._hover_on_leg2_bar:
             self.setCursor(QtCore.Qt.CursorShape.OpenHandCursor)
         else:
             self.unsetCursor()
@@ -827,6 +1057,31 @@ class AlignmentTimelineWidget(QtWidgets.QWidget):
 
     def _camera_track_start_s(self) -> float:
         return -self._range_model.camera_offset_s
+
+    def _leg2_track_start_s(self) -> float:
+        return -self._range_model.leg2_offset_s
+
+    def _draw_track_offset_label(
+        self,
+        painter: QtGui.QPainter,
+        plot_rect: QtCore.QRectF,
+        track_rect: QtCore.QRectF,
+        track_start_s: float,
+    ) -> None:
+        label_text = format_track_offset_label(track_start_s)
+        label_width_px = float(painter.fontMetrics().horizontalAdvance(label_text))
+        label_rect = track_offset_label_rect(
+            plot_rect,
+            track_rect,
+            label_width_px,
+        )
+        if label_rect is None:
+            return
+        painter.drawText(
+            label_rect,
+            QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter,
+            label_text,
+        )
 
     def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
         super().resizeEvent(event)
@@ -1704,6 +1959,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._camera_reference_height = 0
         self._overlay_plot_renderer: HeatmapPlotRenderer | None = None
         self.peak_distance_datasource: LoadedPeakDistanceDatasource | None = None
+        self.leg2_ultrasonic_datasource: LoadedLeg2UltrasonicDatasource | None = None
         self._freeze_export_overlay_preview = False
         self._export_in_progress = False
         self.settings = QtCore.QSettings("Acconeer", "HeatmapAlignmentWorkbench")
@@ -1775,6 +2031,14 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         clear_peak_action = QtGui.QAction("Clear Peak-Distance Datasource", self)
         clear_peak_action.triggered.connect(self._clear_peak_distance_datasource)
         file_menu.addAction(clear_peak_action)
+
+        import_leg2_action = QtGui.QAction("Import Leg2 MAT...", self)
+        import_leg2_action.triggered.connect(self._import_leg2_mat)
+        file_menu.addAction(import_leg2_action)
+
+        clear_leg2_action = QtGui.QAction("Clear Leg2 MAT Datasource", self)
+        clear_leg2_action.triggered.connect(self._clear_leg2_ultrasonic_datasource)
+        file_menu.addAction(clear_leg2_action)
 
         file_menu.addSeparator()
 
@@ -1869,7 +2133,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.nudge_right_large = QtWidgets.QPushButton("+100 ms")
         timeline_controls_layout.addWidget(self.play_button)
         timeline_controls_layout.addWidget(self.current_time_label)
-        timeline_controls_layout.addWidget(QtWidgets.QLabel("Offset (s)"))
+        timeline_controls_layout.addWidget(QtWidgets.QLabel("Camera offset (s)"))
         timeline_controls_layout.addWidget(self.offset_spin)
         timeline_controls_layout.addWidget(self.nudge_left_large)
         timeline_controls_layout.addWidget(self.nudge_left_small)
@@ -1920,10 +2184,19 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.viewport_gamma_spin.setDecimals(2)
         self.import_peak_json_button = QtWidgets.QPushButton("Import Peak JSON")
         self.clear_peak_json_button = QtWidgets.QPushButton("Clear Peak JSON")
+        self.import_leg2_mat_button = QtWidgets.QPushButton("Import Leg2 MAT")
+        self.clear_leg2_mat_button = QtWidgets.QPushButton("Clear Leg2 MAT")
+        self.leg2_signal_kind_combo = QtWidgets.QComboBox()
+        self.leg2_signal_kind_combo.addItem("Raw ultrasonic", "raw")
+        self.leg2_signal_kind_combo.addItem("Filtered ultrasonic", "filtered")
         self.show_peak_marker_checkbox = QtWidgets.QCheckBox("Show Peak Marker")
         self.show_peak_marker_checkbox.setChecked(True)
+        self.show_leg2_signal_checkbox = QtWidgets.QCheckBox("Show Leg2 Signal")
+        self.show_leg2_signal_checkbox.setChecked(True)
         self.peak_datasource_label = QtWidgets.QLabel("No peak-distance JSON loaded.")
         self.peak_datasource_label.setWordWrap(True)
+        self.leg2_datasource_label = QtWidgets.QLabel("No Leg2 MAT loaded.")
+        self.leg2_datasource_label.setWordWrap(True)
         render_layout.addWidget(QtWidgets.QLabel("Color Min"), 0, 0)
         render_layout.addWidget(self.color_min_spin, 0, 1)
         render_layout.addWidget(QtWidgets.QLabel("Color Max"), 0, 2)
@@ -1940,6 +2213,11 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         render_layout.addWidget(self.clear_peak_json_button, 2, 1)
         render_layout.addWidget(self.show_peak_marker_checkbox, 2, 2)
         render_layout.addWidget(self.peak_datasource_label, 2, 3, 1, 5)
+        render_layout.addWidget(self.import_leg2_mat_button, 3, 0)
+        render_layout.addWidget(self.clear_leg2_mat_button, 3, 1)
+        render_layout.addWidget(self.leg2_signal_kind_combo, 3, 2)
+        render_layout.addWidget(self.show_leg2_signal_checkbox, 3, 3)
+        render_layout.addWidget(self.leg2_datasource_label, 3, 4, 1, 4)
         viewport_controls_layout.addWidget(self.viewport_enhance_checkbox, 0, 0, 1, 2)
         viewport_controls_layout.addWidget(self.viewport_map_to_viridis_checkbox, 0, 2, 1, 2)
         viewport_controls_layout.addWidget(QtWidgets.QLabel("Range"), 1, 0)
@@ -1961,10 +2239,15 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.export_synced_button.clicked.connect(self._export_synced_video)
         self.import_peak_json_button.clicked.connect(self._import_peak_distance_json)
         self.clear_peak_json_button.clicked.connect(self._clear_peak_distance_datasource)
+        self.import_leg2_mat_button.clicked.connect(self._import_leg2_mat)
+        self.clear_leg2_mat_button.clicked.connect(self._clear_leg2_ultrasonic_datasource)
+        self.leg2_signal_kind_combo.currentIndexChanged.connect(self._leg2_signal_kind_changed)
         self.show_peak_marker_checkbox.toggled.connect(self._peak_marker_visibility_changed)
+        self.show_leg2_signal_checkbox.toggled.connect(self._leg2_signal_visibility_changed)
         self.play_button.clicked.connect(self._toggle_playback)
         self.timeline_view.playhead_changed.connect(self._timeline_playhead_changed)
         self.timeline_view.camera_offset_changed.connect(self._timeline_camera_offset_changed)
+        self.timeline_view.leg2_offset_changed.connect(self._timeline_leg2_offset_changed)
         self.current_time_slider.valueChanged.connect(self._slider_to_time)
         self.offset_spin.valueChanged.connect(self._offset_changed)
         self.nudge_left_small.clicked.connect(lambda: self._nudge_offset(-0.010))
@@ -2053,6 +2336,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             self.heatmap_source.close()
             self.heatmap_source = None
         self.peak_distance_datasource = None
+        self.leg2_ultrasonic_datasource = None
         self.camera_view.set_export_overlay_preview_frame(None)
         self.camera_view.set_corners(None)
         self.viewport_view.set_frame(None)
@@ -2208,6 +2492,107 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._sync_previews(camera_access_hint="auto")
         self.statusBar().showMessage("Cleared imported peak-distance datasource.")
 
+    def load_leg2_mat_from_path(
+        self,
+        mat_path: Path,
+        *,
+        show_dialogs: bool = False,
+    ) -> bool:
+        try:
+            datasource = import_leg2_mat_for_heatmap(mat_path)
+        except (Leg2MatImportError, TypeError) as exc:
+            if isinstance(exc, Leg2MatImportError):
+                message = exc.user_message()
+                status_message = exc.user_message().splitlines()[0]
+            else:
+                message = f"Could not load Leg2 MAT: {exc}"
+                status_message = message
+            if show_dialogs:
+                QtWidgets.QMessageBox.warning(self, "Import failed", message)
+            else:
+                self.statusBar().showMessage(status_message)
+            return False
+        except ValueError as exc:
+            message = str(exc)
+            if show_dialogs:
+                QtWidgets.QMessageBox.warning(self, "Import failed", message)
+            else:
+                self.statusBar().showMessage(f"Could not load Leg2 MAT: {message}")
+            return False
+
+        self.leg2_ultrasonic_datasource = datasource
+        self.session.leg2_ultrasonic_datasource.path = str(mat_path)
+        self.session.leg2_ultrasonic_datasource.visible = self.show_leg2_signal_checkbox.isChecked()
+        self.settings.setValue("last_leg2_mat_path", str(mat_path))
+        self._update_leg2_datasource_controls()
+        self._sync_previews(camera_access_hint="auto")
+        self.statusBar().showMessage(f"Loaded Leg2 MAT: {mat_path.name}")
+        return True
+
+    def _import_leg2_mat(self) -> None:
+        filename, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Import Leg2 MAT",
+            self._dialog_start_path("last_leg2_mat_path"),
+            "MATLAB files (*.mat);;All files (*)",
+        )
+        if not filename:
+            return
+        self.load_leg2_mat_from_path(Path(filename), show_dialogs=True)
+
+    def _clear_leg2_ultrasonic_datasource(self) -> None:
+        self.leg2_ultrasonic_datasource = None
+        self.session.leg2_ultrasonic_datasource.path = ""
+        self.session.leg2_ultrasonic_datasource.visible = True
+        self.session.leg2_ultrasonic_datasource.offset_s = 0.0
+        self._update_leg2_datasource_controls()
+        self._sync_previews(camera_access_hint="auto")
+        self.statusBar().showMessage("Cleared Leg2 MAT ultrasonic datasource.")
+
+    def _reload_leg2_ultrasonic_datasource_from_session(self) -> None:
+        self.leg2_ultrasonic_datasource = None
+        mat_path_text = self.session.leg2_ultrasonic_datasource.path
+        if not mat_path_text:
+            self._update_leg2_datasource_controls()
+            return
+
+        mat_path = Path(mat_path_text)
+        if not mat_path.exists():
+            self.statusBar().showMessage(
+                f"Leg2 MAT not found and was not loaded: {mat_path}"
+            )
+            self._update_leg2_datasource_controls()
+            return
+
+        if not self.load_leg2_mat_from_path(mat_path, show_dialogs=False):
+            self._update_leg2_datasource_controls()
+
+    def _leg2_signal_kind_changed(self, _index: int) -> None:
+        signal_kind = self.leg2_signal_kind_combo.currentData()
+        if signal_kind not in ("raw", "filtered"):
+            return
+        self.session.leg2_ultrasonic_datasource.signal_kind = signal_kind
+        self._sync_previews(camera_access_hint="auto")
+
+    def _leg2_signal_visibility_changed(self, visible: bool) -> None:
+        self.session.leg2_ultrasonic_datasource.visible = visible
+        self._sync_previews(camera_access_hint="auto")
+
+    def _update_leg2_datasource_controls(self) -> None:
+        datasource = self.leg2_ultrasonic_datasource
+        has_datasource = datasource is not None
+        self.clear_leg2_mat_button.setEnabled(has_datasource)
+        self.leg2_signal_kind_combo.setEnabled(has_datasource)
+        self.show_leg2_signal_checkbox.setEnabled(has_datasource)
+        if datasource is not None:
+            valid_count = int(np.count_nonzero(datasource.reliable_flag_mask))
+            self.leg2_datasource_label.setText(
+                f"{datasource.path.name} ({valid_count}/{datasource.time_s.size} valid)"
+            )
+        else:
+            self.leg2_datasource_label.setText("No Leg2 MAT loaded.")
+        self.timeline_view.update()
+
     def _reload_peak_distance_datasource_from_session(self) -> None:
         self.peak_distance_datasource = None
         json_path_text = self.session.peak_distance_datasource.path
@@ -2348,6 +2733,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             )
             self._rebuild_overlay_plot_renderer()
             self._reload_peak_distance_datasource_from_session()
+        self._reload_leg2_ultrasonic_datasource_from_session()
 
         self._populate_controls_from_session()
         self._load_current_camera_frame(access_hint="random")
@@ -2433,6 +2819,12 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.sample_count_spin.blockSignals(False)
         self.show_peak_marker_checkbox.blockSignals(True)
         self.show_peak_marker_checkbox.setChecked(self.session.peak_distance_datasource.visible)
+        leg2_kind = self.session.leg2_ultrasonic_datasource.signal_kind
+        leg2_kind_index = self.leg2_signal_kind_combo.findData(leg2_kind)
+        if leg2_kind_index >= 0:
+            self.leg2_signal_kind_combo.setCurrentIndex(leg2_kind_index)
+        self.show_leg2_signal_checkbox.setChecked(self.session.leg2_ultrasonic_datasource.visible)
+        self._update_leg2_datasource_controls()
         self.show_peak_marker_checkbox.blockSignals(False)
         self._update_peak_datasource_controls()
         self._update_viewport_visibility_controls_enabled()
@@ -2529,6 +2921,10 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
 
     def _timeline_camera_offset_changed(self, offset_s: float) -> None:
         self.offset_spin.setValue(offset_s)
+
+    def _timeline_leg2_offset_changed(self, offset_s: float) -> None:
+        self.session.leg2_ultrasonic_datasource.offset_s = offset_s
+        self._sync_previews(camera_access_hint="auto")
 
     def _toggle_playback(self) -> None:
         self._set_playback_active(not self.play_timer.isActive())
@@ -2724,10 +3120,17 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.current_time_slider.blockSignals(False)
 
     def _update_timeline_range_from_session(self) -> None:
+        leg2_duration_s = (
+            self.leg2_ultrasonic_datasource.duration_s
+            if self.leg2_ultrasonic_datasource is not None
+            else 0.0
+        )
         self.timeline_range_model.set_track_state(
             camera_duration_s=self.session.camera_track.duration_s,
             heatmap_duration_s=self.session.heatmap_track.duration_s,
             camera_offset_s=self.session.timeline.offset_s,
+            leg2_duration_s=leg2_duration_s,
+            leg2_offset_s=self.session.leg2_ultrasonic_datasource.offset_s,
         )
         self.timeline_range_model.recompute_visible_range()
 
@@ -2737,17 +3140,19 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         )
 
     def _timeline_bounds_s(self) -> tuple[float, float]:
-        heatmap_duration_s = max(0.0, self.session.heatmap_track.duration_s)
-        camera_duration_s = max(0.0, self.session.camera_track.duration_s)
-        camera_start_s = -self.session.timeline.offset_s
-        timeline_start_s = min(0.0, camera_start_s) if camera_duration_s > 0.0 else 0.0
-        timeline_end_s = max(
-            heatmap_duration_s,
-            camera_start_s + camera_duration_s if camera_duration_s > 0.0 else 0.0,
+        leg2_duration_s = (
+            self.leg2_ultrasonic_datasource.duration_s
+            if self.leg2_ultrasonic_datasource is not None
+            else 0.0
         )
-        if math.isclose(timeline_start_s, timeline_end_s):
-            timeline_end_s = timeline_start_s + 1.0
-        return timeline_start_s, timeline_end_s
+        return timeline_view_bounds_s(
+            heatmap_duration_s=self.session.heatmap_track.duration_s,
+            camera_duration_s=self.session.camera_track.duration_s,
+            camera_offset_s=self.session.timeline.offset_s,
+            leg2_duration_s=leg2_duration_s,
+            leg2_offset_s=self.session.leg2_ultrasonic_datasource.offset_s,
+            fit_padding_fraction=0.0,
+        )
 
     def _initialize_default_export_overlay_if_needed(self) -> None:
         if (
@@ -3146,15 +3551,39 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
                 self._schedule_source_resolution_viewport_refresh(viewport_size=viewport_size)
         self.viewport_view.set_frame(viewport_frame)
 
+    def _leg2_legend_name(self) -> str:
+        if self.session.leg2_ultrasonic_datasource.signal_kind == "filtered":
+            return "Leg2 filtered ultrasonic"
+        return "Leg2 raw ultrasonic"
+
     def _refresh_signal_plot(self) -> None:
-        series = None
+        peak_series = None
         if self.peak_distance_datasource is not None:
-            series = build_peak_distance_signal_series(self.peak_distance_datasource.measurements)
-        visible = (
+            peak_series = build_peak_distance_signal_series(
+                self.peak_distance_datasource.measurements
+            )
+        peak_visible = (
             self.peak_distance_datasource is not None
             and self.session.peak_distance_datasource.visible
         )
-        self.signal_plot.set_signal_series(series, visible=visible)
+        leg2_series = None
+        if self.leg2_ultrasonic_datasource is not None:
+            leg2_series = build_leg2_ultrasonic_signal_series(
+                self.leg2_ultrasonic_datasource,
+                signal_kind=self.session.leg2_ultrasonic_datasource.signal_kind,
+                offset_s=self.session.leg2_ultrasonic_datasource.offset_s,
+            )
+        leg2_visible = (
+            self.leg2_ultrasonic_datasource is not None
+            and self.session.leg2_ultrasonic_datasource.visible
+        )
+        self.signal_plot.set_plotted_signals(
+            peak_series=peak_series,
+            peak_visible=peak_visible,
+            leg2_series=leg2_series,
+            leg2_visible=leg2_visible,
+            leg2_legend_name=self._leg2_legend_name(),
+        )
         self.signal_plot.set_current_time_s(self.session.timeline.current_time_s)
 
     def _update_controls_enabled_state(self) -> None:
@@ -3175,6 +3604,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         )
         self.import_peak_json_button.setEnabled(has_heatmap)
         self._update_peak_datasource_controls()
+        self._update_leg2_datasource_controls()
         self._update_viewport_visibility_controls_enabled()
 
     def _viewport_preview_resized(self) -> None:
@@ -3386,6 +3816,12 @@ def build_argument_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional canonical peak-distance JSON to load on startup.",
     )
+    parser.add_argument(
+        "--mat",
+        type=Path,
+        default=None,
+        help="Optional Leg2 MAT ultrasonic log to load on startup.",
+    )
     return parser
 
 
@@ -3407,6 +3843,9 @@ def main() -> None:
 
     if args.peaks is not None:
         window.load_peak_distance_from_path(args.peaks)
+
+    if args.mat is not None:
+        window.load_leg2_mat_from_path(args.mat)
 
     window.show()
     sys.exit(app.exec())

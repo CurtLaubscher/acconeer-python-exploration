@@ -22,6 +22,7 @@ from typing import Any, Literal
 
 import cv2
 import numpy as np
+from scipy.io import loadmat
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
 from sparse_iq_peak_distance_core import (
@@ -37,12 +38,17 @@ from sparse_iq_peak_distance_core import (
 ARTIFACT_VERSION = 1
 
 H5_TIMELINE_TRACK_COLOR_HEX = "#22c55e"
+LEG2_TIMELINE_TRACK_COLOR_HEX = "#6366f1"
 SIGNAL_PLOT_BACKGROUND_HEX = "#0f1720"
 SIGNAL_PLOT_NO_DETECTION_ALPHA = 72
+# Primary-segment opacity for segmented Signals curves (e.g. Leg2 valid flag). Change here only.
+SIGNAL_PLOT_PRIMARY_SEGMENT_OPACITY = 0.7
+SIGNAL_PLOT_PRIMARY_SEGMENT_ALPHA = int(round(255 * SIGNAL_PLOT_PRIMARY_SEGMENT_OPACITY))
 TIMELINE_PLAYHEAD_COLOR_HEX = "#f8fafc"
 SIGNAL_PLAYHEAD_ALPHA = 96
 
 SignalPlotRangeMode = Literal["auto", "manual"]
+Leg2UltrasonicSignalKind = Literal["raw", "filtered"]
 
 
 @dataclass
@@ -119,12 +125,51 @@ class SignalPlotViewSettings:
     manual_y_range: tuple[float, float] | None = None
 
 
+@dataclass
+class Leg2UltrasonicDatasourceSettings:
+    path: str = ""
+    visible: bool = True
+    signal_kind: Leg2UltrasonicSignalKind = "raw"
+    offset_s: float = 0.0
+
+
+@dataclass(frozen=True)
+class LoadedLeg2UltrasonicDatasource:
+    path: Path
+    time_s: np.ndarray
+    raw_distance_m: np.ndarray
+    filtered_distance_m: np.ndarray
+    reliable_flag_mask: np.ndarray
+    duration_s: float
+
+
 @dataclass(frozen=True)
 class PeakDistanceSignalSeries:
     detected_time_s: np.ndarray
     detected_distance_m: np.ndarray
     candidate_time_s: np.ndarray
     candidate_distance_m: np.ndarray
+
+
+@dataclass(frozen=True)
+class Leg2UltrasonicSignalSeries:
+    primary_time_s: np.ndarray
+    primary_distance_m: np.ndarray
+    faded_time_s: np.ndarray
+    faded_distance_m: np.ndarray
+
+
+class Leg2MatImportError(ValueError):
+    """Raised when a Leg2 `.mat` file does not match the expected ultrasonic export."""
+
+    def __init__(self, detail: str) -> None:
+        self.detail = detail.strip()
+        super().__init__(self.user_message())
+
+    def user_message(self) -> str:
+        if self.detail:
+            return f"Could not load Leg2 MAT ultrasonic datasource.\n\n{self.detail}"
+        return "Could not load Leg2 MAT ultrasonic datasource."
 
 
 @dataclass(frozen=True)
@@ -178,6 +223,9 @@ class AlignmentSession:
     peak_distance_datasource: PeakDistanceDatasourceSettings = field(
         default_factory=PeakDistanceDatasourceSettings
     )
+    leg2_ultrasonic_datasource: Leg2UltrasonicDatasourceSettings = field(
+        default_factory=Leg2UltrasonicDatasourceSettings
+    )
     signal_plot_view: SignalPlotViewSettings = field(default_factory=SignalPlotViewSettings)
 
     def to_json_dict(self) -> dict[str, Any]:
@@ -212,6 +260,9 @@ class AlignmentSession:
             ),
             peak_distance_datasource=PeakDistanceDatasourceSettings(
                 **payload.get("peak_distance_datasource", {})
+            ),
+            leg2_ultrasonic_datasource=Leg2UltrasonicDatasourceSettings(
+                **payload.get("leg2_ultrasonic_datasource", {})
             ),
             signal_plot_view=_signal_plot_view_settings_from_payload(
                 payload.get("signal_plot_view")
@@ -257,17 +308,24 @@ def timeline_view_bounds_s(
     heatmap_duration_s: float,
     camera_duration_s: float,
     camera_offset_s: float,
+    leg2_duration_s: float = 0.0,
+    leg2_offset_s: float = 0.0,
     fit_padding_fraction: float = 0.12,
 ) -> tuple[float, float]:
     """Return padded shared timeline bounds used by the timeline and Signals plot."""
     heatmap_duration_s = max(0.0, heatmap_duration_s)
     camera_duration_s = max(0.0, camera_duration_s)
+    leg2_duration_s = max(0.0, leg2_duration_s)
     camera_start_s = -camera_offset_s
+    leg2_start_s = -leg2_offset_s
     track_starts = [0.0]
     track_ends = [heatmap_duration_s]
     if camera_duration_s > 0.0:
         track_starts.append(camera_start_s)
         track_ends.append(camera_start_s + camera_duration_s)
+    if leg2_duration_s > 0.0:
+        track_starts.append(leg2_start_s)
+        track_ends.append(leg2_start_s + leg2_duration_s)
 
     range_start_s = min(track_starts)
     range_end_s = max(track_ends)
@@ -293,12 +351,12 @@ def _rgb_to_hex(red: int, green: int, blue: int) -> str:
     return f"#{red:02x}{green:02x}{blue:02x}"
 
 
-def derive_h5_signal_plot_color(
-    track_color_hex: str = H5_TIMELINE_TRACK_COLOR_HEX,
+def derive_signal_plot_color(
+    track_color_hex: str,
     *,
     background_hex: str = SIGNAL_PLOT_BACKGROUND_HEX,
 ) -> str:
-    """Derive a readable plot color from the H5 timeline track color."""
+    """Derive a readable plot color from a timeline track color."""
     red, green, blue = _hex_to_rgb(track_color_hex)
     background_red, background_green, background_blue = _hex_to_rgb(background_hex)
     background_luminance = (
@@ -314,6 +372,291 @@ def derive_h5_signal_plot_color(
         int(np.clip(blue * scale, 0, 255)),
     )
     return _rgb_to_hex(*adjusted)
+
+
+def derive_h5_signal_plot_color(
+    track_color_hex: str = H5_TIMELINE_TRACK_COLOR_HEX,
+    *,
+    background_hex: str = SIGNAL_PLOT_BACKGROUND_HEX,
+) -> str:
+    """Derive a readable plot color from the H5 timeline track color."""
+    return derive_signal_plot_color(track_color_hex, background_hex=background_hex)
+
+
+def _leg2_mat_import_error(detail: str) -> Leg2MatImportError:
+    return Leg2MatImportError(detail)
+
+
+def _unwrap_mat_scalar(value: Any) -> Any:
+    current = value
+    while isinstance(current, np.ndarray) and current.ndim > 0 and current.size == 1:
+        current = current.item()
+    return current
+
+
+def _mat_struct_field(container: Any, field_name: str) -> Any:
+    if container is None:
+        raise KeyError(field_name)
+    if isinstance(container, dict):
+        if field_name not in container:
+            raise KeyError(field_name)
+        return container[field_name]
+    if hasattr(container, "_fieldnames"):
+        if field_name not in getattr(container, "_fieldnames", ()):
+            raise KeyError(field_name)
+        return getattr(container, field_name)
+    if isinstance(container, np.void):
+        names = container.dtype.names or ()
+        if field_name not in names:
+            raise KeyError(field_name)
+        return container[field_name]
+    if isinstance(container, np.ndarray) and container.dtype.names:
+        if field_name not in container.dtype.names:
+            raise KeyError(field_name)
+        if container.ndim == 0:
+            return container[field_name]
+        return container[field_name].reshape(-1)
+    raise TypeError(f"Unsupported MATLAB struct container type: {type(container)!r}.")
+
+
+def _mat_top_level_field(payload: dict[str, Any], struct_name: str, field_name: str) -> Any:
+    if struct_name not in payload:
+        raise KeyError(struct_name)
+    try:
+        return _mat_struct_field(payload[struct_name], field_name)
+    except KeyError as exc:
+        raise KeyError(f"{struct_name}.{field_name}") from exc
+
+
+def _read_mat_1d_numeric_array(
+    value: Any,
+    *,
+    field_label: str,
+    require_finite: bool = True,
+) -> np.ndarray:
+    unwrapped = _unwrap_mat_scalar(value)
+    try:
+        array = np.asarray(unwrapped, dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise Leg2MatImportError(
+            f"{field_label} could not be interpreted as numeric samples."
+        ) from exc
+    array = np.squeeze(array)
+    if array.ndim == 0:
+        array = np.asarray([float(array)], dtype=np.float64)
+    elif array.ndim != 1:
+        array = array.reshape(-1)
+    if array.size == 0:
+        raise Leg2MatImportError(f"{field_label} is empty.")
+    if require_finite and not np.all(np.isfinite(array)):
+        raise Leg2MatImportError(f"{field_label} contains non-finite values.")
+    return array.astype(np.float64, copy=False)
+
+
+def _read_mat_1d_bool_array(value: Any, *, field_label: str) -> np.ndarray:
+    numeric = _read_mat_1d_numeric_array(value, field_label=field_label)
+    return numeric != 0.0
+
+
+def _trim_trailing_zero_time_samples(
+    time_s: np.ndarray,
+    *companion_arrays: np.ndarray,
+) -> tuple[np.ndarray, tuple[np.ndarray, ...]]:
+    if time_s.size == 0:
+        return time_s, companion_arrays
+    valid_mask = time_s != 0.0
+    if not np.any(valid_mask):
+        return time_s[:0], tuple(array[:0] for array in companion_arrays)
+    last_valid_idx = int(np.max(np.flatnonzero(valid_mask)))
+    trimmed_time = time_s[: last_valid_idx + 1]
+    trimmed_companions = tuple(array[: last_valid_idx + 1] for array in companion_arrays)
+    return trimmed_time, trimmed_companions
+
+
+def _validate_increasing_time_axis(time_s: np.ndarray) -> None:
+    if time_s.size == 0:
+        raise Leg2MatImportError("Leg2 time axis is empty after cleanup.")
+    if not np.all(np.isfinite(time_s)):
+        raise Leg2MatImportError("Leg2 time axis contains non-finite values.")
+    if np.any(np.diff(time_s) <= 0.0):
+        raise Leg2MatImportError("Leg2 time axis is not strictly increasing.")
+
+
+def load_leg2_mat_ultrasonic(mat_path: Path) -> LoadedLeg2UltrasonicDatasource:
+    """Load the known Leg2 ultrasonic export from a MATLAB v5 `.mat` file."""
+    try:
+        payload = loadmat(str(mat_path), squeeze_me=True, struct_as_record=False)
+    except Exception as exc:
+        raise _leg2_mat_import_error(f"Could not read MATLAB file: {exc}") from exc
+
+    mat_fields = {key: value for key, value in payload.items() if not key.startswith("__")}
+    required_paths = (
+        ("DataRecordCommon", "timeOut"),
+        ("Ultrasonic", "Distance"),
+        ("DataRecordCommon", "ultrasonic_filtered"),
+        ("DataRecordCommon", "ReliableFlag"),
+    )
+    extracted: dict[tuple[str, str], Any] = {}
+    for struct_name, field_name in required_paths:
+        label = f"{struct_name}.{field_name}"
+        try:
+            extracted[(struct_name, field_name)] = _mat_top_level_field(
+                mat_fields,
+                struct_name,
+                field_name,
+            )
+        except KeyError:
+            raise _leg2_mat_import_error(f"Missing required field: {label}") from None
+
+    try:
+        time_raw = _read_mat_1d_numeric_array(
+            extracted[("DataRecordCommon", "timeOut")],
+            field_label="DataRecordCommon.timeOut",
+        )
+        raw_distance_mm = _read_mat_1d_numeric_array(
+            extracted[("Ultrasonic", "Distance")],
+            field_label="Ultrasonic.Distance",
+            require_finite=False,
+        )
+        filtered_distance_mm = _read_mat_1d_numeric_array(
+            extracted[("DataRecordCommon", "ultrasonic_filtered")],
+            field_label="DataRecordCommon.ultrasonic_filtered",
+            require_finite=False,
+        )
+        reliable_flag_mask = _read_mat_1d_bool_array(
+            extracted[("DataRecordCommon", "ReliableFlag")],
+            field_label="DataRecordCommon.ReliableFlag",
+        )
+    except Leg2MatImportError:
+        raise
+    except (KeyError, TypeError, ValueError) as exc:
+        raise _leg2_mat_import_error(str(exc)) from exc
+    except Exception as exc:
+        raise _leg2_mat_import_error(str(exc)) from exc
+
+    lengths = {
+        "DataRecordCommon.timeOut": time_raw.size,
+        "Ultrasonic.Distance": raw_distance_mm.size,
+        "DataRecordCommon.ultrasonic_filtered": filtered_distance_mm.size,
+        "DataRecordCommon.ReliableFlag": reliable_flag_mask.size,
+    }
+    unique_lengths = set(lengths.values())
+    if len(unique_lengths) != 1:
+        detail = ", ".join(f"{name}={count}" for name, count in lengths.items())
+        raise _leg2_mat_import_error(f"Incompatible array lengths after cleanup: {detail}")
+
+    time_s, (raw_distance_mm, filtered_distance_mm, reliable_flag_mask) = _trim_trailing_zero_time_samples(
+        time_raw,
+        raw_distance_mm,
+        filtered_distance_mm,
+        reliable_flag_mask,
+    )
+    _validate_increasing_time_axis(time_s)
+
+    time_origin_s = float(time_s[0])
+    elapsed_time_s = time_s - time_origin_s
+    raw_distance_m = raw_distance_mm / 1000.0
+    filtered_distance_m = filtered_distance_mm / 1000.0
+    duration_s = float(elapsed_time_s[-1]) if elapsed_time_s.size else 0.0
+
+    return LoadedLeg2UltrasonicDatasource(
+        path=mat_path,
+        time_s=elapsed_time_s.astype(np.float64, copy=False),
+        raw_distance_m=raw_distance_m.astype(np.float64, copy=False),
+        filtered_distance_m=filtered_distance_m.astype(np.float64, copy=False),
+        reliable_flag_mask=reliable_flag_mask.astype(bool, copy=False),
+        duration_s=duration_s,
+    )
+
+
+def import_leg2_mat_for_heatmap(mat_path: Path) -> LoadedLeg2UltrasonicDatasource:
+    return load_leg2_mat_ultrasonic(mat_path)
+
+
+def _plottable_leg2_distance_m(distance_m: float) -> float | None:
+    if not math.isfinite(distance_m):
+        return None
+    return float(distance_m)
+
+
+def build_leg2_ultrasonic_signal_series(
+    datasource: LoadedLeg2UltrasonicDatasource,
+    *,
+    signal_kind: Leg2UltrasonicSignalKind,
+    offset_s: float,
+) -> Leg2UltrasonicSignalSeries:
+    if signal_kind == "raw":
+        distance_values = datasource.raw_distance_m
+    elif signal_kind == "filtered":
+        distance_values = datasource.filtered_distance_m
+    else:
+        raise ValueError(f"Unsupported Leg2 ultrasonic signal kind {signal_kind!r}.")
+
+    primary_time_s: list[float] = []
+    primary_distance_m: list[float] = []
+    faded_time_s: list[float] = []
+    faded_distance_m: list[float] = []
+    track_start_s = -offset_s
+
+    def append_gap(time_values: list[float], distance_values_out: list[float]) -> None:
+        if time_values and not math.isnan(time_values[-1]):
+            time_values.append(float("nan"))
+            distance_values_out.append(float("nan"))
+
+    def append_bridge(
+        source_time_s: list[float],
+        source_distance_m: list[float],
+        target_time_s: list[float],
+        target_distance_m: list[float],
+    ) -> None:
+        if not source_time_s or math.isnan(source_time_s[-1]):
+            return
+        bridge_time_s = source_time_s[-1]
+        bridge_distance_m = source_distance_m[-1]
+        if target_time_s and target_time_s[-1] == bridge_time_s:
+            return
+        target_time_s.append(bridge_time_s)
+        target_distance_m.append(bridge_distance_m)
+
+    for source_time_s, distance_m, is_valid in zip(
+        datasource.time_s,
+        distance_values,
+        datasource.reliable_flag_mask,
+        strict=False,
+    ):
+        aligned_time_s = float(source_time_s) + track_start_s
+        plottable_distance_m = _plottable_leg2_distance_m(float(distance_m))
+        if plottable_distance_m is None:
+            append_gap(primary_time_s, primary_distance_m)
+            append_gap(faded_time_s, faded_distance_m)
+            continue
+        if is_valid:
+            append_bridge(
+                faded_time_s,
+                faded_distance_m,
+                primary_time_s,
+                primary_distance_m,
+            )
+            append_gap(faded_time_s, faded_distance_m)
+            primary_time_s.append(aligned_time_s)
+            primary_distance_m.append(plottable_distance_m)
+        else:
+            append_bridge(
+                primary_time_s,
+                primary_distance_m,
+                faded_time_s,
+                faded_distance_m,
+            )
+            append_gap(primary_time_s, primary_distance_m)
+            faded_time_s.append(aligned_time_s)
+            faded_distance_m.append(plottable_distance_m)
+
+    return Leg2UltrasonicSignalSeries(
+        primary_time_s=np.asarray(primary_time_s, dtype=np.float64),
+        primary_distance_m=np.asarray(primary_distance_m, dtype=np.float64),
+        faded_time_s=np.asarray(faded_time_s, dtype=np.float64),
+        faded_distance_m=np.asarray(faded_distance_m, dtype=np.float64),
+    )
 
 
 def _plottable_candidate_distance_m(measurement: FramePeakMeasurement) -> float | None:
@@ -376,25 +719,47 @@ def build_peak_distance_signal_series(
     )
 
 
-def visible_signal_y_range(
-    series: PeakDistanceSignalSeries,
+def _visible_distance_values_in_x_range(
+    time_distance_pairs: tuple[tuple[np.ndarray, np.ndarray], ...],
     *,
     x_min_s: float,
     x_max_s: float,
-) -> tuple[float, float] | None:
-    if x_max_s < x_min_s:
-        x_min_s, x_max_s = x_max_s, x_min_s
-
+) -> list[float]:
     visible_values: list[float] = []
-    for time_values, distance_values in (
-        (series.detected_time_s, series.detected_distance_m),
-        (series.candidate_time_s, series.candidate_distance_m),
-    ):
+    for time_values, distance_values in time_distance_pairs:
         for time_s, distance_m in zip(time_values, distance_values, strict=False):
             if not math.isfinite(time_s) or not math.isfinite(distance_m):
                 continue
             if x_min_s <= time_s <= x_max_s:
                 visible_values.append(distance_m)
+    return visible_values
+
+
+def visible_signal_y_range(
+    series: PeakDistanceSignalSeries,
+    *,
+    x_min_s: float,
+    x_max_s: float,
+    leg2_series: Leg2UltrasonicSignalSeries | None = None,
+) -> tuple[float, float] | None:
+    if x_max_s < x_min_s:
+        x_min_s, x_max_s = x_max_s, x_min_s
+
+    time_distance_pairs: tuple[tuple[np.ndarray, np.ndarray], ...] = (
+        (series.detected_time_s, series.detected_distance_m),
+        (series.candidate_time_s, series.candidate_distance_m),
+    )
+    if leg2_series is not None:
+        time_distance_pairs = (
+            *time_distance_pairs,
+            (leg2_series.primary_time_s, leg2_series.primary_distance_m),
+            (leg2_series.faded_time_s, leg2_series.faded_distance_m),
+        )
+    visible_values = _visible_distance_values_in_x_range(
+        time_distance_pairs,
+        x_min_s=x_min_s,
+        x_max_s=x_max_s,
+    )
 
     if not visible_values:
         return None
