@@ -15,7 +15,35 @@ USER_TOOLS_PATH = REPO_ROOT / "user_tools"
 if str(USER_TOOLS_PATH) not in sys.path:
     sys.path.insert(0, str(USER_TOOLS_PATH))
 
-from heatmap_alignment_gui import CornerEditorWidget, build_argument_parser  # noqa: E402
+from heatmap_alignment_gui import (  # noqa: E402
+    AlignmentTimelineWidget,
+    CornerEditorWidget,
+    HeatmapAlignmentWindow,
+    SignalPlotWidget,
+    TimelineRangeModel,
+    build_argument_parser,
+    format_track_offset_label,
+    track_offset_label_rect,
+    track_offset_label_should_show,
+)
+from heatmap_alignment_core import (  # noqa: E402
+    Leg2UltrasonicDatasourceSettings,
+    Leg2UltrasonicSignalSeries,
+    PeakDistanceSignalSeries,
+    load_alignment_artifact,
+    save_alignment_artifact,
+    AlignmentSession,
+    CameraTrack,
+    HeatmapTrack,
+)
+from scipy.io import savemat
+
+
+def _legend_item_labels(legend: object) -> list[str]:
+    labels: list[str] = []
+    for _sample, label in legend.items:
+        labels.append(str(getattr(label, "text", label)))
+    return labels
 
 
 @pytest.fixture(autouse=True, scope="module")
@@ -30,6 +58,225 @@ def test_build_argument_parser_accepts_peaks() -> None:
 
     assert args.h5 == Path("trial.h5")
     assert args.peaks == Path("peaks.json")
+
+
+def test_build_argument_parser_accepts_mat() -> None:
+    parser = build_argument_parser()
+    args = parser.parse_args(["--artifact", "session.json", "--mat", "leg2.mat"])
+
+    assert args.artifact == Path("session.json")
+    assert args.mat == Path("leg2.mat")
+
+
+def test_timeline_range_model_exposes_independent_leg2_offset() -> None:
+    model = TimelineRangeModel()
+    model.set_track_state(
+        camera_duration_s=4.0,
+        heatmap_duration_s=5.0,
+        camera_offset_s=1.0,
+        leg2_duration_s=3.0,
+        leg2_offset_s=2.0,
+    )
+
+    assert model.camera_offset_s == pytest.approx(1.0)
+    assert model.leg2_offset_s == pytest.approx(2.0)
+
+
+def test_format_track_offset_label_uses_track_start_relative_to_h5() -> None:
+    assert format_track_offset_label(-1.25) == "-1.250 s"
+    assert format_track_offset_label(0.5) == "+0.500 s"
+    assert format_track_offset_label(0.0) == "+0.000 s"
+    assert format_track_offset_label(-0.0) == "+0.000 s"
+
+
+def test_track_offset_label_should_show_when_label_fits_left_of_bar() -> None:
+    plot_rect = QtCore.QRectF(100.0, 0.0, 400.0, 80.0)
+    track_rect = QtCore.QRectF(200.0, 30.0, 120.0, 18.0)
+
+    assert track_offset_label_should_show(plot_rect, track_rect, label_width_px=72.0) is True
+    label_rect = track_offset_label_rect(plot_rect, track_rect, label_width_px=72.0)
+
+    assert label_rect is not None
+    assert label_rect.right() == pytest.approx(194.0)
+    assert label_rect.left() == pytest.approx(122.0)
+
+
+def test_track_offset_label_should_hide_when_bar_is_off_screen() -> None:
+    plot_rect = QtCore.QRectF(100.0, 0.0, 400.0, 80.0)
+    track_rect = QtCore.QRectF(20.0, 30.0, 50.0, 18.0)
+
+    assert track_offset_label_should_show(plot_rect, track_rect, label_width_px=72.0) is False
+
+
+def test_track_offset_label_should_hide_when_label_would_clip_plot_edge() -> None:
+    plot_rect = QtCore.QRectF(100.0, 0.0, 400.0, 80.0)
+    track_rect = QtCore.QRectF(150.0, 30.0, 40.0, 18.0)
+
+    assert track_offset_label_should_show(plot_rect, track_rect, label_width_px=72.0) is False
+
+
+def test_alignment_timeline_widget_leg2_track_start_uses_offset_sign_convention(
+    qapplication: QApplication,
+) -> None:
+    range_model = TimelineRangeModel()
+    range_model.set_track_state(
+        camera_duration_s=0.0,
+        heatmap_duration_s=5.0,
+        camera_offset_s=0.0,
+        leg2_duration_s=4.0,
+        leg2_offset_s=1.25,
+    )
+    widget = AlignmentTimelineWidget(range_model)
+
+    assert widget._leg2_track_start_s() == pytest.approx(-1.25)
+
+
+def test_startup_mat_overrides_session_leg2_path(tmp_path: Path, qapplication: QApplication) -> None:
+    session_mat = tmp_path / "session_leg2.mat"
+    startup_mat = tmp_path / "startup_leg2.mat"
+    artifact_path = tmp_path / "session.json"
+    for mat_path in (session_mat, startup_mat):
+        savemat(
+            mat_path,
+            {
+                "DataRecordCommon": {
+                    "timeOut": np.array([0.0, 1.0, 2.0], dtype=np.float64),
+                    "ultrasonic_filtered": np.array([1000.0, 1100.0, 1200.0], dtype=np.float64),
+                    "ReliableFlag": np.array([1.0, 1.0, 1.0], dtype=np.float64),
+                },
+                "Ultrasonic": {"Distance": np.array([1000.0, 1100.0, 1200.0], dtype=np.float64)},
+            },
+        )
+
+    session = AlignmentSession(
+        camera_track=CameraTrack(path=""),
+        heatmap_track=HeatmapTrack(path=""),
+        leg2_ultrasonic_datasource=Leg2UltrasonicDatasourceSettings(
+            path=str(session_mat),
+            signal_kind="filtered",
+            offset_s=0.75,
+        ),
+    )
+    save_alignment_artifact(session, artifact_path)
+
+    window = HeatmapAlignmentWindow()
+    window.load_artifact_from_path(artifact_path)
+    assert window.session.leg2_ultrasonic_datasource.path == str(session_mat)
+
+    assert window.load_leg2_mat_from_path(startup_mat) is True
+    assert window.session.leg2_ultrasonic_datasource.path == str(startup_mat)
+    assert window.leg2_ultrasonic_datasource is not None
+    assert window.leg2_ultrasonic_datasource.path == startup_mat
+
+
+def _sample_leg2_signal_series() -> Leg2UltrasonicSignalSeries:
+    return Leg2UltrasonicSignalSeries(
+        primary_time_s=np.array([0.0, 1.0], dtype=np.float64),
+        primary_distance_m=np.array([1.2, 1.3], dtype=np.float64),
+        faded_time_s=np.array([0.5, np.nan], dtype=np.float64),
+        faded_distance_m=np.array([1.25, np.nan], dtype=np.float64),
+    )
+
+
+def test_signal_plot_legend_shows_leg2_valid_and_not_valid_labels(
+    qapplication: QApplication,
+) -> None:
+    plot = SignalPlotWidget()
+    plot.resize(480, 240)
+    plot.show()
+    qapplication.processEvents()
+
+    plot.set_plotted_signals(
+        peak_series=None,
+        peak_visible=False,
+        leg2_series=_sample_leg2_signal_series(),
+        leg2_visible=True,
+        leg2_legend_name="Leg2 raw ultrasonic",
+    )
+    qapplication.processEvents()
+
+    legend = plot.getPlotItem().legend
+    assert legend is not None
+    assert legend.isVisible()
+    assert _legend_item_labels(legend) == [
+        "Leg2 raw ultrasonic (valid)",
+        "Leg2 raw ultrasonic (not valid)",
+    ]
+
+
+def test_signal_plot_legend_hides_when_no_signals_plotted(
+    qapplication: QApplication,
+) -> None:
+    plot = SignalPlotWidget()
+    plot.resize(480, 240)
+    plot.show()
+    qapplication.processEvents()
+
+    plot.set_plotted_signals(
+        peak_series=None,
+        peak_visible=False,
+        leg2_series=None,
+        leg2_visible=False,
+        leg2_legend_name="Leg2 raw ultrasonic",
+    )
+    qapplication.processEvents()
+
+    legend = plot.getPlotItem().legend
+    assert legend is not None
+    assert legend.isVisible() is False
+    assert _legend_item_labels(legend) == []
+
+
+def test_timeline_plot_rect_uses_configured_time_axis_span(
+    qapplication: QApplication,
+) -> None:
+    range_model = TimelineRangeModel()
+    range_model.set_track_state(
+        camera_duration_s=0.0,
+        heatmap_duration_s=10.0,
+        camera_offset_s=0.0,
+        leg2_duration_s=4.0,
+        leg2_offset_s=0.0,
+    )
+    timeline = AlignmentTimelineWidget(range_model)
+    timeline.resize(900, 124)
+    timeline.show()
+    qapplication.processEvents()
+
+    timeline.set_time_axis_rect(220.0, 760.0)
+    plot_rect = timeline._plot_rect()
+
+    assert plot_rect.left() == pytest.approx(220.0)
+    assert plot_rect.right() == pytest.approx(760.0)
+
+
+def test_timeline_time_axis_tracks_signal_plot_viewbox(
+    qapplication: QApplication,
+) -> None:
+    window = HeatmapAlignmentWindow()
+    window.resize(1024, 720)
+    window.show()
+    qapplication.processEvents()
+
+    window._sync_timeline_axis_geometry()
+    qapplication.processEvents()
+
+    signal_left_px, signal_right_px = window.signal_plot.viewbox_horizontal_extent_local()
+    assert signal_right_px > signal_left_px + 1.0
+
+    timeline_left_px = window.timeline_view._time_axis_left_px
+    timeline_right_px = window.timeline_view._time_axis_right_px
+    assert timeline_left_px is not None
+    assert timeline_right_px is not None
+    assert timeline_right_px > timeline_left_px + 1.0
+
+    left_global = window.signal_plot.mapToGlobal(QtCore.QPointF(signal_left_px, 0.0))
+    right_global = window.signal_plot.mapToGlobal(QtCore.QPointF(signal_right_px, 0.0))
+    expected_left_px = window.timeline_view.mapFromGlobal(left_global).x()
+    expected_right_px = window.timeline_view.mapFromGlobal(right_global).x()
+
+    assert timeline_left_px == pytest.approx(expected_left_px, abs=1.0)
+    assert timeline_right_px == pytest.approx(expected_right_px, abs=1.0)
 
 
 def test_corner_editor_edge_drag_applies_delta_once() -> None:

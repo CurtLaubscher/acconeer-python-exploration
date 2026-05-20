@@ -12,6 +12,8 @@ USER_TOOLS_PATH = REPO_ROOT / "user_tools"
 if str(USER_TOOLS_PATH) not in sys.path:
     sys.path.insert(0, str(USER_TOOLS_PATH))
 
+from scipy.io import savemat
+
 from heatmap_alignment_core import (  # noqa: E402
     AlignmentSession,
     CameraTrack,
@@ -19,6 +21,8 @@ from heatmap_alignment_core import (  # noqa: E402
     ExportOverlaySettings,
     HeatmapPlotRenderer,
     HeatmapTrack,
+    Leg2MatImportError,
+    Leg2UltrasonicDatasourceSettings,
     PreprocessSettings,
     RenderSettings,
     SignalPlotViewSettings,
@@ -26,11 +30,14 @@ from heatmap_alignment_core import (  # noqa: E402
     ViewportGeometry,
     ViewportVisibilitySettings,
     apply_viewport_visibility,
+    build_leg2_ultrasonic_signal_series,
     build_peak_distance_signal_series,
     compute_xcorr_diagnostics,
     derive_h5_signal_plot_color,
+    import_leg2_mat_for_heatmap,
     import_peak_distance_json_for_heatmap,
     load_alignment_artifact,
+    load_leg2_mat_ultrasonic,
     prepare_proxy_video,
     rectify_viewport,
     save_alignment_artifact,
@@ -913,3 +920,294 @@ def test_import_peak_distance_json_without_heatmap_defers_validation(tmp_path: P
 
     assert warnings == []
     assert len(datasource.measurements) == 2
+
+
+def _write_sample_leg2_mat(
+    path: Path,
+    *,
+    include_trailing_zero_time: bool = False,
+) -> None:
+    time_out = np.array([10.0, 20.0, 30.0], dtype=np.float64)
+    distance_mm = np.array([1200.0, 1500.0, np.nan], dtype=np.float64)
+    filtered_mm = np.array([1180.0, 1490.0, 1600.0], dtype=np.float64)
+    reliable_flag = np.array([1.0, 0.0, 1.0], dtype=np.float64)
+    if include_trailing_zero_time:
+        time_out = np.append(time_out, 0.0)
+        distance_mm = np.append(distance_mm, 999.0)
+        filtered_mm = np.append(filtered_mm, 999.0)
+        reliable_flag = np.append(reliable_flag, 1.0)
+    savemat(
+        path,
+        {
+            "DataRecordCommon": {
+                "timeOut": time_out,
+                "ultrasonic_filtered": filtered_mm,
+                "ReliableFlag": reliable_flag,
+            },
+            "Ultrasonic": {"Distance": distance_mm},
+        },
+    )
+
+
+def test_load_leg2_mat_ultrasonic_success_and_unit_conversion(tmp_path: Path) -> None:
+    mat_path = tmp_path / "leg2.mat"
+    _write_sample_leg2_mat(mat_path)
+
+    datasource = load_leg2_mat_ultrasonic(mat_path)
+
+    assert datasource.time_s.tolist() == pytest.approx([0.0, 10.0, 20.0])
+    assert datasource.raw_distance_m.tolist() == pytest.approx([1.2, 1.5, np.nan], nan_ok=True)
+    assert datasource.filtered_distance_m.tolist() == pytest.approx([1.18, 1.49, 1.6])
+    assert datasource.reliable_flag_mask.tolist() == [True, False, True]
+    assert datasource.duration_s == pytest.approx(20.0)
+
+
+def test_load_leg2_mat_ultrasonic_trims_trailing_zero_time(tmp_path: Path) -> None:
+    mat_path = tmp_path / "leg2_trailing_zero.mat"
+    _write_sample_leg2_mat(mat_path, include_trailing_zero_time=True)
+
+    datasource = load_leg2_mat_ultrasonic(mat_path)
+
+    assert datasource.time_s.size == 3
+    assert datasource.raw_distance_m.size == 3
+    assert datasource.filtered_distance_m.size == 3
+    assert datasource.reliable_flag_mask.size == 3
+
+
+def test_load_leg2_mat_ultrasonic_requires_filtered_signal(tmp_path: Path) -> None:
+    mat_path = tmp_path / "leg2_missing_filtered.mat"
+    savemat(
+        mat_path,
+        {
+            "DataRecordCommon": {
+                "timeOut": np.array([1.0, 2.0, 3.0], dtype=np.float64),
+                "ReliableFlag": np.array([1.0, 1.0, 1.0], dtype=np.float64),
+            },
+            "Ultrasonic": {"Distance": np.array([1000.0, 1100.0, 1200.0], dtype=np.float64)},
+        },
+    )
+
+    with pytest.raises(Leg2MatImportError, match="ultrasonic_filtered"):
+        load_leg2_mat_ultrasonic(mat_path)
+
+
+def test_load_leg2_mat_ultrasonic_requires_reliable_flag(tmp_path: Path) -> None:
+    mat_path = tmp_path / "leg2_missing_reliable_flag.mat"
+    savemat(
+        mat_path,
+        {
+            "DataRecordCommon": {
+                "timeOut": np.array([1.0, 2.0, 3.0], dtype=np.float64),
+                "ultrasonic_filtered": np.array([1000.0, 1100.0, 1200.0], dtype=np.float64),
+            },
+            "Ultrasonic": {"Distance": np.array([1000.0, 1100.0, 1200.0], dtype=np.float64)},
+        },
+    )
+
+    with pytest.raises(Leg2MatImportError, match="DataRecordCommon.ReliableFlag"):
+        load_leg2_mat_ultrasonic(mat_path)
+
+
+def test_load_leg2_mat_ultrasonic_rejects_length_mismatch(tmp_path: Path) -> None:
+    mat_path = tmp_path / "leg2_mismatch.mat"
+    savemat(
+        mat_path,
+        {
+            "DataRecordCommon": {
+                "timeOut": np.array([1.0, 2.0, 3.0], dtype=np.float64),
+                "ultrasonic_filtered": np.array([1000.0, 1100.0], dtype=np.float64),
+                "ReliableFlag": np.array([1.0, 1.0, 1.0], dtype=np.float64),
+            },
+            "Ultrasonic": {"Distance": np.array([1000.0, 1100.0, 1200.0], dtype=np.float64)},
+        },
+    )
+
+    with pytest.raises(Leg2MatImportError, match="Incompatible array lengths"):
+        load_leg2_mat_ultrasonic(mat_path)
+
+
+def test_build_leg2_ultrasonic_signal_series_segments_and_gaps(tmp_path: Path) -> None:
+    mat_path = tmp_path / "leg2.mat"
+    _write_sample_leg2_mat(mat_path)
+    datasource = import_leg2_mat_for_heatmap(mat_path)
+
+    series = build_leg2_ultrasonic_signal_series(
+        datasource,
+        signal_kind="raw",
+        offset_s=0.5,
+    )
+
+    assert np.allclose(series.primary_time_s, [-0.5, np.nan], equal_nan=True)
+    assert np.allclose(series.primary_distance_m, [1.2, np.nan], equal_nan=True)
+    assert np.allclose(
+        series.faded_time_s,
+        [-0.5, 9.5, np.nan],
+        equal_nan=True,
+    )
+    assert np.allclose(
+        series.faded_distance_m,
+        [1.2, 1.5, np.nan],
+        equal_nan=True,
+    )
+
+
+def test_build_leg2_ultrasonic_signal_series_preserves_true_missing_value_gaps(
+    tmp_path: Path,
+) -> None:
+    mat_path = tmp_path / "leg2.mat"
+    _write_sample_leg2_mat(mat_path)
+    datasource = import_leg2_mat_for_heatmap(mat_path)
+
+    series = build_leg2_ultrasonic_signal_series(
+        datasource,
+        signal_kind="raw",
+        offset_s=0.0,
+    )
+
+    assert np.isnan(series.primary_time_s[-1])
+    assert np.isnan(series.faded_time_s[-1])
+
+
+def test_build_peak_distance_signal_series_bridges_detected_transitions() -> None:
+    measurements = (
+        FramePeakMeasurement(
+            frame_index=0,
+            source_tick=0,
+            time_s=0.0,
+            absolute_time=None,
+            status=STATUS_DETECTED,
+            peak_distance_m=1.0,
+            candidate_peak_distance_m=1.0,
+            peak_strength=10.0,
+        ),
+        FramePeakMeasurement(
+            frame_index=1,
+            source_tick=1,
+            time_s=0.1,
+            absolute_time=None,
+            status=STATUS_NO_DETECTION,
+            peak_distance_m=None,
+            candidate_peak_distance_m=1.2,
+            peak_strength=5.0,
+        ),
+    )
+
+    series = build_peak_distance_signal_series(measurements)
+
+    assert np.allclose(series.detected_time_s, [0.0, np.nan], equal_nan=True)
+    assert np.allclose(series.candidate_time_s, [0.0, 0.1], equal_nan=True)
+    assert series.candidate_distance_m[0] == pytest.approx(1.0)
+
+
+def test_alignment_artifact_roundtrip_with_leg2_ultrasonic_datasource(tmp_path: Path) -> None:
+    camera_path = tmp_path / "camera.mp4"
+    heatmap_path = tmp_path / "truth.h5"
+    mat_path = tmp_path / "leg2.mat"
+    camera_path.write_bytes(b"")
+    heatmap_path.write_bytes(b"")
+    _write_sample_leg2_mat(mat_path)
+
+    session = AlignmentSession(
+        camera_track=CameraTrack(path=str(camera_path), fps=30.0, duration_s=2.0, frame_count=60),
+        heatmap_track=HeatmapTrack(path=str(heatmap_path), duration_s=2.0, fps=10.0),
+        leg2_ultrasonic_datasource=Leg2UltrasonicDatasourceSettings(
+            path=str(mat_path),
+            visible=False,
+            signal_kind="filtered",
+            offset_s=0.25,
+        ),
+    )
+
+    artifact_path = tmp_path / "alignment_with_leg2.json"
+    save_alignment_artifact(session, artifact_path)
+    loaded = load_alignment_artifact(artifact_path)
+
+    assert loaded.leg2_ultrasonic_datasource.path == str(mat_path)
+    assert loaded.leg2_ultrasonic_datasource.visible is False
+    assert loaded.leg2_ultrasonic_datasource.signal_kind == "filtered"
+    assert loaded.leg2_ultrasonic_datasource.offset_s == pytest.approx(0.25)
+
+
+def test_alignment_artifact_defaults_missing_leg2_ultrasonic_fields(tmp_path: Path) -> None:
+    camera_path = tmp_path / "camera.mp4"
+    heatmap_path = tmp_path / "truth.h5"
+    camera_path.write_bytes(b"")
+    heatmap_path.write_bytes(b"")
+    artifact_path = tmp_path / "alignment.json"
+    artifact_path.write_text(
+        """
+{
+  "version": 1,
+  "camera_track": {"path": "%CAMERA%", "fps": 30.0, "duration_s": 1.0, "frame_count": 30},
+  "heatmap_track": {
+    "path": "%HEATMAP%",
+    "session_idx": 0,
+    "group_idx": 0,
+    "entry_idx": 0,
+    "subsweep_idx": 0,
+    "duration_s": 1.0,
+    "fps": 10.0
+  },
+  "viewport": {
+    "corners": [[0.0, 0.0], [9.0, 0.0], [9.0, 5.0], [0.0, 5.0]],
+    "output_width": 10,
+    "output_height": 6
+  },
+  "render": {"color_min": 0.0, "color_max": 3000.0, "fixed_levels": true},
+  "preprocess": {
+    "blur_sigma": 0.0,
+    "downscale_factor": 1.0,
+    "lag_window_s": 2.0,
+    "sample_count": 30
+  },
+  "timeline": {"current_time_s": 0.0, "offset_s": 0.0},
+  "export_overlay": {"visible": true, "preview_enabled": true, "x": 0.0, "y": 0.0, "width": 0.0, "height": 0.0}
+}
+        """.strip()
+        .replace("%CAMERA%", str(camera_path).replace("\\", "\\\\"))
+        .replace("%HEATMAP%", str(heatmap_path).replace("\\", "\\\\")),
+        encoding="utf-8",
+    )
+
+    loaded = load_alignment_artifact(artifact_path)
+
+    assert loaded.leg2_ultrasonic_datasource.path == ""
+    assert loaded.leg2_ultrasonic_datasource.visible is True
+    assert loaded.leg2_ultrasonic_datasource.signal_kind == "raw"
+    assert loaded.leg2_ultrasonic_datasource.offset_s == pytest.approx(0.0)
+
+
+def test_timeline_view_bounds_s_includes_leg2_track() -> None:
+    bounds = timeline_view_bounds_s(
+        heatmap_duration_s=10.0,
+        camera_duration_s=8.0,
+        camera_offset_s=1.0,
+        leg2_duration_s=6.0,
+        leg2_offset_s=2.0,
+        fit_padding_fraction=0.0,
+    )
+
+    assert bounds[0] == pytest.approx(-2.0)
+    assert bounds[1] == pytest.approx(10.0)
+
+
+def test_timeline_view_bounds_s_keeps_camera_and_leg2_offsets_independent() -> None:
+    camera_bounds = timeline_view_bounds_s(
+        heatmap_duration_s=5.0,
+        camera_duration_s=4.0,
+        camera_offset_s=1.5,
+        leg2_duration_s=0.0,
+        leg2_offset_s=0.0,
+        fit_padding_fraction=0.0,
+    )
+    leg2_bounds = timeline_view_bounds_s(
+        heatmap_duration_s=5.0,
+        camera_duration_s=0.0,
+        camera_offset_s=0.0,
+        leg2_duration_s=4.0,
+        leg2_offset_s=2.5,
+        fit_padding_fraction=0.0,
+    )
+
+    assert camera_bounds == pytest.approx((-1.5, 5.0))
+    assert leg2_bounds == pytest.approx((-2.5, 5.0))

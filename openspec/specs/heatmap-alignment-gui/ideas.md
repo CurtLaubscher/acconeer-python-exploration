@@ -90,6 +90,7 @@ The current timeline is intentionally compact and focused, but future polish cou
 
 Possible directions:
 - Add horizontal zoom and pan for longer recordings.
+- Add an explicit timeline x-range view mode so the Timeline does not always auto-fit all tracks. Users should be able to pan and zoom the Timeline x-axis manually, with actions to return to auto-fit behavior when desired.
 - Add `Fit All` and `Fit Overlap` actions.
 - Add optional overlap shading if users still find the two-track relationship confusing.
 - Improve tick density and labels as zoom changes.
@@ -97,6 +98,11 @@ Possible directions:
 - Add frame-by-frame navigation for the H5 track, camera track, or current aligned preview.
 - Add simple keyboard shortcuts for navigating time, such as stepping frames, nudging by small time increments, jumping to start/end, and toggling playback.
 - Preserve the simple H5-fixed, camera-draggable model unless a broader timeline model is explicitly needed.
+- Add a broader track interaction model where tracks can be selected, multi-selected with modifier clicks, and acted on through a context menu.
+- Add a way to link tracks so their offsets stay locked together and dragging one linked track drags the linked group. Clicking a linked track could select the whole linked group so the relationship is visible before dragging.
+- Add a way to fix or pin a track so it cannot be dragged accidentally. This would allow future workflows where H5 is not implicitly the only fixed reference track.
+- Consider making existing offset controls apply to the currently selected track or selected linked group instead of being permanently camera-specific.
+- Allow track offsets to be typed directly, possibly by making the offset value shown beside each timeline track bar editable in place.
 
 ### Peak-distance datasource and Calculate Peaks
 
@@ -153,14 +159,16 @@ Import a Leg2 `.mat` log as an additional signal datasource for manual alignment
 Initial direction:
 - Treat the Leg2 `.mat` file as its own track on the shared timeline, with its own offset relative to the H5 reference track. Do not model it as an H5-attached peak-distance datasource.
 - For the first pass, hard-code the expected Leg2 ultrasonic paths rather than building a generic `.mat` variable browser. Use `record.common.timeOut` as the correct time axis conceptually, while accepting that exported `.mat` files may expose this as `DataRecordCommon.timeOut`.
-- Plot both raw and filtered ultrasonic distance when available. In the sample hierarchy, these correspond to `Ultrasonic.Distance` and `DataRecordCommon.ultrasonic_filtered`.
+- Plot one selected ultrasonic distance signal at a time to avoid clutter. In the sample hierarchy, the initial choices are raw `Ultrasonic.Distance` and filtered `DataRecordCommon.ultrasonic_filtered`.
+- Use required `DataRecordCommon.ReliableFlag` from the Leg2 record to segment the plotted ultrasonic signal into primary and lower-alpha portions similarly to the H5 peak-distance detected/candidate rendering.
 - Do not include `stance_Dist` or `swing_Dist` in the first Leg2 ultrasonic import.
 - Use a distinct color for the Leg2 `.mat` track and reuse that color for its plotted signal(s), matching the visual convention proposed for H5 peak distance.
-- Keep the first workflow manual: load `.mat`, view ultrasonic signal(s), drag/nudge the `.mat` track offset until signal features align with the H5 peak-distance time-series and video.
+- Keep the first workflow manual: load `.mat`, view the selected ultrasonic signal, drag the `.mat` track offset until signal features align with the H5 peak-distance time-series and video.
 
 Future directions:
 - Add a `.mat` variable picker that lets the user select multiple variables for display instead of relying on hard-coded ultrasonic paths.
 - Allow selected `.mat` variables to be shown/hidden independently and possibly assigned colors or plotted on separate axes when units differ.
+- Add optional 1D signal cross-correlation between compatible time-series sources, such as H5 peak distance and Leg2 ultrasonic distance, as a diagnostic offset suggestion. This is separate from the image/viewport xcorr idea and should still keep manual alignment as the authority.
 - Consider assisted offset suggestions only if many files need to be synced; manual visual alignment should remain the authority unless a later change explicitly adds accepted automated suggestions.
 
 ### Resource loading organization
@@ -272,6 +280,8 @@ Possible directions:
 Some full-repo checks may fail for reasons unrelated to the heatmap alignment work, such as inherited changelog/git-tag checks or pre-existing Ruff patterns in `heatmap_alignment_gui.py` / `heatmap_alignment_core.py`.
 
 Possible directions:
+- Fix the Windows GUI-test teardown bug where PySide6/Qt tests can report all pytest assertions as passed but the Python process exits afterward with `0xC0000409` / `STATUS_STACK_BUFFER_OVERRUN`, surfaced by PowerShell or Hatch as a nonzero exit such as `-1`. Until fixed, this can mislead future agents into treating a passing GUI test run as failed or, worse, hiding real failures behind teardown noise.
+- Investigate QApplication/widget lifecycle in `tests/user_tools/test_heatmap_alignment_gui.py`, especially full-window tests, and consider pytest-qt's `qapp` fixture or process isolation if it makes teardown reliable on Windows.
 - Decide which inherited release/changelog checks still matter in this private repo.
 - Either update the tooling configuration for private-repo use or document which full-repo gates are expected to fail locally.
 - Clean up pre-existing Ruff issues in a dedicated refactor if they start obscuring feature-specific lint failures.
