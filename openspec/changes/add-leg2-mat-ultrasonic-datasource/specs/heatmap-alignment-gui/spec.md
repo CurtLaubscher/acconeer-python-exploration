@@ -28,7 +28,7 @@ The system SHALL extract the Leg2 ultrasonic datasource from hard-coded fields i
 
 #### Scenario: Extract required Leg2 fields
 - **WHEN** a Leg2 `.mat` file is loaded
-- **THEN** the system reads required fields from `DataRecordCommon.timeOut`, `Ultrasonic.Distance`, `DataRecordCommon.ultrasonic_filtered`, and `DataRecordCommon.robustFC`
+- **THEN** the system reads required fields from `DataRecordCommon.timeOut`, `Ultrasonic.Distance`, `DataRecordCommon.ultrasonic_filtered`, and `DataRecordCommon.ReliableFlag`
 
 #### Scenario: Normalize Leg2 elapsed time
 - **WHEN** Leg2 ultrasonic time values are loaded successfully
@@ -42,9 +42,9 @@ The system SHALL extract the Leg2 ultrasonic datasource from hard-coded fields i
 - **WHEN** Leg2 ultrasonic distance values are loaded successfully
 - **THEN** the system converts them from millimeters to meters before plotting or persisting loaded metadata
 
-#### Scenario: Extract robust segmentation
+#### Scenario: Extract ultrasonic-use segmentation
 - **WHEN** the loaded Leg2 `.mat` file is accepted
-- **THEN** the system uses it as a per-sample robust/non-robust display segmentation mask for the selected ultrasonic signal
+- **THEN** the system uses `DataRecordCommon.ReliableFlag` as a per-sample primary/faded display segmentation mask for the selected ultrasonic signal
 
 ### Requirement: Leg2 MAT load validation
 The system SHALL reject invalid Leg2 `.mat` loads with clear user-facing errors and SHALL leave any existing loaded Leg2 datasource unchanged when validation fails.
@@ -54,7 +54,7 @@ The system SHALL reject invalid Leg2 `.mat` loads with clear user-facing errors 
 - **THEN** the system rejects the import and reports which required field could not be loaded
 
 #### Scenario: Reject incompatible array lengths
-- **WHEN** the required Leg2 time, raw distance, filtered distance, and robust segmentation arrays have incompatible lengths after trailing zero-time cleanup
+- **WHEN** the required Leg2 time, raw distance, filtered distance, and `ReliableFlag` segmentation arrays have incompatible lengths after trailing zero-time cleanup
 - **THEN** the system rejects the import and reports the array length incompatibility
 
 #### Scenario: Reject invalid time axis
@@ -92,9 +92,24 @@ The system SHALL display the loaded Leg2 ultrasonic datasource as its own colore
 - **WHEN** the Leg2 track has offset `offset_s`
 - **THEN** Leg2 source time maps to shared H5 time using the same sign convention as the camera track, with the Leg2 timeline row start displayed at `-offset_s`
 
-#### Scenario: Show Leg2 offset value
-- **WHEN** a Leg2 ultrasonic datasource is loaded
-- **THEN** the system displays the current Leg2-to-H5 offset or aligned track start value in the interface so the numerical alignment is visible
+### Requirement: Timeline track offset labels
+The system SHALL display numerical alignment values inside the Timeline area for timeline tracks that have an editable offset from the shared reference.
+
+#### Scenario: Show offset labels for offset tracks
+- **WHEN** the Timeline area displays a track with an editable offset from the shared reference
+- **THEN** the system displays that track's current offset or aligned start value in the Timeline area on the same row as the corresponding track bar
+
+#### Scenario: Place offset label near track bar
+- **WHEN** the system displays an offset label for a timeline track
+- **THEN** the label appears just outside the left side of the track bar, right-aligned toward the bar, with a small margin and no pill or background container
+
+#### Scenario: Omit fixed reference offset label
+- **WHEN** the H5 reference track remains fixed at shared time zero
+- **THEN** the system is not required to display an offset label for the H5 reference track
+
+#### Scenario: Avoid clipped offset labels
+- **WHEN** a timeline track bar is near, at, or beyond the visible timeline edge such that its offset label would be clipped or misleading
+- **THEN** the system hides, clips, or otherwise suppresses the label so it does not overlap unrelated timeline content or appear detached from its track
 
 ### Requirement: Leg2 ultrasonic signal display
 The system SHALL display one selected Leg2 ultrasonic signal at a time in the existing Signals area using the Leg2 timeline color family.
@@ -115,9 +130,9 @@ The system SHALL display one selected Leg2 ultrasonic signal at a time in the ex
 - **WHEN** the Signals area plots a Leg2 ultrasonic signal
 - **THEN** the plotted signal uses a readable plot color derived from the same color family as the Leg2 timeline track
 
-#### Scenario: Segment ultrasonic signal by robust flag
+#### Scenario: Segment ultrasonic signal by ReliableFlag
 - **WHEN** the selected Leg2 ultrasonic signal is visible
-- **THEN** the Signals area renders robust samples as a slightly transparent primary signal and non-robust samples as a lower-alpha signal
+- **THEN** the Signals area renders samples where `DataRecordCommon.ReliableFlag` is true as a slightly transparent primary signal and samples where `DataRecordCommon.ReliableFlag` is false as a lower-alpha signal
 
 #### Scenario: Preserve ultrasonic missing-value gaps
 - **WHEN** a selected Leg2 ultrasonic sample has no plottable distance value
@@ -130,6 +145,21 @@ The system SHALL display one selected Leg2 ultrasonic signal at a time in the ex
 #### Scenario: Show Leg2 signal legend entry
 - **WHEN** the Signals area contains a visible Leg2 ultrasonic signal
 - **THEN** the compact legend identifies whether the plotted Leg2 signal is raw or filtered ultrasonic distance
+
+### Requirement: Segmented signal continuity
+The system SHALL render any Signals plot series that uses primary and faded or lower-alpha regions so styling changes do not introduce artificial visual gaps.
+
+#### Scenario: Bridge segmented signal transitions
+- **WHEN** the Signals area plots a signal split into primary and faded or lower-alpha regions based on a per-sample condition
+- **THEN** adjacent plottable samples remain visually connected across condition changes by using the faded or lower-alpha region to bridge into and out of primary regions
+
+#### Scenario: Keep primary region condition-based
+- **WHEN** the Signals area plots a segmented signal
+- **THEN** the primary non-faded region is used where the signal's primary condition is satisfied
+
+#### Scenario: Preserve true missing-value gaps
+- **WHEN** a segmented signal sample has no plottable x-value or y-value
+- **THEN** the Signals area leaves an actual gap rather than using a faded or lower-alpha region to bridge through the missing sample
 
 ### Requirement: Leg2 MAT session persistence
 The system SHALL persist optional Leg2 `.mat` datasource state in alignment session files.

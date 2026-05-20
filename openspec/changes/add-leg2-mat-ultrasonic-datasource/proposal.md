@@ -9,11 +9,11 @@ Manual alignment can now compare H5 peak distance over time against the shared t
   - time from `DataRecordCommon.timeOut`
   - raw ultrasonic distance from `Ultrasonic.Distance`
   - filtered ultrasonic distance from `DataRecordCommon.ultrasonic_filtered`
-  - robust/valid segmentation from `DataRecordCommon.robustFC`
+  - reliable ultrasonic-use segmentation from `DataRecordCommon.ReliableFlag`
 - Convert ultrasonic distance values to meters before plotting.
 - Ignore erroneous trailing `timeOut == 0` samples after valid time samples.
 - Display the Leg2 `.mat` as its own colored timeline track with its own draggable offset relative to the H5 reference, behaving like the draggable camera/video track.
-- Plot one selected ultrasonic signal at a time in the existing Signals area, with a raw/filtered toggle, robust samples rendered as a slightly transparent primary color, and non-robust samples rendered lower alpha.
+- Plot one selected ultrasonic signal at a time in the existing Signals area, with a raw/filtered toggle, samples where `DataRecordCommon.ReliableFlag` is true rendered as a slightly transparent primary color, and other samples rendered lower alpha.
 - Add startup, session, and artifact persistence for the loaded Leg2 `.mat` datasource, selected ultrasonic signal, visibility, and offset.
 - Add interactive load and unload controls for Leg2 `.mat` files, similar to the existing Peak-Distance JSON controls.
 - Hard-fail `.mat` loads with clear user-facing errors when required fields are missing, invalid, non-monotonic after cleanup, or length-incompatible.

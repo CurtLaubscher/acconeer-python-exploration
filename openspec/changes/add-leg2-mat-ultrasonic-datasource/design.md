@@ -11,7 +11,7 @@ The repo-managed `app` Hatch environment already includes the `algo` optional de
 **Goals:**
 
 - Load a Leg2 `.mat` file interactively and from a startup argument.
-- Extract the known ultrasonic time, raw distance, filtered distance, and robust segmentation arrays.
+- Extract the known ultrasonic time, raw distance, filtered distance, and reliable ultrasonic-use flag arrays.
 - Add a dedicated Leg2 `.mat` timeline track with its own color and draggable offset.
 - Display one selected ultrasonic signal at a time in the existing Signals plot.
 - Provide load and unload controls for Leg2 `.mat` files similar to the existing Peak-Distance JSON controls.
@@ -34,7 +34,7 @@ The repo-managed `app` Hatch environment already includes the `algo` optional de
 Create a small Leg2 ultrasonic datasource model in `heatmap_alignment_core.py` rather than overgeneralizing the existing peak-distance datasource. The model should separate persisted settings from loaded data:
 
 - persisted settings: path, visible flag, selected signal kind, offset seconds
-- loaded data: elapsed time seconds, raw distance meters, filtered distance meters, robust mask, display metadata
+- loaded data: elapsed time seconds, raw distance meters, filtered distance meters, reliable ultrasonic-use mask, display metadata
 
 This mirrors the existing optional peak-distance datasource pattern while allowing the `.mat` source to own timing and offset independently of H5 frames.
 
@@ -47,7 +47,7 @@ The importer should target the known exported paths:
 - `DataRecordCommon.timeOut` for time
 - `Ultrasonic.Distance` for raw ultrasonic distance
 - `DataRecordCommon.ultrasonic_filtered` for filtered ultrasonic distance
-- `DataRecordCommon.robustFC` for robust/valid segmentation
+- `DataRecordCommon.ReliableFlag` for reliable ultrasonic-use segmentation
 
 All four arrays are required for this first known-schema importer. If any required field is missing, invalid, or length-incompatible after trailing zero-time cleanup, the importer should reject the file with a user-facing error that names the field or mismatch that caused the failure.
 
@@ -67,13 +67,21 @@ The `.mat` datasource should add a third timeline row with its own semantic colo
 
 The H5 track may still be the practical reference for this proposal, but the timeline implementation should avoid assuming that every non-H5 track is the camera. This keeps the work compatible with later linked/fixed track ideas without implementing those ideas now.
 
+Numerical offset or aligned-start labels should be drawn as part of the Timeline row for offset-bearing tracks rather than in a separate control strip. For each offset-bearing track, place the label just outside the left side of that track's bar, right-aligned toward the bar with a small margin. Use plain floating text with no pill/background. If the bar is too close to the visible edge or outside the visible timeline range, hide or clip the label so it does not overlap unrelated content or appear detached from the track. The current fixed H5 reference track does not need a label while it starts at shared time zero.
+
 Alternative considered: attach the ultrasonic signal only to the Signals plot without a timeline track. That would make the offset state invisible and harder to align manually.
 
 ### Plot One Ultrasonic Signal At A Time
 
-The Signals plot should show either raw or filtered ultrasonic distance, not both simultaneously by default. A compact UI control should let the user choose raw versus filtered. The selected signal should share the Leg2 track color family. Samples with `robustFC` true/1 should render as the primary signal with slight transparency so overlapping plotted signals remain visible. Samples with `robustFC` false/0 should render lower alpha using the same faded style as the existing non-primary distance segments. Missing values should remain gaps.
+The Signals plot should show either raw or filtered ultrasonic distance, not both simultaneously by default. A compact UI control should let the user choose raw versus filtered. The selected signal should share the Leg2 track color family. Samples where `DataRecordCommon.ReliableFlag` is true/1 should render as the primary signal with slight transparency so overlapping plotted signals remain visible. Samples where `DataRecordCommon.ReliableFlag` is false/0 should render lower alpha using the same faded style as the existing non-primary distance segments. Missing values should remain gaps.
 
-Alternative considered: plot raw and filtered simultaneously. That can clutter the limited Signals area and make robust/non-robust segmentation harder to read.
+Alternative considered: plot raw and filtered simultaneously. That can clutter the limited Signals area and make flag-based segmentation harder to read.
+
+### Keep Segmented Signals Visually Continuous
+
+Any Signals plot series split into primary and faded/lower-alpha portions should remain visually continuous across condition changes. The primary portion is used where the condition is satisfied, such as detected H5 peaks or Leg2 ultrasonic samples where `DataRecordCommon.ReliableFlag` is true. The faded portion should bridge the adjacent plottable samples where the condition is not satisfied, including the transition into and out of primary regions, so the user does not see artificial breaks caused only by styling segmentation.
+
+True missing values remain different: if a sample has no plottable x/y value, the plot should leave a real gap rather than interpolating through it.
 
 ### Reuse Existing Signals Plot Range Behavior
 
@@ -92,5 +100,5 @@ Add a startup argument such as `--mat` for parity with `--h5`, `--camera`, `--ar
 - [MAT export shape varies] -> Keep the importer errors specific and include field names so new variants can be added deliberately.
 - [Large `.mat` files load slowly] -> Keep the first pass focused on needed arrays and leave on-demand/resource-quality controls as future work unless real files prove impossible to load.
 - [Multiple draggable tracks make timeline behavior more complex] -> Scope this to one additional draggable track and add tests for camera and Leg2 offset independence.
-- [Robust mask semantics may differ between logs] -> Treat the mask as display segmentation only; do not drop samples or change alignment state based on it.
+- [ReliableFlag semantics may differ between logs] -> Treat `DataRecordCommon.ReliableFlag` as display segmentation only; do not drop samples or change alignment state based on it.
 - [Session reload can fail when files move] -> Keep the GUI usable and report the `.mat` reload failure without invalidating the camera/H5 alignment session.
