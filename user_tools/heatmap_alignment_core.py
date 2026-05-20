@@ -8,6 +8,7 @@ because it depends on the same runtime surface as the GUI, including OpenCV.
 """
 
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -24,6 +25,8 @@ import numpy as np
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
 from sparse_iq_peak_distance_core import (
+    STATUS_DETECTED,
+    FramePeakMeasurement,
     LoadedPeakDistanceDatasource,
     PeakDistanceDatasourceSettings,
     load_peak_distance_json,
@@ -32,6 +35,14 @@ from sparse_iq_peak_distance_core import (
 
 
 ARTIFACT_VERSION = 1
+
+H5_TIMELINE_TRACK_COLOR_HEX = "#22c55e"
+SIGNAL_PLOT_BACKGROUND_HEX = "#0f1720"
+SIGNAL_PLOT_NO_DETECTION_ALPHA = 72
+TIMELINE_PLAYHEAD_COLOR_HEX = "#f8fafc"
+SIGNAL_PLAYHEAD_ALPHA = 96
+
+SignalPlotRangeMode = Literal["auto", "manual"]
 
 
 @dataclass
@@ -100,6 +111,22 @@ class ViewportVisibilitySettings:
     gamma: float = 1.0
 
 
+@dataclass
+class SignalPlotViewSettings:
+    x_range_mode: SignalPlotRangeMode = "auto"
+    y_range_mode: SignalPlotRangeMode = "auto"
+    manual_x_range: tuple[float, float] | None = None
+    manual_y_range: tuple[float, float] | None = None
+
+
+@dataclass(frozen=True)
+class PeakDistanceSignalSeries:
+    detected_time_s: np.ndarray
+    detected_distance_m: np.ndarray
+    candidate_time_s: np.ndarray
+    candidate_distance_m: np.ndarray
+
+
 @dataclass(frozen=True)
 class VideoProbe:
     path: Path
@@ -151,9 +178,16 @@ class AlignmentSession:
     peak_distance_datasource: PeakDistanceDatasourceSettings = field(
         default_factory=PeakDistanceDatasourceSettings
     )
+    signal_plot_view: SignalPlotViewSettings = field(default_factory=SignalPlotViewSettings)
 
     def to_json_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        payload = asdict(self)
+        view = payload["signal_plot_view"]
+        if view["manual_x_range"] is not None:
+            view["manual_x_range"] = list(view["manual_x_range"])
+        if view["manual_y_range"] is not None:
+            view["manual_y_range"] = list(view["manual_y_range"])
+        return payload
 
     @classmethod
     def from_json_dict(cls, payload: dict[str, Any]) -> AlignmentSession:
@@ -179,9 +213,198 @@ class AlignmentSession:
             peak_distance_datasource=PeakDistanceDatasourceSettings(
                 **payload.get("peak_distance_datasource", {})
             ),
+            signal_plot_view=_signal_plot_view_settings_from_payload(
+                payload.get("signal_plot_view")
+            ),
         )
         validate_alignment_session(session)
         return session
+
+
+def _signal_plot_view_settings_from_payload(
+    payload: dict[str, Any] | None,
+) -> SignalPlotViewSettings:
+    if not payload:
+        return SignalPlotViewSettings()
+
+    x_range_mode = payload.get("x_range_mode", "auto")
+    y_range_mode = payload.get("y_range_mode", "auto")
+    if x_range_mode not in ("auto", "manual"):
+        raise ValueError(f"Unsupported signal plot x_range_mode {x_range_mode!r}.")
+    if y_range_mode not in ("auto", "manual"):
+        raise ValueError(f"Unsupported signal plot y_range_mode {y_range_mode!r}.")
+
+    manual_x_range = _optional_range_pair(payload.get("manual_x_range"))
+    manual_y_range = _optional_range_pair(payload.get("manual_y_range"))
+    return SignalPlotViewSettings(
+        x_range_mode=x_range_mode,
+        y_range_mode=y_range_mode,
+        manual_x_range=manual_x_range,
+        manual_y_range=manual_y_range,
+    )
+
+
+def _optional_range_pair(value: Any) -> tuple[float, float] | None:
+    if value is None:
+        return None
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        raise ValueError("Signal plot manual ranges must be two-number lists.")
+    return float(value[0]), float(value[1])
+
+
+def timeline_view_bounds_s(
+    *,
+    heatmap_duration_s: float,
+    camera_duration_s: float,
+    camera_offset_s: float,
+    fit_padding_fraction: float = 0.12,
+) -> tuple[float, float]:
+    """Return padded shared timeline bounds used by the timeline and Signals plot."""
+    heatmap_duration_s = max(0.0, heatmap_duration_s)
+    camera_duration_s = max(0.0, camera_duration_s)
+    camera_start_s = -camera_offset_s
+    track_starts = [0.0]
+    track_ends = [heatmap_duration_s]
+    if camera_duration_s > 0.0:
+        track_starts.append(camera_start_s)
+        track_ends.append(camera_start_s + camera_duration_s)
+
+    range_start_s = min(track_starts)
+    range_end_s = max(track_ends)
+    span_s = range_end_s - range_start_s
+    if span_s <= 0.0 or math.isclose(range_start_s, range_end_s):
+        span_s = 1.0
+    padding_s = span_s * fit_padding_fraction
+    return range_start_s - padding_s, range_end_s + padding_s
+
+
+def _hex_to_rgb(hex_color: str) -> tuple[int, int, int]:
+    normalized = hex_color.strip().lstrip("#")
+    if len(normalized) != 6:
+        raise ValueError(f"Expected #RRGGBB color, got {hex_color!r}.")
+    return (
+        int(normalized[0:2], 16),
+        int(normalized[2:4], 16),
+        int(normalized[4:6], 16),
+    )
+
+
+def _rgb_to_hex(red: int, green: int, blue: int) -> str:
+    return f"#{red:02x}{green:02x}{blue:02x}"
+
+
+def derive_h5_signal_plot_color(
+    track_color_hex: str = H5_TIMELINE_TRACK_COLOR_HEX,
+    *,
+    background_hex: str = SIGNAL_PLOT_BACKGROUND_HEX,
+) -> str:
+    """Derive a readable plot color from the H5 timeline track color."""
+    red, green, blue = _hex_to_rgb(track_color_hex)
+    background_red, background_green, background_blue = _hex_to_rgb(background_hex)
+    background_luminance = (
+        0.299 * background_red + 0.587 * background_green + 0.114 * background_blue
+    )
+    if background_luminance < 128.0:
+        scale = 1.35
+    else:
+        scale = 0.72
+    adjusted = (
+        int(np.clip(red * scale, 0, 255)),
+        int(np.clip(green * scale, 0, 255)),
+        int(np.clip(blue * scale, 0, 255)),
+    )
+    return _rgb_to_hex(*adjusted)
+
+
+def _plottable_candidate_distance_m(measurement: FramePeakMeasurement) -> float | None:
+    value = measurement.candidate_peak_distance_m
+    if not math.isfinite(value):
+        return None
+    return float(value)
+
+
+def build_peak_distance_signal_series(
+    measurements: tuple[FramePeakMeasurement, ...],
+) -> PeakDistanceSignalSeries:
+    detected_time_s: list[float] = []
+    detected_distance_m: list[float] = []
+    candidate_time_s: list[float] = []
+    candidate_distance_m: list[float] = []
+
+    def append_gap(time_values: list[float], distance_values: list[float]) -> None:
+        if time_values and not math.isnan(time_values[-1]):
+            time_values.append(float("nan"))
+            distance_values.append(float("nan"))
+
+    def append_bridge(
+        source_time_s: list[float],
+        source_distance_m: list[float],
+        target_time_s: list[float],
+        target_distance_m: list[float],
+    ) -> None:
+        if not source_time_s or math.isnan(source_time_s[-1]):
+            return
+        bridge_time_s = source_time_s[-1]
+        bridge_distance_m = source_distance_m[-1]
+        if target_time_s and target_time_s[-1] == bridge_time_s:
+            return
+        target_time_s.append(bridge_time_s)
+        target_distance_m.append(bridge_distance_m)
+
+    for measurement in measurements:
+        distance_m = _plottable_candidate_distance_m(measurement)
+        if distance_m is None:
+            append_gap(detected_time_s, detected_distance_m)
+            append_gap(candidate_time_s, candidate_distance_m)
+            continue
+        if measurement.status == STATUS_DETECTED:
+            append_bridge(candidate_time_s, candidate_distance_m, detected_time_s, detected_distance_m)
+            append_gap(candidate_time_s, candidate_distance_m)
+            detected_time_s.append(measurement.time_s)
+            detected_distance_m.append(distance_m)
+        else:
+            append_bridge(detected_time_s, detected_distance_m, candidate_time_s, candidate_distance_m)
+            append_gap(detected_time_s, detected_distance_m)
+            candidate_time_s.append(measurement.time_s)
+            candidate_distance_m.append(distance_m)
+
+    return PeakDistanceSignalSeries(
+        detected_time_s=np.asarray(detected_time_s, dtype=np.float64),
+        detected_distance_m=np.asarray(detected_distance_m, dtype=np.float64),
+        candidate_time_s=np.asarray(candidate_time_s, dtype=np.float64),
+        candidate_distance_m=np.asarray(candidate_distance_m, dtype=np.float64),
+    )
+
+
+def visible_signal_y_range(
+    series: PeakDistanceSignalSeries,
+    *,
+    x_min_s: float,
+    x_max_s: float,
+) -> tuple[float, float] | None:
+    if x_max_s < x_min_s:
+        x_min_s, x_max_s = x_max_s, x_min_s
+
+    visible_values: list[float] = []
+    for time_values, distance_values in (
+        (series.detected_time_s, series.detected_distance_m),
+        (series.candidate_time_s, series.candidate_distance_m),
+    ):
+        for time_s, distance_m in zip(time_values, distance_values, strict=False):
+            if not math.isfinite(time_s) or not math.isfinite(distance_m):
+                continue
+            if x_min_s <= time_s <= x_max_s:
+                visible_values.append(distance_m)
+
+    if not visible_values:
+        return None
+    y_min = min(0.0, min(visible_values))
+    y_max = max(visible_values)
+    if math.isclose(y_min, y_max):
+        padding = max(abs(y_min) * 0.05, 0.05)
+        return y_min - padding, y_max + padding
+    padding = (y_max - y_min) * 0.05
+    return y_min - padding, y_max + padding
 
 
 def save_alignment_artifact(session: AlignmentSession, path: Path) -> None:

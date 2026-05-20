@@ -25,12 +25,17 @@ import argparse
 import math
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
 import cv2
 import numpy as np
 from heatmap_alignment_core import (
+    SIGNAL_PLOT_BACKGROUND_HEX,
+    SIGNAL_PLOT_NO_DETECTION_ALPHA,
+    SIGNAL_PLAYHEAD_ALPHA,
+    TIMELINE_PLAYHEAD_COLOR_HEX,
     AlignmentSession,
     CameraTrack,
     CameraVideoSource,
@@ -38,14 +43,20 @@ from heatmap_alignment_core import (
     HeatmapPlotRenderer,
     HeatmapTruthSource,
     LoadedPeakDistanceDatasource,
+    PeakDistanceSignalSeries,
+    SignalPlotViewSettings,
     apply_viewport_visibility,
+    build_peak_distance_signal_series,
+    derive_h5_signal_plot_color,
     import_peak_distance_json_for_heatmap,
     load_alignment_artifact,
     prepare_proxy_video,
     rectify_viewport,
     save_alignment_artifact,
     scale_viewport_corners,
+    timeline_view_bounds_s,
     validate_alignment_session,
+    visible_signal_y_range,
 )
 from sparse_iq_heatmap_common import heatmap_axes, select_subsweep
 from sparse_iq_peak_distance_core import (
@@ -227,49 +238,446 @@ class DoubleRangeSlider(QtWidgets.QWidget):
         return float(self._minimum + fraction * (self._maximum - self._minimum))
 
 
-class AlignmentTimelineWidget(QtWidgets.QWidget):
-    playhead_changed = QtCore.Signal(float)
-    camera_offset_changed = QtCore.Signal(float)
+def _plot_color_with_alpha(plot_color_hex: str, alpha: int) -> str:
+    normalized = plot_color_hex.strip().lstrip("#")
+    if len(normalized) != 6:
+        raise ValueError(f"Expected #RRGGBB color, got {plot_color_hex!r}.")
+    return f"#{normalized}{alpha:02x}"
 
-    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+
+def _make_h5_signal_plot_pens(plot_color_hex: str) -> tuple[QtGui.QPen, QtGui.QPen]:
+    """Build solid detected and lower-alpha no-detection pens (both solid lines)."""
+    detected_pen = pg.mkPen(plot_color_hex, width=2.5)
+    candidate_pen = pg.mkPen(
+        _plot_color_with_alpha(plot_color_hex, SIGNAL_PLOT_NO_DETECTION_ALPHA),
+        width=2.5,
+    )
+    return detected_pen, candidate_pen
+
+
+TIMELINE_LABEL_GUTTER_PX = 72
+
+
+@dataclass(frozen=True)
+class TimeAxisGeometry:
+    left_px: float
+    right_px: float
+
+
+class TimelineRangeModel(QtCore.QObject):
+    """Single source of truth for the shared visible timeline x-range."""
+
+    range_changed = QtCore.Signal(float, float)
+
+    def __init__(self, parent: QtCore.QObject | None = None) -> None:
         super().__init__(parent)
-        self.setMinimumHeight(96)
-        self.setMouseTracking(True)
-        self._fit_padding_fraction = 0.12
-        self._camera_duration_s = 0.0
-        self._heatmap_duration_s = 0.0
-        self._current_time_s = 0.0
-        self._camera_offset_s = 0.0
         self._range_start_s = 0.0
         self._range_end_s = 1.0
+        self._camera_duration_s = 0.0
+        self._heatmap_duration_s = 0.0
+        self._camera_offset_s = 0.0
+        self._fit_padding_fraction = 0.12
+        self._freeze_depth = 0
         self._frozen_range_start_s: float | None = None
         self._frozen_range_end_s: float | None = None
-        self._dragging_camera = False
-        self._dragging_playhead = False
-        self._camera_drag_anchor_s = 0.0
-        self._hover_on_camera_bar = False
 
-    def set_timeline_state(
+    def visible_range_s(self) -> tuple[float, float]:
+        if self._freeze_depth > 0:
+            if self._frozen_range_start_s is not None and self._frozen_range_end_s is not None:
+                return self._frozen_range_start_s, self._frozen_range_end_s
+        return self._range_start_s, self._range_end_s
+
+    @property
+    def camera_duration_s(self) -> float:
+        return self._camera_duration_s
+
+    @property
+    def heatmap_duration_s(self) -> float:
+        return self._heatmap_duration_s
+
+    @property
+    def camera_offset_s(self) -> float:
+        return self._camera_offset_s
+
+    def set_track_state(
         self,
         *,
         camera_duration_s: float,
         heatmap_duration_s: float,
-        current_time_s: float,
         camera_offset_s: float,
     ) -> None:
         self._camera_duration_s = max(0.0, camera_duration_s)
         self._heatmap_duration_s = max(0.0, heatmap_duration_s)
-        self._current_time_s = current_time_s
         self._camera_offset_s = camera_offset_s
-        if (
-            self._dragging_camera
-            and self._frozen_range_start_s is not None
-            and self._frozen_range_end_s is not None
+
+    def begin_visible_range_freeze(self) -> None:
+        if self._freeze_depth == 0:
+            range_start_s, range_end_s = self.visible_range_s()
+            self._frozen_range_start_s = range_start_s
+            self._frozen_range_end_s = range_end_s
+        self._freeze_depth += 1
+
+    def end_visible_range_freeze(self, *, recompute: bool) -> None:
+        self._freeze_depth = max(0, self._freeze_depth - 1)
+        if self._freeze_depth > 0:
+            return
+        self._frozen_range_start_s = None
+        self._frozen_range_end_s = None
+        if recompute:
+            self.recompute_visible_range()
+
+    def recompute_visible_range(self) -> None:
+        if self._freeze_depth > 0:
+            return
+        self.set_visible_range(
+            *timeline_view_bounds_s(
+                heatmap_duration_s=self._heatmap_duration_s,
+                camera_duration_s=self._camera_duration_s,
+                camera_offset_s=self._camera_offset_s,
+                fit_padding_fraction=self._fit_padding_fraction,
+            )
+        )
+
+    def set_visible_range(self, range_start_s: float, range_end_s: float) -> None:
+        if math.isclose(range_start_s, self._range_start_s) and math.isclose(
+            range_end_s, self._range_end_s
         ):
-            self._range_start_s = self._frozen_range_start_s
-            self._range_end_s = self._frozen_range_end_s
+            return
+        self._range_start_s = range_start_s
+        self._range_end_s = range_end_s
+        self.range_changed.emit(range_start_s, range_end_s)
+
+
+class SignalPlotWidget(pg.PlotWidget):
+    """Signals plot with timeline-following x auto mode and persisted range modes."""
+
+    view_settings_changed = QtCore.Signal()
+    axis_geometry_sync_requested = QtCore.Signal()
+
+    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent=parent)
+        self.setBackground(SIGNAL_PLOT_BACKGROUND_HEX)
+        self.setLabel("left", "Distance (m)")
+        self.setLabel("bottom", "Time (s)")
+        self.showGrid(x=True, y=True, alpha=0.2)
+        self._view_settings = SignalPlotViewSettings()
+        self._timeline_range_model: TimelineRangeModel | None = None
+        self._signal_series: PeakDistanceSignalSeries | None = None
+        self._has_visible_signal = False
+        self._applying_view = False
+        self._plot_color = derive_h5_signal_plot_color()
+        detected_pen, candidate_pen = _make_h5_signal_plot_pens(self._plot_color)
+        self._candidate_curve = self.plot(
+            pen=candidate_pen,
+            connect="finite",
+            name="H5 peak (no detection)",
+        )
+        self._detected_curve = self.plot(
+            pen=detected_pen,
+            connect="finite",
+            name="H5 peak (detected)",
+        )
+        self.addLegend(offset=(8, 8))
+        self._current_time_line = pg.InfiniteLine(
+            pos=0.0,
+            angle=90,
+            movable=False,
+            pen=pg.mkPen(
+                _plot_color_with_alpha(TIMELINE_PLAYHEAD_COLOR_HEX, SIGNAL_PLAYHEAD_ALPHA),
+                width=1.0,
+            ),
+        )
+        self._current_time_line.setAcceptedMouseButtons(QtCore.Qt.MouseButton.NoButton)
+        self._current_time_line.setHoverPen(None)
+        self.addItem(self._current_time_line)
+        view_box = self.getPlotItem().getViewBox()
+        view_box.disableAutoRange()
+        view_box.sigRangeChanged.connect(self._view_box_range_changed)
+        self._configure_range_mode_menu(view_box)
+        left_axis = self.getAxis("left")
+        if left_axis is not None:
+            left_axis.setWidth(56)
+
+    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
+        super().resizeEvent(event)
+        self.axis_geometry_sync_requested.emit()
+
+    def showEvent(self, event: QtGui.QShowEvent) -> None:
+        super().showEvent(event)
+        self.axis_geometry_sync_requested.emit()
+
+    def viewbox_horizontal_extent_local(self) -> tuple[float, float]:
+        """Return the ViewBox data area as left/right x in this widget's coordinates."""
+        view_box = self.getPlotItem().getViewBox()
+        view_width = float(view_box.boundingRect().width())
+        left_px = float(self.mapFromScene(view_box.mapToScene(0.0, 0.0)).x())
+        right_px = float(self.mapFromScene(view_box.mapToScene(view_width, 0.0)).x())
+        return min(left_px, right_px), max(left_px, right_px)
+
+    def view_settings(self) -> SignalPlotViewSettings:
+        return self._view_settings
+
+    def set_view_settings(self, settings: SignalPlotViewSettings) -> None:
+        self._view_settings = SignalPlotViewSettings(
+            x_range_mode=settings.x_range_mode,
+            y_range_mode=settings.y_range_mode,
+            manual_x_range=settings.manual_x_range,
+            manual_y_range=settings.manual_y_range,
+        )
+        self._sync_range_mode_menu_checks()
+        self._apply_view_settings()
+
+    def attach_timeline_range_model(self, range_model: TimelineRangeModel) -> None:
+        self._timeline_range_model = range_model
+        range_model.range_changed.connect(self._on_timeline_visible_range_changed)
+        self.sync_x_if_following()
+
+    def set_current_time_s(self, time_s: float) -> None:
+        self._current_time_line.setPos(float(time_s))
+
+    def sync_x_if_following(self) -> None:
+        """Apply the shared visible timeline range when x-axis follows the timeline."""
+        if self._view_settings.x_range_mode != "auto" or self._timeline_range_model is None:
+            return
+        range_start_s, range_end_s = self._timeline_range_model.visible_range_s()
+        self._applying_view = True
+        try:
+            self.setXRange(range_start_s, range_end_s, padding=0.0)
+            if self._view_settings.y_range_mode == "auto":
+                self._apply_y_auto_range()
+        finally:
+            self._applying_view = False
+
+    def _on_timeline_visible_range_changed(self, range_start_s: float, range_end_s: float) -> None:
+        del range_start_s, range_end_s
+        self.sync_x_if_following()
+
+    def set_signal_series(
+        self,
+        series: PeakDistanceSignalSeries | None,
+        *,
+        visible: bool,
+    ) -> None:
+        self._signal_series = series
+        self._has_visible_signal = visible and series is not None
+        if not self._has_visible_signal or series is None:
+            self._detected_curve.setData([], [])
+            self._candidate_curve.setData([], [])
+            self.getPlotItem().legend.setVisible(False)
         else:
-            self._range_start_s, self._range_end_s = self._shared_time_bounds()
+            self._detected_curve.setData(series.detected_time_s, series.detected_distance_m)
+            self._candidate_curve.setData(series.candidate_time_s, series.candidate_distance_m)
+            self.getPlotItem().legend.setVisible(True)
+        self._apply_view_settings()
+        self.axis_geometry_sync_requested.emit()
+
+    def _configure_range_mode_menu(self, view_box: pg.ViewBox) -> None:
+        menu = view_box.menu
+        if menu is None:
+            return
+
+        x_axis_menu = menu.ctrl[0]
+        y_axis_menu = menu.ctrl[1]
+        x_axis_menu.autoRadio.setText("Timeline")
+        x_axis_menu.autoRadio.setToolTip("Match the Timeline x-range.")
+        for axis_menu in (x_axis_menu, y_axis_menu):
+            axis_menu.autoPercentSpin.setVisible(False)
+            axis_menu.autoPanCheck.setVisible(False)
+            axis_menu.visibleOnlyCheck.setVisible(False)
+
+        try:
+            x_axis_menu.autoRadio.clicked.disconnect(menu.xAutoClicked)
+        except TypeError:
+            pass
+        try:
+            x_axis_menu.manualRadio.clicked.disconnect(menu.xManualClicked)
+        except TypeError:
+            pass
+        try:
+            y_axis_menu.autoRadio.clicked.disconnect(menu.yAutoClicked)
+        except TypeError:
+            pass
+        try:
+            y_axis_menu.manualRadio.clicked.disconnect(menu.yManualClicked)
+        except TypeError:
+            pass
+
+        x_axis_menu.autoRadio.clicked.connect(lambda: self._set_x_range_mode("auto"))
+        x_axis_menu.manualRadio.clicked.connect(lambda: self._set_x_range_mode("manual"))
+        y_axis_menu.autoRadio.clicked.connect(lambda: self._set_y_range_mode("auto"))
+        y_axis_menu.manualRadio.clicked.connect(lambda: self._set_y_range_mode("manual"))
+
+        original_update_state = menu.updateState
+
+        def update_state() -> None:
+            original_update_state()
+            self._sync_range_mode_menu_checks()
+
+        menu.updateState = update_state
+        self._sync_range_mode_menu_checks()
+
+    def _sync_range_mode_menu_checks(self) -> None:
+        menu = self.getPlotItem().getViewBox().menu
+        if menu is None:
+            return
+        x_axis_menu = menu.ctrl[0]
+        y_axis_menu = menu.ctrl[1]
+        x_axis_menu.autoRadio.setChecked(self._view_settings.x_range_mode == "auto")
+        x_axis_menu.manualRadio.setChecked(self._view_settings.x_range_mode == "manual")
+        y_axis_menu.autoRadio.setChecked(self._view_settings.y_range_mode == "auto")
+        y_axis_menu.manualRadio.setChecked(self._view_settings.y_range_mode == "manual")
+        self._sync_x_timeline_mode_menu_constraints()
+
+    def _sync_x_timeline_mode_menu_constraints(self) -> None:
+        plot_item = self.getPlotItem()
+        view_box = plot_item.getViewBox()
+        menu = view_box.menu
+        if menu is None:
+            return
+
+        x_timeline = self._view_settings.x_range_mode == "auto"
+        x_axis_menu = menu.ctrl[0]
+        if x_timeline:
+            x_axis_menu.invertCheck.setChecked(False)
+            view_box.invertX(False)
+            for transform_check in self._x_timeline_blocked_transform_checks():
+                transform_check.setChecked(False)
+            plot_item.setLogMode(x=False)
+
+        x_axis_menu.invertCheck.setEnabled(not x_timeline)
+        for transform_check in self._x_timeline_blocked_transform_checks():
+            transform_check.setEnabled(not x_timeline)
+        menu.viewAll.setEnabled(not x_timeline)
+
+    def _x_timeline_blocked_transform_checks(self) -> tuple[QtWidgets.QCheckBox, ...]:
+        plot_ctrl = self.getPlotItem().ctrl
+        return (
+            plot_ctrl.logXCheck,
+            plot_ctrl.derivativeCheck,
+            plot_ctrl.phasemapCheck,
+            plot_ctrl.fftCheck,
+        )
+
+    def _set_x_range_mode(self, mode: Literal["auto", "manual"]) -> None:
+        if self._view_settings.x_range_mode == mode:
+            return
+        if mode == "manual":
+            x_range, _ = self.getViewBox().viewRange()
+            self._view_settings.manual_x_range = (float(x_range[0]), float(x_range[1]))
+        self._view_settings.x_range_mode = mode
+        self._sync_range_mode_menu_checks()
+        self._apply_view_settings()
+        if mode == "auto":
+            self.sync_x_if_following()
+        self.view_settings_changed.emit()
+
+    def _set_y_range_mode(self, mode: Literal["auto", "manual"]) -> None:
+        if self._view_settings.y_range_mode == mode:
+            return
+        if mode == "manual":
+            _, y_range = self.getViewBox().viewRange()
+            self._view_settings.manual_y_range = (float(y_range[0]), float(y_range[1]))
+        self._view_settings.y_range_mode = mode
+        self._sync_range_mode_menu_checks()
+        self._apply_view_settings()
+        self.view_settings_changed.emit()
+
+    def _apply_view_settings(self) -> None:
+        view_box = self.getPlotItem().getViewBox()
+        x_manual = self._view_settings.x_range_mode == "manual"
+        y_manual = self._view_settings.y_range_mode == "manual"
+        view_box.setMouseEnabled(x=x_manual, y=y_manual)
+
+        self._applying_view = True
+        try:
+            if self._view_settings.x_range_mode == "manual" and self._view_settings.manual_x_range is not None:
+                x_min_s, x_max_s = self._view_settings.manual_x_range
+                self.setXRange(x_min_s, x_max_s, padding=0.0)
+            elif self._view_settings.x_range_mode == "auto":
+                self.sync_x_if_following()
+
+            if self._view_settings.y_range_mode == "auto":
+                self._apply_y_auto_range()
+            elif self._view_settings.manual_y_range is not None:
+                y_min_m, y_max_m = self._view_settings.manual_y_range
+                self.setYRange(y_min_m, y_max_m, padding=0.0)
+        finally:
+            self._applying_view = False
+
+    def _apply_y_auto_range(self) -> None:
+        if not self._has_visible_signal or self._signal_series is None:
+            return
+        x_range, _ = self.getViewBox().viewRange()
+        y_range = visible_signal_y_range(
+            self._signal_series,
+            x_min_s=float(x_range[0]),
+            x_max_s=float(x_range[1]),
+        )
+        if y_range is None:
+            return
+        self.setYRange(y_range[0], y_range[1], padding=0.0)
+
+    def _view_box_range_changed(self) -> None:
+        if self._applying_view:
+            return
+        x_range, y_range = self.getViewBox().viewRange()
+        changed = False
+        if self._view_settings.x_range_mode == "manual":
+            manual_x_range = (float(x_range[0]), float(x_range[1]))
+            if manual_x_range != self._view_settings.manual_x_range:
+                self._view_settings.manual_x_range = manual_x_range
+                changed = True
+        if self._view_settings.y_range_mode == "manual":
+            manual_y_range = (float(y_range[0]), float(y_range[1]))
+            if manual_y_range != self._view_settings.manual_y_range:
+                self._view_settings.manual_y_range = manual_y_range
+                changed = True
+        elif self._view_settings.y_range_mode == "auto":
+            self._applying_view = True
+            try:
+                self._apply_y_auto_range()
+            finally:
+                self._applying_view = False
+        if changed:
+            self.view_settings_changed.emit()
+
+
+class AlignmentTimelineWidget(QtWidgets.QWidget):
+    playhead_changed = QtCore.Signal(float)
+    camera_offset_changed = QtCore.Signal(float)
+
+    def __init__(
+        self,
+        range_model: TimelineRangeModel,
+        parent: QtWidgets.QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._range_model = range_model
+        self._range_model.range_changed.connect(lambda *_args: self.update())
+        self.setMinimumHeight(96)
+        self.setMouseTracking(True)
+        self._current_time_s = 0.0
+        self._dragging_camera = False
+        self._dragging_playhead = False
+        self._camera_drag_anchor_s = 0.0
+        self._hover_on_camera_bar = False
+        self._hover_on_playhead = False
+        self._playhead_hit_half_width_px = 8.0
+        self._time_axis_left_px: float | None = None
+        self._time_axis_right_px: float | None = None
+
+    def set_time_axis_rect(self, left_px: float, right_px: float) -> None:
+        if self._time_axis_left_px is not None:
+            if math.isclose(left_px, self._time_axis_left_px) and math.isclose(
+                right_px, self._time_axis_right_px
+            ):
+                return
+        self._time_axis_left_px = left_px
+        self._time_axis_right_px = right_px
+        self.update()
+
+    def set_timeline_state(self, *, current_time_s: float) -> None:
+        self._current_time_s = current_time_s
         self.update()
 
     def paintEvent(self, event: QtGui.QPaintEvent) -> None:
@@ -287,7 +695,7 @@ class AlignmentTimelineWidget(QtWidgets.QWidget):
             tick_pen = QtGui.QPen(QtGui.QColor("#475569"), 1)
             camera_brush = QtGui.QBrush(QtGui.QColor("#f97316"))
             heatmap_brush = QtGui.QBrush(QtGui.QColor("#22c55e"))
-            playhead_pen = QtGui.QPen(QtGui.QColor("#e2e8f0"), 2)
+            playhead_pen = QtGui.QPen(QtGui.QColor(TIMELINE_PLAYHEAD_COLOR_HEX), 2.5)
 
             painter.setPen(label_pen)
             axis_y = plot_rect.top() + 16
@@ -310,7 +718,8 @@ class AlignmentTimelineWidget(QtWidgets.QWidget):
                     QtCore.QPointF(x, axis_y - 4),
                     QtCore.QPointF(x, plot_rect.bottom()),
                 )
-                tick_time = self._range_start_s + frac * (self._range_end_s - self._range_start_s)
+                range_start_s, range_end_s = self._range_model.visible_range_s()
+                tick_time = range_start_s + frac * (range_end_s - range_start_s)
                 painter.drawText(
                     QtCore.QRectF(x - 24, plot_rect.top(), 48, 14),
                     QtCore.Qt.AlignmentFlag.AlignCenter,
@@ -318,9 +727,11 @@ class AlignmentTimelineWidget(QtWidgets.QWidget):
                 )
 
             camera_rect = self._track_rect(
-                self._camera_track_start_s(), self._camera_duration_s, row=0
+                self._camera_track_start_s(),
+                self._range_model.camera_duration_s,
+                row=0,
             )
-            heatmap_rect = self._track_rect(0.0, self._heatmap_duration_s, row=1)
+            heatmap_rect = self._track_rect(0.0, self._range_model.heatmap_duration_s, row=1)
 
             if camera_rect.width() > 0:
                 painter.setPen(QtCore.Qt.PenStyle.NoPen)
@@ -345,12 +756,13 @@ class AlignmentTimelineWidget(QtWidgets.QWidget):
             return
         press_time_s = self._time_at_x(event.position().x(), clamp=True)
         camera_rect = self._track_rect(
-            self._camera_track_start_s(), self._camera_duration_s, row=0
+            self._camera_track_start_s(),
+            self._range_model.camera_duration_s,
+            row=0,
         )
-        if camera_rect.contains(event.position()) and self._camera_duration_s > 0:
+        if camera_rect.contains(event.position()) and self._range_model.camera_duration_s > 0:
             self._dragging_camera = True
-            self._frozen_range_start_s = self._range_start_s
-            self._frozen_range_end_s = self._range_end_s
+            self._range_model.begin_visible_range_freeze()
             self._camera_drag_anchor_s = press_time_s - self._camera_track_start_s()
             self.setCursor(QtCore.Qt.CursorShape.ClosedHandCursor)
             return
@@ -370,22 +782,29 @@ class AlignmentTimelineWidget(QtWidgets.QWidget):
             self.playhead_changed.emit(position_time_s)
             return
 
+        playhead_x = self._time_to_x(self._current_time_s)
+        hover_on_playhead = (
+            abs(event.position().x() - playhead_x) <= self._playhead_hit_half_width_px
+        )
         hover_on_camera_bar = self._track_rect(
             self._camera_track_start_s(),
-            self._camera_duration_s,
+            self._range_model.camera_duration_s,
             row=0,
         ).contains(event.position())
+        if hover_on_playhead != self._hover_on_playhead:
+            self._hover_on_playhead = hover_on_playhead
+            self._update_hover_cursor()
         if hover_on_camera_bar != self._hover_on_camera_bar:
             self._hover_on_camera_bar = hover_on_camera_bar
             self._update_hover_cursor()
 
     def mouseReleaseEvent(self, event: QtGui.QMouseEvent) -> None:
         del event
+        was_dragging_camera = self._dragging_camera
         self._dragging_camera = False
         self._dragging_playhead = False
-        self._frozen_range_start_s = None
-        self._frozen_range_end_s = None
-        self._range_start_s, self._range_end_s = self._shared_time_bounds()
+        if was_dragging_camera:
+            self._range_model.end_visible_range_freeze(recompute=True)
         self.update()
         self._update_hover_cursor()
 
@@ -396,35 +815,36 @@ class AlignmentTimelineWidget(QtWidgets.QWidget):
         super().leaveEvent(event)
 
     def _update_hover_cursor(self) -> None:
-        if self._hover_on_camera_bar:
+        if self._hover_on_playhead:
+            self.setCursor(QtCore.Qt.CursorShape.SizeHorCursor)
+        elif self._hover_on_camera_bar:
             self.setCursor(QtCore.Qt.CursorShape.OpenHandCursor)
         else:
             self.unsetCursor()
 
-    def _shared_time_bounds(self) -> tuple[float, float]:
-        track_starts = [0.0]
-        track_ends = [self._heatmap_duration_s]
-        if self._camera_duration_s > 0.0:
-            camera_start_s = self._camera_track_start_s()
-            track_starts.append(camera_start_s)
-            track_ends.append(camera_start_s + self._camera_duration_s)
-
-        range_start_s = min(track_starts)
-        range_end_s = max(track_ends)
-        span_s = range_end_s - range_start_s
-        if span_s <= 0.0 or math.isclose(range_start_s, range_end_s):
-            span_s = 1.0
-        padding_s = span_s * self._fit_padding_fraction
-        return range_start_s - padding_s, range_end_s + padding_s
+    def visible_time_bounds_s(self) -> tuple[float, float]:
+        return self._range_model.visible_range_s()
 
     def _camera_track_start_s(self) -> float:
-        return -self._camera_offset_s
+        return -self._range_model.camera_offset_s
+
+    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
+        super().resizeEvent(event)
+        parent_window = self.window()
+        if isinstance(parent_window, HeatmapAlignmentWindow):
+            parent_window.schedule_timeline_axis_geometry_sync()
 
     def _plot_rect(self) -> QtCore.QRectF:
         rect = self.contentsRect()
-        return QtCore.QRectF(
-            rect.left() + 72, rect.top() + 6, max(1, rect.width() - 84), max(1, rect.height() - 12)
-        )
+        top_px = rect.top() + 6
+        height_px = max(1, rect.height() - 12)
+        if self._time_axis_left_px is not None and self._time_axis_right_px is not None:
+            left_px = self._time_axis_left_px
+            width_px = max(1.0, self._time_axis_right_px - self._time_axis_left_px)
+        else:
+            left_px = rect.left() + TIMELINE_LABEL_GUTTER_PX
+            width_px = max(1.0, rect.width() - TIMELINE_LABEL_GUTTER_PX - 12)
+        return QtCore.QRectF(left_px, top_px, width_px, height_px)
 
     def _track_rect(self, start_s: float, duration_s: float, *, row: int) -> QtCore.QRectF:
         plot_rect = self._plot_rect()
@@ -439,18 +859,20 @@ class AlignmentTimelineWidget(QtWidgets.QWidget):
 
     def _time_to_x(self, time_s: float) -> float:
         plot_rect = self._plot_rect()
-        span_s = max(1e-6, self._range_end_s - self._range_start_s)
-        frac = (time_s - self._range_start_s) / span_s
+        range_start_s, range_end_s = self._range_model.visible_range_s()
+        span_s = max(1e-6, range_end_s - range_start_s)
+        frac = (time_s - range_start_s) / span_s
         frac = min(1.0, max(0.0, frac))
         return plot_rect.left() + frac * plot_rect.width()
 
     def _time_at_x(self, x: float, *, clamp: bool) -> float:
         plot_rect = self._plot_rect()
+        range_start_s, range_end_s = self._range_model.visible_range_s()
         if plot_rect.width() <= 1:
-            return self._range_start_s
+            return range_start_s
         resolved_x = min(plot_rect.right(), max(plot_rect.left(), x)) if clamp else x
         frac = (resolved_x - plot_rect.left()) / plot_rect.width()
-        return self._range_start_s + frac * (self._range_end_s - self._range_start_s)
+        return range_start_s + frac * (range_end_s - range_start_s)
 
 
 class ViewportEditorWidget(ImagePreview):
@@ -1315,12 +1737,18 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.play_timer = QtCore.QTimer(self)
         self.play_timer.timeout.connect(self._advance_playback)
         self.play_timer_interval_ms = 16
+        self.timeline_range_model = TimelineRangeModel(self)
+        self._timeline_axis_geometry_sync_timer = QtCore.QTimer(self)
+        self._timeline_axis_geometry_sync_timer.setSingleShot(True)
+        self._timeline_axis_geometry_sync_timer.timeout.connect(self._sync_timeline_axis_geometry)
 
         self._create_menu_bar()
         self._build_ui()
+        self.signal_plot.attach_timeline_range_model(self.timeline_range_model)
         self._connect_signals()
         self._update_controls_enabled_state()
         self.statusBar().showMessage("Load camera video and H5 recording to begin.")
+        QtCore.QTimer.singleShot(0, self.schedule_timeline_axis_geometry_sync)
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
         self.viewport_source_resolution_timer.stop()
@@ -1414,11 +1842,21 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         preview_splitter.setStretchFactor(1, 2)
         layout.addWidget(preview_splitter, stretch=1)
 
+        signals_group = QtWidgets.QGroupBox("Signals")
+        signals_layout = QtWidgets.QVBoxLayout(signals_group)
+        signals_layout.setContentsMargins(9, 9, 9, 9)
+        self.signal_plot = SignalPlotWidget()
+        self.signal_plot.setMinimumHeight(160)
+        signals_layout.addWidget(self.signal_plot)
+        layout.addWidget(signals_group)
+
         timeline_group = QtWidgets.QGroupBox("Timeline")
-        timeline_layout = QtWidgets.QGridLayout(timeline_group)
+        timeline_layout = QtWidgets.QVBoxLayout(timeline_group)
+        timeline_layout.setContentsMargins(9, 9, 9, 9)
+        timeline_controls_layout = QtWidgets.QHBoxLayout()
         self.play_button = QtWidgets.QPushButton("Play")
         self.current_time_label = QtWidgets.QLabel("t = 0.000 s")
-        self.timeline_view = AlignmentTimelineWidget()
+        self.timeline_view = AlignmentTimelineWidget(self.timeline_range_model)
         self.current_time_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
         self.current_time_slider.setRange(0, 10000)
         self.offset_spin = QtWidgets.QDoubleSpinBox()
@@ -1429,16 +1867,18 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.nudge_right_small = QtWidgets.QPushButton("+10 ms")
         self.nudge_left_large = QtWidgets.QPushButton("-100 ms")
         self.nudge_right_large = QtWidgets.QPushButton("+100 ms")
-        timeline_layout.addWidget(self.play_button, 0, 0)
-        timeline_layout.addWidget(self.current_time_label, 0, 1)
-        timeline_layout.addWidget(QtWidgets.QLabel("Offset (s)"), 0, 2)
-        timeline_layout.addWidget(self.offset_spin, 0, 3)
-        timeline_layout.addWidget(self.nudge_left_large, 0, 4)
-        timeline_layout.addWidget(self.nudge_left_small, 0, 5)
-        timeline_layout.addWidget(self.nudge_right_small, 0, 6)
-        timeline_layout.addWidget(self.nudge_right_large, 0, 7)
-        timeline_layout.addWidget(self.timeline_view, 1, 0, 1, 8)
-        timeline_layout.addWidget(self.current_time_slider, 2, 0, 1, 8)
+        timeline_controls_layout.addWidget(self.play_button)
+        timeline_controls_layout.addWidget(self.current_time_label)
+        timeline_controls_layout.addWidget(QtWidgets.QLabel("Offset (s)"))
+        timeline_controls_layout.addWidget(self.offset_spin)
+        timeline_controls_layout.addWidget(self.nudge_left_large)
+        timeline_controls_layout.addWidget(self.nudge_left_small)
+        timeline_controls_layout.addWidget(self.nudge_right_small)
+        timeline_controls_layout.addWidget(self.nudge_right_large)
+        timeline_controls_layout.addStretch(1)
+        timeline_layout.addLayout(timeline_controls_layout)
+        timeline_layout.addWidget(self.timeline_view)
+        timeline_layout.addWidget(self.current_time_slider)
         layout.addWidget(timeline_group)
 
         render_group = QtWidgets.QGroupBox("Render")
@@ -1484,16 +1924,6 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.show_peak_marker_checkbox.setChecked(True)
         self.peak_datasource_label = QtWidgets.QLabel("No peak-distance JSON loaded.")
         self.peak_datasource_label.setWordWrap(True)
-        self.refresh_xcorr_button = QtWidgets.QPushButton("XCorr Disabled")
-        self.refresh_xcorr_button.setEnabled(False)
-        self.xcorr_status_label = QtWidgets.QLabel("Cross-correlation is disabled for v1.")
-        self.xcorr_plot = pg.PlotWidget()
-        self.xcorr_plot.setBackground("#10161d")
-        self.xcorr_curve = self.xcorr_plot.plot(pen=pg.mkPen("#ffb703", width=2))
-        self.xcorr_marker = pg.InfiniteLine(pos=0.0, angle=90, pen=pg.mkPen("#ef476f", width=1.5))
-        self.xcorr_plot.addItem(self.xcorr_marker)
-        self.xcorr_plot.setLabel("left", "Score")
-        self.xcorr_plot.setLabel("bottom", "Lag (s)")
         render_layout.addWidget(QtWidgets.QLabel("Color Min"), 0, 0)
         render_layout.addWidget(self.color_min_spin, 0, 1)
         render_layout.addWidget(QtWidgets.QLabel("Color Max"), 0, 2)
@@ -1509,10 +1939,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         render_layout.addWidget(self.import_peak_json_button, 2, 0)
         render_layout.addWidget(self.clear_peak_json_button, 2, 1)
         render_layout.addWidget(self.show_peak_marker_checkbox, 2, 2)
-        render_layout.addWidget(self.peak_datasource_label, 2, 3, 1, 3)
-        render_layout.addWidget(self.xcorr_status_label, 3, 4, 1, 3)
-        render_layout.addWidget(self.refresh_xcorr_button, 3, 7)
-        render_layout.addWidget(self.xcorr_plot, 4, 0, 1, 8)
+        render_layout.addWidget(self.peak_datasource_label, 2, 3, 1, 5)
         viewport_controls_layout.addWidget(self.viewport_enhance_checkbox, 0, 0, 1, 2)
         viewport_controls_layout.addWidget(self.viewport_map_to_viridis_checkbox, 0, 2, 1, 2)
         viewport_controls_layout.addWidget(QtWidgets.QLabel("Range"), 1, 0)
@@ -1571,6 +1998,37 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.viewport_view.edge_dragged.connect(self._viewport_edge_dragged)
         self.viewport_view.center_dragged.connect(self._viewport_center_dragged)
         self.viewport_view.drag_finished.connect(self._viewport_drag_finished)
+        self.signal_plot.view_settings_changed.connect(self._signal_plot_view_settings_changed)
+        self.signal_plot.axis_geometry_sync_requested.connect(
+            self.schedule_timeline_axis_geometry_sync
+        )
+
+    def schedule_timeline_axis_geometry_sync(self) -> None:
+        self._timeline_axis_geometry_sync_timer.start(0)
+
+    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
+        super().resizeEvent(event)
+        self.schedule_timeline_axis_geometry_sync()
+
+    def _sync_timeline_axis_geometry(self) -> None:
+        if not self.isVisible():
+            return
+        signal_left_px, signal_right_px = self.signal_plot.viewbox_horizontal_extent_local()
+        if signal_right_px <= signal_left_px + 1.0:
+            return
+
+        timeline_width_px = self.timeline_view.width()
+        if timeline_width_px <= 1:
+            return
+
+        left_global = self.signal_plot.mapToGlobal(QtCore.QPointF(signal_left_px, 0.0))
+        right_global = self.signal_plot.mapToGlobal(QtCore.QPointF(signal_right_px, 0.0))
+        timeline_left_px = self.timeline_view.mapFromGlobal(left_global).x()
+        timeline_right_px = self.timeline_view.mapFromGlobal(right_global).x()
+
+        if timeline_right_px <= timeline_left_px + 1.0:
+            return
+        self.timeline_view.set_time_axis_rect(timeline_left_px, timeline_right_px)
 
     def _wrap_group(self, title: str, widget: QtWidgets.QWidget) -> QtWidgets.QGroupBox:
         group = QtWidgets.QGroupBox(title)
@@ -1621,7 +2079,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             self._refresh_camera_view_corners()
         self.camera_view.set_export_overlay(self.session.export_overlay)
         self._update_controls_enabled_state()
-        self._sync_previews(refresh_xcorr=False, camera_access_hint="auto")
+        self._sync_previews(camera_access_hint="auto")
         self.settings.setValue("last_camera_path", str(camera_path))
         self.statusBar().showMessage(display_message)
 
@@ -1651,7 +2109,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.session.viewport.output_height = truth_frame.shape[0]
         self._rebuild_overlay_plot_renderer()
         self._update_controls_enabled_state()
-        self._sync_previews(refresh_xcorr=False, camera_access_hint="auto")
+        self._sync_previews(camera_access_hint="auto")
         self.settings.setValue("last_h5_path", str(h5_path))
         self._reload_peak_distance_datasource_from_session()
         self.statusBar().showMessage(f"Loaded H5 recording: {h5_path}")
@@ -1709,7 +2167,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.session.peak_distance_datasource.visible = self.show_peak_marker_checkbox.isChecked()
         self.settings.setValue("last_peak_json_path", str(json_path))
         self._update_peak_datasource_controls()
-        self._sync_previews(refresh_xcorr=False, camera_access_hint="auto")
+        self._sync_previews(camera_access_hint="auto")
 
         if self.heatmap_source is None:
             message = (
@@ -1747,7 +2205,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.session.peak_distance_datasource.path = ""
         self.session.peak_distance_datasource.visible = True
         self._update_peak_datasource_controls()
-        self._sync_previews(refresh_xcorr=False, camera_access_hint="auto")
+        self._sync_previews(camera_access_hint="auto")
         self.statusBar().showMessage("Cleared imported peak-distance datasource.")
 
     def _reload_peak_distance_datasource_from_session(self) -> None:
@@ -1787,7 +2245,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
 
     def _peak_marker_visibility_changed(self, visible: bool) -> None:
         self.session.peak_distance_datasource.visible = visible
-        self._sync_previews(refresh_xcorr=False, camera_access_hint="auto")
+        self._sync_previews(camera_access_hint="auto")
 
     def _update_peak_datasource_controls(self) -> None:
         datasource = self.peak_distance_datasource
@@ -1896,7 +2354,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._refresh_camera_view_corners()
         self.camera_view.set_export_overlay(self.session.export_overlay)
         self._update_controls_enabled_state()
-        self._sync_previews(refresh_xcorr=False, camera_access_hint="auto")
+        self._sync_previews(camera_access_hint="auto")
         self.settings.setValue("last_artifact_path", str(artifact_path))
         if self.session.camera_track.path:
             self.settings.setValue("last_camera_path", self.session.camera_track.path)
@@ -1978,6 +2436,28 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.show_peak_marker_checkbox.blockSignals(False)
         self._update_peak_datasource_controls()
         self._update_viewport_visibility_controls_enabled()
+        self.signal_plot.set_view_settings(self._signal_plot_view_settings_copy())
+
+    def _signal_plot_view_settings_copy(self) -> SignalPlotViewSettings:
+        view = self.session.signal_plot_view
+        return SignalPlotViewSettings(
+            x_range_mode=view.x_range_mode,
+            y_range_mode=view.y_range_mode,
+            manual_x_range=view.manual_x_range,
+            manual_y_range=view.manual_y_range,
+        )
+
+    def _signal_plot_view_settings_changed(self) -> None:
+        self.session.signal_plot_view = self._signal_plot_view_settings_copy_from_plot()
+
+    def _signal_plot_view_settings_copy_from_plot(self) -> SignalPlotViewSettings:
+        view = self.signal_plot.view_settings()
+        return SignalPlotViewSettings(
+            x_range_mode=view.x_range_mode,
+            y_range_mode=view.y_range_mode,
+            manual_x_range=view.manual_x_range,
+            manual_y_range=view.manual_y_range,
+        )
 
     def _viewport_visibility_changed(self) -> None:
         self.session.viewport_visibility.enabled = self.viewport_enhance_checkbox.isChecked()
@@ -1987,7 +2467,6 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.session.viewport_visibility.gamma = self.viewport_gamma_spin.value()
         self._update_viewport_visibility_controls_enabled()
         self._sync_previews(
-            refresh_xcorr=False,
             camera_access_hint="auto",
             invalidate_source_resolution=False,
         )
@@ -1997,7 +2476,6 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.session.viewport_visibility.high = high
         self._update_viewport_visibility_labels()
         self._sync_previews(
-            refresh_xcorr=False,
             camera_access_hint="auto",
             invalidate_source_resolution=False,
         )
@@ -2022,7 +2500,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
 
     def _offset_changed(self, value: float) -> None:
         self.session.timeline.offset_s = value
-        self._sync_previews(refresh_xcorr=False, camera_access_hint="auto")
+        self._sync_previews(camera_access_hint="auto")
 
     def _nudge_offset(self, delta_s: float) -> None:
         self.offset_spin.setValue(self.offset_spin.value() + delta_s)
@@ -2036,18 +2514,18 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._set_playback_active(False)
 
     def _slider_to_time(self, slider_value: int) -> None:
-        range_start_s, range_end_s = self._timeline_bounds_s()
+        range_start_s, range_end_s = self.timeline_range_model.visible_range_s()
         span_s = range_end_s - range_start_s
         self.session.timeline.current_time_s = (
             range_start_s if span_s <= 0 else range_start_s + span_s * slider_value / 10000.0
         )
         self._reanchor_playback_clock()
-        self._sync_previews(refresh_xcorr=False, camera_access_hint="scrub")
+        self._sync_previews(camera_access_hint="scrub")
 
     def _timeline_playhead_changed(self, time_s: float) -> None:
         self.session.timeline.current_time_s = time_s
         self._reanchor_playback_clock()
-        self._sync_previews(refresh_xcorr=False, camera_access_hint="scrub")
+        self._sync_previews(camera_access_hint="scrub")
 
     def _timeline_camera_offset_changed(self, offset_s: float) -> None:
         self.offset_spin.setValue(offset_s)
@@ -2068,7 +2546,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         next_time = min(self._playback_started_video_time_s + elapsed_s, range_end_s)
         self.session.timeline.current_time_s = next_time
         self._set_slider_from_current_time()
-        self._sync_previews(refresh_xcorr=False, camera_access_hint="playback")
+        self._sync_previews(camera_access_hint="playback")
         if math.isclose(next_time, range_end_s) or next_time >= range_end_s:
             self._set_playback_active(False)
 
@@ -2082,24 +2560,23 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
                 fixed_levels=True,
             )
             self._rebuild_overlay_plot_renderer()
-        self._sync_previews(refresh_xcorr=False, camera_access_hint="auto")
+        self._sync_previews(camera_access_hint="auto")
 
     def _preprocess_settings_changed(self) -> None:
         self.session.preprocess.blur_sigma = self.blur_spin.value()
         self.session.preprocess.downscale_factor = self.downscale_spin.value()
         self.session.preprocess.lag_window_s = self.lag_window_spin.value()
         self.session.preprocess.sample_count = self.sample_count_spin.value()
-        self.xcorr_curve.setData([], [])
 
     def _corners_changed(self, corners: list) -> None:
         native_corners = self._display_corners_to_native(np.asarray(corners, dtype=np.float32))
         self.session.viewport.corners = native_corners.tolist()
-        self._sync_previews(refresh_xcorr=False, camera_access_hint="auto")
+        self._sync_previews(camera_access_hint="auto")
 
     def _set_viewport_corners(self, corners: np.ndarray) -> None:
         self.session.viewport.corners = corners.tolist()
         self._refresh_camera_view_corners()
-        self._sync_previews(refresh_xcorr=False, camera_access_hint="auto")
+        self._sync_previews(camera_access_hint="auto")
 
     def _export_overlay_changed(self, x: float, y: float, width: float, height: float) -> None:
         self.session.export_overlay.x = x
@@ -2110,22 +2587,22 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
     def _set_export_overlay_visible(self, visible: bool) -> None:
         self.session.export_overlay.visible = visible
         self.camera_view.set_export_overlay(self.session.export_overlay)
-        self._sync_previews(refresh_xcorr=False, camera_access_hint="auto")
+        self._sync_previews(camera_access_hint="auto")
 
     def _set_export_overlay_preview_enabled(self, enabled: bool) -> None:
         self.session.export_overlay.preview_enabled = enabled
         self.camera_view.set_export_overlay(self.session.export_overlay)
-        self._sync_previews(refresh_xcorr=False, camera_access_hint="auto")
+        self._sync_previews(camera_access_hint="auto")
 
     def _set_export_overlay_drag_active(self, active: bool) -> None:
         self._freeze_export_overlay_preview = active
         if not active:
-            self._sync_previews(refresh_xcorr=False, camera_access_hint="auto")
+            self._sync_previews(camera_access_hint="auto")
 
     def _reset_export_overlay(self) -> None:
         self._initialize_default_export_overlay(force=True)
         self.camera_view.set_export_overlay(self.session.export_overlay)
-        self._sync_previews(refresh_xcorr=False, camera_access_hint="auto")
+        self._sync_previews(camera_access_hint="auto")
 
     def _load_current_camera_frame(self, *, access_hint: str = "auto") -> None:
         if self.camera_source is None:
@@ -2208,7 +2685,6 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             )
             if self._source_resolution_viewport_frame is not None:
                 self._sync_previews(
-                    refresh_xcorr=False,
                     camera_access_hint="auto",
                     invalidate_source_resolution=False,
                 )
@@ -2223,7 +2699,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             self.play_timer.start(self.play_timer_interval_ms)
             self.play_button.setText("Pause")
             if refresh_viewport:
-                self._sync_previews(refresh_xcorr=False, camera_access_hint="playback")
+                self._sync_previews(camera_access_hint="playback")
             return
 
         was_active = self.play_timer.isActive()
@@ -2231,10 +2707,10 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._playback_started_at_s = None
         self.play_button.setText("Play")
         if refresh_viewport and was_active:
-            self._sync_previews(refresh_xcorr=False, camera_access_hint="auto")
+            self._sync_previews(camera_access_hint="auto")
 
     def _set_slider_from_current_time(self) -> None:
-        range_start_s, range_end_s = self._timeline_bounds_s()
+        range_start_s, range_end_s = self.timeline_range_model.visible_range_s()
         span_s = range_end_s - range_start_s
         self.current_time_slider.blockSignals(True)
         value = (
@@ -2247,12 +2723,17 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.current_time_slider.setValue(int(np.clip(value, 0, 10000)))
         self.current_time_slider.blockSignals(False)
 
-    def _set_timeline_view_state(self) -> None:
-        self.timeline_view.set_timeline_state(
+    def _update_timeline_range_from_session(self) -> None:
+        self.timeline_range_model.set_track_state(
             camera_duration_s=self.session.camera_track.duration_s,
             heatmap_duration_s=self.session.heatmap_track.duration_s,
-            current_time_s=self.session.timeline.current_time_s,
             camera_offset_s=self.session.timeline.offset_s,
+        )
+        self.timeline_range_model.recompute_visible_range()
+
+    def _set_timeline_view_state(self) -> None:
+        self.timeline_view.set_timeline_state(
+            current_time_s=self.session.timeline.current_time_s,
         )
 
     def _timeline_bounds_s(self) -> tuple[float, float]:
@@ -2571,7 +3052,6 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
     def _sync_previews(
         self,
         *,
-        refresh_xcorr: bool,
         camera_access_hint: str = "auto",
         invalidate_source_resolution: bool = True,
     ) -> None:
@@ -2579,8 +3059,11 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             self._invalidate_source_resolution_viewport()
         self._load_current_camera_frame(access_hint=camera_access_hint)
         self._refresh_camera_view_corners()
+        self._update_timeline_range_from_session()
         self._set_slider_from_current_time()
         self._set_timeline_view_state()
+        self._refresh_signal_plot()
+        self.schedule_timeline_axis_geometry_sync()
         self.current_time_label.setText(
             f"t = {self.session.timeline.current_time_s:.3f} s | offset = {self.session.timeline.offset_s:.3f} s"
         )
@@ -2663,12 +3146,16 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
                 self._schedule_source_resolution_viewport_refresh(viewport_size=viewport_size)
         self.viewport_view.set_frame(viewport_frame)
 
-        if refresh_xcorr:
-            self._refresh_xcorr_plot()
-
-    def _refresh_xcorr_plot(self) -> None:
-        self.xcorr_curve.setData([], [])
-        self.xcorr_marker.setPos(0.0)
+    def _refresh_signal_plot(self) -> None:
+        series = None
+        if self.peak_distance_datasource is not None:
+            series = build_peak_distance_signal_series(self.peak_distance_datasource.measurements)
+        visible = (
+            self.peak_distance_datasource is not None
+            and self.session.peak_distance_datasource.visible
+        )
+        self.signal_plot.set_signal_series(series, visible=visible)
+        self.signal_plot.set_current_time_s(self.session.timeline.current_time_s)
 
     def _update_controls_enabled_state(self) -> None:
         has_camera = self.camera_source is not None
@@ -2697,7 +3184,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             or not self.session.viewport.corners
         ):
             return
-        self._sync_previews(refresh_xcorr=False, camera_access_hint="auto")
+        self._sync_previews(camera_access_hint="auto")
 
     def _viewport_drag_finished(self) -> None:
         self._viewport_drag_start_corners = None
