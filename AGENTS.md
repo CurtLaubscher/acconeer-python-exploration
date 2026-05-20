@@ -22,6 +22,7 @@ Use the repo-managed runtime and tooling defined in `pyproject.toml`.
 
 ## OpenSpec Git Rules
 
+- Before creating or modifying OpenSpec change artifacts, check the current branch. If the work is for a new OpenSpec change and the current branch is `master` or otherwise unrelated, create or switch to `<user-account>/<openspec-change-name>` first.
 - For OpenSpec implementation branches, use `<user-account>/<openspec-change-name>`, where `<user-account>` is the local user account name rather than a hard-coded branch owner.
 - When merging an OpenSpec branch into `master`, use a no-fast-forward merge so the merge commit preserves the OpenSpec change name in history.
 - Prefer merge commit messages that include the OpenSpec change name, such as `Merge OpenSpec <openspec-change-name>`.
