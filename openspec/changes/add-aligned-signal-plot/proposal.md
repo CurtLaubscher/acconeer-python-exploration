@@ -7,8 +7,8 @@ Manual temporal alignment is easier when derived signals can be reviewed over th
 - Add a separate boxed Signals area above the existing Timeline area.
 - Plot imported H5 peak-distance data over time using the H5 track color convention.
 - Show detected H5 peaks as the primary solid signal and no-detection candidate distances as a lower-alpha signal, while preserving actual gaps for missing values.
-- Keep the Signals x-axis synchronized from the timeline view when x auto-range is enabled.
-- Allow per-axis range mode control so x and y can each be automatic or manually zoomed/panned.
+- Keep the Signals x-axis synchronized to the Timeline range and pixel geometry when x Timeline mode is enabled.
+- Allow per-axis range mode control so x can use Timeline or manual mode and y can use auto or manual mode.
 - Persist signal plot range modes and manual ranges in alignment sessions.
 - Add a compact signal legend.
 - Remove the visible disabled xcorr UI and dead GUI control wiring from the main workbench, while keeping lower-level xcorr helper code available for future diagnostic work.

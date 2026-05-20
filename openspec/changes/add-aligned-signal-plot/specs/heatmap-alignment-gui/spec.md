@@ -27,16 +27,55 @@ The system SHALL provide a separate Signals area above the Timeline area for rev
 - **WHEN** the Signals area contains one or more visible plotted signals
 - **THEN** the system displays a compact legend identifying the plotted signal meanings
 
+### Requirement: Current-time indicators
+The system SHALL show current-time indicators in the Timeline and Signals areas with distinct interaction affordances.
+
+#### Scenario: Show passive signal playhead
+- **WHEN** the Signals area is visible
+- **THEN** the system displays a passive vertical current-time indicator at the shared timeline current time
+
+#### Scenario: Signal playhead follows current time
+- **WHEN** playback, timeline scrubbing, or time navigation changes the shared current time
+- **THEN** the Signals current-time indicator moves to the updated time without changing the Signals plot range mode
+
+#### Scenario: Signal playhead is not draggable
+- **WHEN** the user hovers or drags over the Signals current-time indicator
+- **THEN** the system does not show a drag cursor or change the shared current time from the Signals indicator interaction
+
+#### Scenario: Timeline playhead has interaction affordance
+- **WHEN** the user hovers over the draggable Timeline current-time marker hit area
+- **THEN** the system uses a cursor or equivalent hover affordance that indicates the Timeline marker can be dragged
+
+#### Scenario: Distinguish active and passive playheads
+- **WHEN** both the Timeline and Signals current-time indicators are visible
+- **THEN** the Timeline current-time marker appears brighter or otherwise more prominent than the passive Signals current-time indicator
+
 ### Requirement: Signal plot range modes
 The system SHALL support independent x-axis and y-axis range modes for the Signals plot.
 
-#### Scenario: X auto follows timeline
-- **WHEN** the Signals plot x-axis is in auto mode
+#### Scenario: X Timeline mode follows timeline
+- **WHEN** the Signals plot x-axis is in Timeline mode
 - **THEN** the plot x-limits match the current timeline view bounds
 
-#### Scenario: Disable x navigation in x auto mode
-- **WHEN** the Signals plot x-axis is in auto mode
+#### Scenario: X Timeline mode aligns time mapping
+- **WHEN** the Signals plot x-axis is in Timeline mode and the Timeline is visible
+- **THEN** the Signals plot data area and Timeline time-bar area map the same time values to the same horizontal screen positions
+
+#### Scenario: Disable x navigation in Timeline mode
+- **WHEN** the Signals plot x-axis is in Timeline mode
 - **THEN** direct x-axis zoom and pan interaction in the Signals plot is disabled
+
+#### Scenario: Label Timeline mode compactly
+- **WHEN** the user opens the Signals plot x-axis range mode menu
+- **THEN** the timeline-following x-axis mode is labeled "Timeline"
+
+#### Scenario: Disable x transformations in Timeline mode
+- **WHEN** the Signals plot x-axis is in Timeline mode
+- **THEN** plot actions or transformations that change the x-axis meaning away from linear physical time, or change the timeline-matched x-axis range, are disabled or prevented from affecting the x-axis
+
+#### Scenario: Disable view-all in Timeline mode
+- **WHEN** the Signals plot x-axis is in Timeline mode
+- **THEN** generic plot actions that would change the x-axis range, including the stock "View All" action, are disabled or prevented from changing the x-axis range
 
 #### Scenario: Manual x navigation
 - **WHEN** the user switches the Signals plot x-axis to manual mode
@@ -49,6 +88,10 @@ The system SHALL support independent x-axis and y-axis range modes for the Signa
 #### Scenario: Y auto fits visible data
 - **WHEN** the Signals plot y-axis is in auto mode
 - **THEN** the y-limits fit the visible signal data in the current x-window
+
+#### Scenario: Y auto includes zero
+- **WHEN** the Signals plot y-axis is in auto mode
+- **THEN** the y-limits include zero and the visible signal data before padding is applied
 
 #### Scenario: Manual y navigation
 - **WHEN** the user switches the Signals plot y-axis to manual mode
@@ -71,7 +114,7 @@ The system SHALL persist Signals plot view settings in alignment session files.
 
 #### Scenario: Load older session without signal plot view settings
 - **WHEN** the user loads an alignment session that does not contain Signals plot view settings
-- **THEN** the system uses default Signals plot settings equivalent to x auto mode and y auto mode
+- **THEN** the system uses default Signals plot settings equivalent to x Timeline mode and y auto mode
 
 ### Requirement: Remove visible xcorr controls
 The system SHALL remove disabled xcorr controls from the main heatmap alignment GUI while preserving manual alignment authority.

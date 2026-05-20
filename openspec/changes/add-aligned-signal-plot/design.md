@@ -12,6 +12,8 @@ The first target signal is H5-derived peak distance. Future Leg2 `.mat` ultrason
 - Show detected peak distances as a solid primary signal and no-detection candidate distances as lower-alpha signal points/segments.
 - Preserve actual gaps for missing values.
 - Let the timeline drive the signal plot x-range when x auto-range is enabled.
+- Show a passive Signals current-time indicator that follows the Timeline playhead.
+- Make the Timeline current-time marker visually and interactively read as the draggable control.
 - Allow x and y range modes to be controlled independently.
 - Persist signal plot range modes and manual ranges in session JSON.
 - Remove visible disabled xcorr controls and dead GUI wiring from the main workbench.
@@ -33,12 +35,12 @@ Alternative considered: merge signal plotting into `AlignmentTimelineWidget`. Th
 
 ### Use Pyqtgraph With Explicit Range Modes
 
-The Signals area will use `pyqtgraph.PlotWidget` and keep the normal two-option auto/manual model per axis. Only x auto has custom semantics in this workbench: it follows the timeline bounds instead of pyqtgraph's default data-fit behavior.
+The Signals area will use `pyqtgraph.PlotWidget` and keep a two-option model per axis. The x-axis automatic option is presented as Timeline mode because it follows the Timeline range and pixel geometry instead of pyqtgraph's default data-fit behavior. The compact menu label should be `Timeline` to avoid cropping in pyqtgraph's axis menu.
 
 Range modes:
-- X auto: signal x-range follows the current timeline bounds. User x zoom/pan is disabled.
+- X Timeline: signal x-range follows the current timeline bounds. User x zoom/pan is disabled.
 - X manual: normal pyqtgraph x zoom/pan behavior is enabled and the selected x-range is preserved.
-- Y auto: normal pyqtgraph-style y auto behavior is used, preferably fitting visible signal data in the current x-window.
+- Y auto: normal pyqtgraph-style y auto behavior is used, fitting visible signal data in the current x-window while including zero in the fitted range before padding.
 - Y manual: normal pyqtgraph y zoom/pan behavior is enabled and the selected y-range is preserved.
 
 This allows x and y behavior to be mixed independently, such as timeline-following x with manually adjusted y limits.
@@ -47,11 +49,23 @@ This allows x and y behavior to be mixed independently, such as timeline-followi
 
 The plot context menu should expose range mode actions in the same interaction surface as pyqtgraph's existing view controls. The implementation should prefer overriding or relabeling the existing two-state auto/manual behavior rather than adding a custom three-state control.
 
-The x-axis should not use pyqtgraph's stock "Auto Range" behavior directly, because for this plot "auto X" means "match the timeline", not "fit visible signal data". A custom checked action such as "X Follows Timeline" is clearer than adding a third mode. Y auto can remain close to pyqtgraph's built-in behavior if it fits visible data in the active x-window.
+The x-axis should not use pyqtgraph's stock "Auto Range" behavior directly, because for this plot the automatic x mode means "Timeline", not "fit visible signal data". Y auto can remain close to pyqtgraph's built-in behavior if it fits visible data in the active x-window and includes zero. Tooltip/help text can use fuller wording such as "Match the Timeline x-range; x zoom/pan is disabled" even though the visible axis-menu label is just `Timeline`.
 
 ### Timeline Drives Signal X-Range, Not The Reverse
 
-The signal plot will not drive the timeline view. When x auto is enabled, signal plot x zoom/pan is disabled and the plot follows timeline bounds. When x manual is enabled, the user can inspect signal details without changing the timeline bars.
+The signal plot will not drive the timeline view. When x Timeline mode is enabled, signal plot x zoom/pan is disabled and the plot follows timeline bounds. When x manual is enabled, the user can inspect signal details without changing the timeline bars.
+
+Matching numeric time limits is not sufficient for visual alignment. In x Timeline mode, the Signals plot data area and Timeline time-bar area must also share the same horizontal time-to-pixel mapping. The preferred implementation is to use the pyqtgraph Signals ViewBox/data rect as the geometry master, convert that rect into Timeline widget coordinates after layout settles, and make the Timeline draw bars, grid lines, and playhead within that same horizontal span. Timeline row labels should remain outside the shared time-mapping rect.
+
+X-axis transformations that break linear shared time mapping should not be allowed while x Timeline mode is active. X inversion and Log X should be disabled or reset in Timeline mode. Actions that change the x-axis meaning away from physical time, such as Y vs. Y' and Power Spectrum/FFT, should also be disabled while x Timeline mode is active. The stock View All action should be disabled or prevented from changing the x range while x Timeline mode is active; it should not silently switch the plot to manual mode.
+
+Y-axis behavior is otherwise unchanged by this polish pass. Y-only transformations such as Log Y and Subtract Mean may remain available if they only affect y presentation or y-values. If a y-only operation causes pyqtgraph to adjust x-limits as a side effect, the implementation should restore the Timeline-matched x-range afterward. `dy/dx` should only be enabled in Timeline mode if it preserves physical-time x-values and the Timeline-matched x-range.
+
+### Current-Time Indicators
+
+The Timeline remains the interactive place to change the shared current time. Its current-time marker should be slightly brighter or otherwise more prominent than the existing light-gray line and should expose a hover cursor over the draggable hit area so users can tell it can be dragged.
+
+The Signals plot should show a subordinate current-time indicator at the same shared time, likely using a non-movable vertical pyqtgraph item. This indicator should be thinner and more muted than the Timeline playhead, with no handle, no hover cursor change, and no drag behavior. It provides readout alignment for plotted signals without making the Signals plot another timeline controller.
 
 ### Peak Distance Rendering
 

@@ -93,6 +93,7 @@ Possible directions:
 - Add `Fit All` and `Fit Overlap` actions.
 - Add optional overlap shading if users still find the two-track relationship confusing.
 - Improve tick density and labels as zoom changes.
+- Clean up the timeline time-axis presentation: move tick labels farther from vertical grid lines so decimal points remain legible, remove the horizontal time-axis line if the grid already communicates scale, and remove the redundant "Time" label.
 - Add frame-by-frame navigation for the H5 track, camera track, or current aligned preview.
 - Add simple keyboard shortcuts for navigating time, such as stepping frames, nudging by small time increments, jumping to start/end, and toggling playback.
 - Preserve the simple H5-fixed, camera-draggable model unless a broader timeline model is explicitly needed.
@@ -132,6 +133,18 @@ Possible rendering directions:
 
 Open UX question:
 - The best first visualization is likely the heatmap marker plus a show/hide toggle, because it directly explains how the peak relates to the rendered heatmap and keeps the timeline uncluttered. A separate time-series plot becomes more useful once users need to inspect continuity across the whole recording.
+
+### Signals plot context menu polish
+
+The first Signals plot implementation may conservatively disable pyqtgraph context-menu actions while the x-axis is in Timeline/match mode if those actions can disturb the shared time-axis contract. A later polish pass could re-enable actions that are safe or can be adapted to preserve the timeline-matched x-axis.
+
+Possible directions:
+- Keep `Log X`, `Invert X`, `Y vs. Y'`, and `Power Spectrum (FFT)` disabled while x Timeline mode is active because they change or invert the physical-time x-axis.
+- Convert `View All` into a y-only action such as `View All Y` while x Timeline mode is active, fitting the y-axis without changing the timeline-matched x-range.
+- Allow `dy/dx` if the transformed curve preserves the original time x-values and only changes plotted y-values.
+- Allow `Log Y` if it only changes y presentation and the implementation restores or preserves the timeline-matched x-limits after pyqtgraph updates.
+- Allow `Subtract Mean` if it only changes y-values; if pyqtgraph changes x-limits as a side effect, restore the timeline-matched x-range afterward.
+- Prefer explicit labels for adapted actions so users can tell when an operation is y-only or timeline-preserving.
 
 ### Leg2 `.mat` ultrasonic datasource
 
