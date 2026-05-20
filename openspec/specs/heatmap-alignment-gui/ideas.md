@@ -97,6 +97,10 @@ Possible directions:
 - Add frame-by-frame navigation for the H5 track, camera track, or current aligned preview.
 - Add simple keyboard shortcuts for navigating time, such as stepping frames, nudging by small time increments, jumping to start/end, and toggling playback.
 - Preserve the simple H5-fixed, camera-draggable model unless a broader timeline model is explicitly needed.
+- Add a broader track interaction model where tracks can be selected, multi-selected with modifier clicks, and acted on through a context menu.
+- Add a way to link tracks so their offsets stay locked together and dragging one linked track drags the linked group. Clicking a linked track could select the whole linked group so the relationship is visible before dragging.
+- Add a way to fix or pin a track so it cannot be dragged accidentally. This would allow future workflows where H5 is not implicitly the only fixed reference track.
+- Consider making existing offset controls apply to the currently selected track or selected linked group instead of being permanently camera-specific.
 
 ### Peak-distance datasource and Calculate Peaks
 
@@ -153,14 +157,16 @@ Import a Leg2 `.mat` log as an additional signal datasource for manual alignment
 Initial direction:
 - Treat the Leg2 `.mat` file as its own track on the shared timeline, with its own offset relative to the H5 reference track. Do not model it as an H5-attached peak-distance datasource.
 - For the first pass, hard-code the expected Leg2 ultrasonic paths rather than building a generic `.mat` variable browser. Use `record.common.timeOut` as the correct time axis conceptually, while accepting that exported `.mat` files may expose this as `DataRecordCommon.timeOut`.
-- Plot both raw and filtered ultrasonic distance when available. In the sample hierarchy, these correspond to `Ultrasonic.Distance` and `DataRecordCommon.ultrasonic_filtered`.
+- Plot one selected ultrasonic distance signal at a time to avoid clutter. In the sample hierarchy, the initial choices are raw `Ultrasonic.Distance` and filtered `DataRecordCommon.ultrasonic_filtered`.
+- Use required `robustFC` from the Leg2 record to segment the plotted ultrasonic signal into primary and lower-alpha portions similarly to the H5 peak-distance detected/candidate rendering.
 - Do not include `stance_Dist` or `swing_Dist` in the first Leg2 ultrasonic import.
 - Use a distinct color for the Leg2 `.mat` track and reuse that color for its plotted signal(s), matching the visual convention proposed for H5 peak distance.
-- Keep the first workflow manual: load `.mat`, view ultrasonic signal(s), drag/nudge the `.mat` track offset until signal features align with the H5 peak-distance time-series and video.
+- Keep the first workflow manual: load `.mat`, view the selected ultrasonic signal, drag the `.mat` track offset until signal features align with the H5 peak-distance time-series and video.
 
 Future directions:
 - Add a `.mat` variable picker that lets the user select multiple variables for display instead of relying on hard-coded ultrasonic paths.
 - Allow selected `.mat` variables to be shown/hidden independently and possibly assigned colors or plotted on separate axes when units differ.
+- Add optional 1D signal cross-correlation between compatible time-series sources, such as H5 peak distance and Leg2 ultrasonic distance, as a diagnostic offset suggestion. This is separate from the image/viewport xcorr idea and should still keep manual alignment as the authority.
 - Consider assisted offset suggestions only if many files need to be synced; manual visual alignment should remain the authority unless a later change explicitly adds accepted automated suggestions.
 
 ### Resource loading organization
