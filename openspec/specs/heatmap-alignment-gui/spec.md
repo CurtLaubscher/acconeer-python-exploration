@@ -198,6 +198,25 @@ The system SHALL save and load JSON alignment session files containing the state
 - **WHEN** the user loads a saved alignment session
 - **THEN** the system restores the source selections, viewport geometry, render settings, temporal offset, preview state, and optional imported distance-measurement datasource metadata described by the session file
 
+### Requirement: Session startup CLI
+The system SHALL allow the heatmap alignment GUI to load a saved alignment session on startup using a session-specific command-line argument.
+
+#### Scenario: Load session on startup
+- **WHEN** the user launches the heatmap alignment GUI with a saved alignment session path passed to `--session`
+- **THEN** the system loads that saved alignment session during startup
+
+#### Scenario: Session startup takes precedence over source startup arguments
+- **WHEN** the user launches the heatmap alignment GUI with `--session` and individual camera or H5 startup arguments
+- **THEN** the system loads the saved alignment session as the source of camera, H5, viewport, render, and alignment state rather than partially overriding it with the individual camera or H5 arguments
+
+#### Scenario: Optional datasource startup arguments may override session datasources
+- **WHEN** the user launches the heatmap alignment GUI with `--session` and an explicit optional datasource startup argument such as peak-distance JSON or Leg2 MAT
+- **THEN** the system loads the saved alignment session first and then applies the explicit optional datasource startup argument using the same override behavior as the corresponding datasource requirement
+
+#### Scenario: Reject legacy artifact startup argument
+- **WHEN** the user launches the heatmap alignment GUI with the legacy `--artifact` startup argument
+- **THEN** the command-line parser rejects the argument and presents help that lists `--session` as the saved alignment session startup argument
+
 ### Requirement: Synced video export overlay
 The system SHALL let the user place a rectangular export overlay on the camera preview and use it to export a synced video with an H5 heatmap plot composited onto original-resolution camera footage. The plotted heatmap overlay presentation SHALL be derived from a shared source-space style model so the GUI overlay preview and exported overlay have matching visual proportions for labels, ticks, margins, axes, and heatmap content.
 
@@ -638,4 +657,3 @@ The system SHALL keep synced video export behavior unchanged by the Leg2 ultraso
 #### Scenario: Preserve export duration
 - **WHEN** a Leg2 ultrasonic datasource extends before or after the H5 recording in aligned shared time
 - **THEN** synced video export duration remains based on the H5 recording duration
-
