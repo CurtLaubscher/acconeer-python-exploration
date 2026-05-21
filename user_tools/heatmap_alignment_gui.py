@@ -59,10 +59,10 @@ from heatmap_alignment_core import (
     derive_signal_plot_color,
     import_leg2_mat_for_heatmap,
     import_peak_distance_json_for_heatmap,
-    load_alignment_artifact,
+    load_alignment_session,
     prepare_proxy_video,
     rectify_viewport,
-    save_alignment_artifact,
+    save_alignment_session,
     scale_viewport_corners,
     timeline_view_bounds_s,
     validate_alignment_session,
@@ -2043,11 +2043,11 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         file_menu.addSeparator()
 
         open_session_action = QtGui.QAction("Open Session...", self)
-        open_session_action.triggered.connect(self._load_artifact)
+        open_session_action.triggered.connect(self._load_session)
         file_menu.addAction(open_session_action)
 
         save_session_action = QtGui.QAction("Save Session As...", self)
-        save_session_action.triggered.connect(self._save_artifact)
+        save_session_action.triggered.connect(self._save_session)
         file_menu.addAction(save_session_action)
 
         file_menu.addSeparator()
@@ -2071,13 +2071,13 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         controls = QtWidgets.QHBoxLayout()
         self.load_camera_button = QtWidgets.QPushButton("Load Camera")
         self.load_h5_button = QtWidgets.QPushButton("Load H5")
-        self.load_artifact_button = QtWidgets.QPushButton("Load Session")
-        self.save_artifact_button = QtWidgets.QPushButton("Save Session")
+        self.load_session_button = QtWidgets.QPushButton("Load Session")
+        self.save_session_button = QtWidgets.QPushButton("Save Session")
         self.export_synced_button = QtWidgets.QPushButton("Export Synced Video")
         controls.addWidget(self.load_camera_button)
         controls.addWidget(self.load_h5_button)
-        controls.addWidget(self.load_artifact_button)
-        controls.addWidget(self.save_artifact_button)
+        controls.addWidget(self.load_session_button)
+        controls.addWidget(self.save_session_button)
         controls.addWidget(self.export_synced_button)
         controls.addStretch(1)
         layout.addLayout(controls)
@@ -2234,8 +2234,8 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
     def _connect_signals(self) -> None:
         self.load_camera_button.clicked.connect(self._load_camera_video)
         self.load_h5_button.clicked.connect(self._load_h5_recording)
-        self.load_artifact_button.clicked.connect(self._load_artifact)
-        self.save_artifact_button.clicked.connect(self._save_artifact)
+        self.load_session_button.clicked.connect(self._load_session)
+        self.save_session_button.clicked.connect(self._save_session)
         self.export_synced_button.clicked.connect(self._export_synced_video)
         self.import_peak_json_button.clicked.connect(self._import_peak_distance_json)
         self.clear_peak_json_button.clicked.connect(self._clear_peak_distance_datasource)
@@ -2683,7 +2683,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             zero_velocity_m_s=zero_velocity_m_s,
         )
 
-    def _save_artifact(self) -> None:
+    def _save_session(self) -> None:
         try:
             validate_alignment_session(self.session, allow_missing_sources=False)
         except ValueError as exc:
@@ -2693,27 +2693,27 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         filename, _ = QtWidgets.QFileDialog.getSaveFileName(
             self,
             "Save session",
-            self._dialog_start_path("last_artifact_path"),
+            self._dialog_start_path("last_session_path"),
             "JSON files (*.json);;All files (*)",
         )
         if not filename:
             return
-        save_alignment_artifact(self.session, Path(filename))
-        self.settings.setValue("last_artifact_path", filename)
+        save_alignment_session(self.session, Path(filename))
+        self.settings.setValue("last_session_path", filename)
         self.statusBar().showMessage(f"Saved session: {filename}")
 
-    def _load_artifact(self) -> None:
+    def _load_session(self) -> None:
         filename, _ = QtWidgets.QFileDialog.getOpenFileName(
             self,
             "Open session",
-            self._dialog_start_path("last_artifact_path"),
+            self._dialog_start_path("last_session_path"),
             "JSON files (*.json);;All files (*)",
         )
         if filename:
-            self.load_artifact_from_path(Path(filename))
+            self.load_session_from_path(Path(filename))
 
-    def load_artifact_from_path(self, artifact_path: Path) -> None:
-        session = load_alignment_artifact(artifact_path)
+    def load_session_from_path(self, session_path: Path) -> None:
+        session = load_alignment_session(session_path)
         self._close_sources()
         self.session = session
 
@@ -2741,12 +2741,12 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.camera_view.set_export_overlay(self.session.export_overlay)
         self._update_controls_enabled_state()
         self._sync_previews(camera_access_hint="auto")
-        self.settings.setValue("last_artifact_path", str(artifact_path))
+        self.settings.setValue("last_session_path", str(session_path))
         if self.session.camera_track.path:
             self.settings.setValue("last_camera_path", self.session.camera_track.path)
         if self.session.heatmap_track.path:
             self.settings.setValue("last_h5_path", self.session.heatmap_track.path)
-        self.statusBar().showMessage(f"Loaded session: {artifact_path}")
+        self.statusBar().showMessage(f"Loaded session: {session_path}")
 
     def _open_camera_source(
         self,
@@ -3598,7 +3598,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.nudge_right_small.setEnabled(enabled)
         self.nudge_left_large.setEnabled(enabled)
         self.nudge_right_large.setEnabled(enabled)
-        self.save_artifact_button.setEnabled(has_camera and has_heatmap)
+        self.save_session_button.setEnabled(has_camera and has_heatmap)
         self.export_synced_button.setEnabled(
             has_camera and has_heatmap and not self._export_in_progress
         )
@@ -3793,10 +3793,10 @@ def build_argument_parser() -> argparse.ArgumentParser:
         )
     )
     parser.add_argument(
-        "--artifact",
+        "--session",
         type=Path,
         default=None,
-        help="Optional session JSON to load on startup.",
+        help="Optional saved alignment session JSON to load on startup.",
     )
     parser.add_argument(
         "--camera",
@@ -3833,8 +3833,8 @@ def main() -> None:
     app = QtWidgets.QApplication(sys.argv)
     app.setApplicationName("Heatmap Alignment Workbench")
     window = HeatmapAlignmentWindow()
-    if args.artifact is not None:
-        window.load_artifact_from_path(args.artifact)
+    if args.session is not None:
+        window.load_session_from_path(args.session)
     else:
         if args.camera is not None:
             window.load_camera_from_path(args.camera)
