@@ -30,8 +30,8 @@ from heatmap_alignment_core import (  # noqa: E402
     Leg2UltrasonicDatasourceSettings,
     Leg2UltrasonicSignalSeries,
     PeakDistanceSignalSeries,
-    load_alignment_artifact,
-    save_alignment_artifact,
+    load_alignment_session,
+    save_alignment_session,
     AlignmentSession,
     CameraTrack,
     HeatmapTrack,
@@ -60,12 +60,19 @@ def test_build_argument_parser_accepts_peaks() -> None:
     assert args.peaks == Path("peaks.json")
 
 
-def test_build_argument_parser_accepts_mat() -> None:
+def test_build_argument_parser_accepts_session() -> None:
     parser = build_argument_parser()
-    args = parser.parse_args(["--artifact", "session.json", "--mat", "leg2.mat"])
+    args = parser.parse_args(["--session", "session.json", "--mat", "leg2.mat"])
 
-    assert args.artifact == Path("session.json")
+    assert args.session == Path("session.json")
     assert args.mat == Path("leg2.mat")
+
+
+def test_build_argument_parser_rejects_legacy_artifact_flag() -> None:
+    parser = build_argument_parser()
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--artifact", "session.json"])
 
 
 def test_timeline_range_model_exposes_independent_leg2_offset() -> None:
@@ -131,10 +138,52 @@ def test_alignment_timeline_widget_leg2_track_start_uses_offset_sign_convention(
     assert widget._leg2_track_start_s() == pytest.approx(-1.25)
 
 
+def test_startup_session_takes_precedence_over_camera_and_h5(
+    tmp_path: Path, qapplication: QApplication
+) -> None:
+    session_path = tmp_path / "session.json"
+    startup_camera = tmp_path / "startup_camera.mp4"
+    startup_h5 = tmp_path / "startup.h5"
+    startup_camera.write_bytes(b"")
+    startup_h5.write_bytes(b"")
+
+    session = AlignmentSession(
+        camera_track=CameraTrack(path=""),
+        heatmap_track=HeatmapTrack(path=""),
+    )
+    save_alignment_session(session, session_path)
+
+    window = HeatmapAlignmentWindow()
+
+    def _fail_if_called(*_args: object, **_kwargs: object) -> bool:
+        raise AssertionError("camera/H5 startup loads must not run when --session is provided")
+
+    window.load_camera_from_path = _fail_if_called  # type: ignore[method-assign]
+    window.load_h5_from_path = _fail_if_called  # type: ignore[method-assign]
+
+    args = build_argument_parser().parse_args(
+        [
+            "--session",
+            str(session_path),
+            "--camera",
+            str(startup_camera),
+            "--h5",
+            str(startup_h5),
+        ]
+    )
+    if args.session is not None:
+        window.load_session_from_path(args.session)
+    else:
+        if args.camera is not None:
+            window.load_camera_from_path(args.camera)
+        if args.h5 is not None:
+            window.load_h5_from_path(args.h5)
+
+
 def test_startup_mat_overrides_session_leg2_path(tmp_path: Path, qapplication: QApplication) -> None:
     session_mat = tmp_path / "session_leg2.mat"
     startup_mat = tmp_path / "startup_leg2.mat"
-    artifact_path = tmp_path / "session.json"
+    session_path = tmp_path / "session.json"
     for mat_path in (session_mat, startup_mat):
         savemat(
             mat_path,
@@ -157,10 +206,10 @@ def test_startup_mat_overrides_session_leg2_path(tmp_path: Path, qapplication: Q
             offset_s=0.75,
         ),
     )
-    save_alignment_artifact(session, artifact_path)
+    save_alignment_session(session, session_path)
 
     window = HeatmapAlignmentWindow()
-    window.load_artifact_from_path(artifact_path)
+    window.load_session_from_path(session_path)
     assert window.session.leg2_ultrasonic_datasource.path == str(session_mat)
 
     assert window.load_leg2_mat_from_path(startup_mat) is True

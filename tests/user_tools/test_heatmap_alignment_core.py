@@ -36,11 +36,11 @@ from heatmap_alignment_core import (  # noqa: E402
     derive_h5_signal_plot_color,
     import_leg2_mat_for_heatmap,
     import_peak_distance_json_for_heatmap,
-    load_alignment_artifact,
+    load_alignment_session,
     load_leg2_mat_ultrasonic,
     prepare_proxy_video,
     rectify_viewport,
-    save_alignment_artifact,
+    save_alignment_session,
     scale_viewport_corners,
     timeline_view_bounds_s,
     validate_alignment_session,
@@ -68,7 +68,7 @@ def _resolved_margin_pixels(presentation: object) -> tuple[float, float, float, 
     )
 
 
-def test_alignment_artifact_roundtrip(tmp_path: Path) -> None:
+def test_alignment_session_roundtrip(tmp_path: Path) -> None:
     camera_path = tmp_path / "camera.mp4"
     heatmap_path = tmp_path / "truth.h5"
     camera_path.write_bytes(b"")
@@ -115,9 +115,9 @@ def test_alignment_artifact_roundtrip(tmp_path: Path) -> None:
         ),
     )
 
-    artifact_path = tmp_path / "alignment.json"
-    save_alignment_artifact(session, artifact_path)
-    loaded = load_alignment_artifact(artifact_path)
+    session_path = tmp_path / "alignment.json"
+    save_alignment_session(session, session_path)
+    loaded = load_alignment_session(session_path)
 
     assert loaded.viewport.output_width == 10
     assert loaded.timeline.offset_s == pytest.approx(0.2)
@@ -131,7 +131,7 @@ def test_alignment_artifact_roundtrip(tmp_path: Path) -> None:
     assert loaded.viewport_visibility.gamma == pytest.approx(1.4)
 
 
-def test_alignment_artifact_roundtrip_with_peak_distance_datasource(tmp_path: Path) -> None:
+def test_alignment_session_roundtrip_with_peak_distance_datasource(tmp_path: Path) -> None:
     camera_path = tmp_path / "camera.mp4"
     heatmap_path = tmp_path / "truth.h5"
     peak_json_path = tmp_path / "peaks.json"
@@ -148,15 +148,15 @@ def test_alignment_artifact_roundtrip_with_peak_distance_datasource(tmp_path: Pa
         ),
     )
 
-    artifact_path = tmp_path / "alignment_with_peaks.json"
-    save_alignment_artifact(session, artifact_path)
-    loaded = load_alignment_artifact(artifact_path)
+    session_path = tmp_path / "alignment_with_peaks.json"
+    save_alignment_session(session, session_path)
+    loaded = load_alignment_session(session_path)
 
     assert loaded.peak_distance_datasource.path == str(peak_json_path)
     assert loaded.peak_distance_datasource.visible is False
 
 
-def test_alignment_artifact_roundtrip_with_signal_plot_view_settings(tmp_path: Path) -> None:
+def test_alignment_session_roundtrip_with_signal_plot_view_settings(tmp_path: Path) -> None:
     camera_path = tmp_path / "camera.mp4"
     heatmap_path = tmp_path / "truth.h5"
     camera_path.write_bytes(b"")
@@ -173,9 +173,9 @@ def test_alignment_artifact_roundtrip_with_signal_plot_view_settings(tmp_path: P
         ),
     )
 
-    artifact_path = tmp_path / "alignment_with_signal_plot.json"
-    save_alignment_artifact(session, artifact_path)
-    loaded = load_alignment_artifact(artifact_path)
+    session_path = tmp_path / "alignment_with_signal_plot.json"
+    save_alignment_session(session, session_path)
+    loaded = load_alignment_session(session_path)
 
     assert loaded.signal_plot_view.x_range_mode == "manual"
     assert loaded.signal_plot_view.y_range_mode == "manual"
@@ -183,13 +183,13 @@ def test_alignment_artifact_roundtrip_with_signal_plot_view_settings(tmp_path: P
     assert loaded.signal_plot_view.manual_y_range == pytest.approx((0.1, 2.5))
 
 
-def test_alignment_artifact_defaults_missing_signal_plot_view_settings(tmp_path: Path) -> None:
+def test_alignment_session_defaults_missing_signal_plot_view_settings(tmp_path: Path) -> None:
     camera_path = tmp_path / "camera.mp4"
     heatmap_path = tmp_path / "truth.h5"
     camera_path.write_bytes(b"")
     heatmap_path.write_bytes(b"")
-    artifact_path = tmp_path / "alignment.json"
-    artifact_path.write_text(
+    session_path = tmp_path / "alignment.json"
+    session_path.write_text(
         """
 {
   "version": 1,
@@ -224,7 +224,7 @@ def test_alignment_artifact_defaults_missing_signal_plot_view_settings(tmp_path:
         encoding="utf-8",
     )
 
-    loaded = load_alignment_artifact(artifact_path)
+    loaded = load_alignment_session(session_path)
 
     assert loaded.signal_plot_view == SignalPlotViewSettings()
 
@@ -329,13 +329,13 @@ def test_timeline_view_bounds_s_adds_padding() -> None:
     assert bounds[1] > 10.0
 
 
-def test_alignment_artifact_defaults_missing_viewport_visibility_settings(tmp_path: Path) -> None:
+def test_alignment_session_defaults_missing_viewport_visibility_settings(tmp_path: Path) -> None:
     camera_path = tmp_path / "camera.mp4"
     heatmap_path = tmp_path / "truth.h5"
     camera_path.write_bytes(b"")
     heatmap_path.write_bytes(b"")
-    artifact_path = tmp_path / "alignment.json"
-    artifact_path.write_text(
+    session_path = tmp_path / "alignment.json"
+    session_path.write_text(
         """
 {
   "version": 1,
@@ -370,7 +370,7 @@ def test_alignment_artifact_defaults_missing_viewport_visibility_settings(tmp_pa
         encoding="utf-8",
     )
 
-    loaded = load_alignment_artifact(artifact_path)
+    loaded = load_alignment_session(session_path)
 
     assert loaded.viewport_visibility == ViewportVisibilitySettings()
 
@@ -1099,7 +1099,7 @@ def test_build_peak_distance_signal_series_bridges_detected_transitions() -> Non
     assert series.candidate_distance_m[0] == pytest.approx(1.0)
 
 
-def test_alignment_artifact_roundtrip_with_leg2_ultrasonic_datasource(tmp_path: Path) -> None:
+def test_alignment_session_roundtrip_with_leg2_ultrasonic_datasource(tmp_path: Path) -> None:
     camera_path = tmp_path / "camera.mp4"
     heatmap_path = tmp_path / "truth.h5"
     mat_path = tmp_path / "leg2.mat"
@@ -1118,9 +1118,9 @@ def test_alignment_artifact_roundtrip_with_leg2_ultrasonic_datasource(tmp_path: 
         ),
     )
 
-    artifact_path = tmp_path / "alignment_with_leg2.json"
-    save_alignment_artifact(session, artifact_path)
-    loaded = load_alignment_artifact(artifact_path)
+    session_path = tmp_path / "alignment_with_leg2.json"
+    save_alignment_session(session, session_path)
+    loaded = load_alignment_session(session_path)
 
     assert loaded.leg2_ultrasonic_datasource.path == str(mat_path)
     assert loaded.leg2_ultrasonic_datasource.visible is False
@@ -1128,13 +1128,13 @@ def test_alignment_artifact_roundtrip_with_leg2_ultrasonic_datasource(tmp_path: 
     assert loaded.leg2_ultrasonic_datasource.offset_s == pytest.approx(0.25)
 
 
-def test_alignment_artifact_defaults_missing_leg2_ultrasonic_fields(tmp_path: Path) -> None:
+def test_alignment_session_defaults_missing_leg2_ultrasonic_fields(tmp_path: Path) -> None:
     camera_path = tmp_path / "camera.mp4"
     heatmap_path = tmp_path / "truth.h5"
     camera_path.write_bytes(b"")
     heatmap_path.write_bytes(b"")
-    artifact_path = tmp_path / "alignment.json"
-    artifact_path.write_text(
+    session_path = tmp_path / "alignment.json"
+    session_path.write_text(
         """
 {
   "version": 1,
@@ -1169,7 +1169,7 @@ def test_alignment_artifact_defaults_missing_leg2_ultrasonic_fields(tmp_path: Pa
         encoding="utf-8",
     )
 
-    loaded = load_alignment_artifact(artifact_path)
+    loaded = load_alignment_session(session_path)
 
     assert loaded.leg2_ultrasonic_datasource.path == ""
     assert loaded.leg2_ultrasonic_datasource.visible is True

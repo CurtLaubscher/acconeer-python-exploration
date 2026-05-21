@@ -35,7 +35,7 @@ from sparse_iq_peak_distance_core import (
 )
 
 
-ARTIFACT_VERSION = 1
+SESSION_VERSION = 1
 
 H5_TIMELINE_TRACK_COLOR_HEX = "#22c55e"
 LEG2_TIMELINE_TRACK_COLOR_HEX = "#6366f1"
@@ -209,7 +209,7 @@ class OverlayPlotPresentation:
 class AlignmentSession:
     """Serializable state for one alignment session."""
 
-    version: int = ARTIFACT_VERSION
+    version: int = SESSION_VERSION
     camera_track: CameraTrack = field(default_factory=CameraTrack)
     heatmap_track: HeatmapTrack = field(default_factory=HeatmapTrack)
     viewport: ViewportGeometry = field(default_factory=ViewportGeometry)
@@ -240,10 +240,10 @@ class AlignmentSession:
     @classmethod
     def from_json_dict(cls, payload: dict[str, Any]) -> AlignmentSession:
         version = payload.get("version")
-        if version != ARTIFACT_VERSION:
+        if version != SESSION_VERSION:
             raise ValueError(
-                f"Unsupported alignment artifact version {version!r}; "
-                f"expected {ARTIFACT_VERSION}."
+                f"Unsupported alignment session version {version!r}; "
+                f"expected {SESSION_VERSION}."
             )
 
         session = cls(
@@ -772,16 +772,16 @@ def visible_signal_y_range(
     return y_min - padding, y_max + padding
 
 
-def save_alignment_artifact(session: AlignmentSession, path: Path) -> None:
+def save_alignment_session(session: AlignmentSession, path: Path) -> None:
     validate_alignment_session(session, allow_missing_sources=True)
     path.write_text(json.dumps(session.to_json_dict(), indent=2), encoding="utf-8")
 
 
-def load_alignment_artifact(path: Path) -> AlignmentSession:
+def load_alignment_session(path: Path) -> AlignmentSession:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
-        raise ValueError(f"Malformed alignment artifact: {exc}") from exc
+        raise ValueError(f"Malformed alignment session: {exc}") from exc
 
     return AlignmentSession.from_json_dict(payload)
 
@@ -791,8 +791,8 @@ def validate_alignment_session(
     *,
     allow_missing_sources: bool = False,
 ) -> None:
-    if session.version != ARTIFACT_VERSION:
-        raise ValueError(f"Unsupported artifact version {session.version}.")
+    if session.version != SESSION_VERSION:
+        raise ValueError(f"Unsupported session version {session.version}.")
 
     if not allow_missing_sources:
         if session.camera_track.path and not Path(session.camera_track.path).exists():
