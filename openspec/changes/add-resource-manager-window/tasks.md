@@ -68,6 +68,6 @@
 
 ## 8. Resources Window Dismissal
 
-- [ ] 8.1 Add an obvious in-window dismissal action for the Resources window, preferably a bottom-row Close button unless a window-local menu is also justified
-- [ ] 8.2 Ensure dismissing the Resources window only closes or hides that utility window without unloading resources, closing the session, exiting the main workbench, or changing alignment state
-- [ ] 8.3 Add focused tests or smoke coverage for the Resources window dismissal action
+- [x] 8.1 Add an obvious in-window dismissal action for the Resources window, preferably a bottom-row Close button unless a window-local menu is also justified
+- [x] 8.2 Ensure dismissing the Resources window only closes or hides that utility window without unloading resources, closing the session, exiting the main workbench, or changing alignment state
+- [x] 8.3 Add focused tests or smoke coverage for the Resources window dismissal action

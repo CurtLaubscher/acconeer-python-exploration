@@ -2043,13 +2043,6 @@ class ResourcesWindow(QtWidgets.QDialog):
         self.session_label.setWordWrap(True)
         layout.addWidget(self.session_label)
 
-        toolbar = QtWidgets.QHBoxLayout()
-        self.clear_all_button = QtWidgets.QPushButton("Clear All Resources...")
-        self.clear_all_button.clicked.connect(self._main_window.clear_all_resources)
-        toolbar.addWidget(self.clear_all_button)
-        toolbar.addStretch(1)
-        layout.addLayout(toolbar)
-
         self.table = QtWidgets.QTableWidget(0, 5)
         self.table.setHorizontalHeaderLabels(["", "Resource", "Role", "Status", "Path"])
         table_header = self.table.horizontalHeader()
@@ -2103,6 +2096,7 @@ class ResourcesWindow(QtWidgets.QDialog):
         details_layout.addWidget(self.details_status_label)
         details_layout.addWidget(self.details_messages_label)
         details_layout.addWidget(self.details_path_widget)
+        details_layout.addSpacing(RESOURCES_DETAILS_SECTION_SPACING_PX)
 
         action_row = QtWidgets.QHBoxLayout()
         self.load_button = QtWidgets.QPushButton(RESOURCE_ACTION_LABELS["load"])
@@ -2131,7 +2125,24 @@ class ResourcesWindow(QtWidgets.QDialog):
         self.reveal_button.clicked.connect(lambda: self._invoke_action("reveal"))
         self.inspect_button.clicked.connect(lambda: self._invoke_action("inspect"))
 
+        bottom_row = QtWidgets.QHBoxLayout()
+        self.clear_all_button = QtWidgets.QPushButton("Clear All Resources...")
+        self.clear_all_button.clicked.connect(self._main_window.clear_all_resources)
+        bottom_row.addWidget(self.clear_all_button)
+        bottom_row.addStretch(1)
+        self.close_button = QtWidgets.QPushButton("&Close")
+        self.close_button.clicked.connect(self._dismiss)
+        bottom_row.addWidget(self.close_button)
+        layout.addLayout(bottom_row)
+
         self._summaries: tuple[ResourceSummary, ...] = ()
+
+    def _dismiss(self) -> None:
+        self.hide()
+
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:
+        event.accept()
+        self.hide()
 
     @staticmethod
     def _configure_table_item(item: QtWidgets.QTableWidgetItem) -> None:

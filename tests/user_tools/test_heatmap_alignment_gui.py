@@ -411,6 +411,45 @@ def test_resources_window_details_path_is_single_line_block(
     assert "\n" not in resources.details_path_label.text()
 
 
+def test_resources_window_bottom_row_layout(qapplication: QApplication) -> None:
+    window = HeatmapAlignmentWindow()
+    resources = ResourcesWindow(window)
+    resources.show()
+    qapplication.processEvents()
+
+    clear_rect = resources.clear_all_button.geometry()
+    close_rect = resources.close_button.geometry()
+    assert clear_rect.left() < close_rect.left()
+    assert abs(clear_rect.center().y() - close_rect.center().y()) <= 2
+
+
+def test_resources_window_close_button_hides_without_changing_state(
+    qapplication: QApplication,
+) -> None:
+    window = HeatmapAlignmentWindow()
+    window.session.camera_track = CameraTrack(path="/tmp/example_camera.mp4")
+    window.session.heatmap_track = HeatmapTrack(path="/tmp/example.h5")
+    window._current_session_path = Path("/tmp/session.json")
+
+    window._show_resources_window()
+    resources = window._resources_window
+    assert resources is not None
+    resources.show()
+    qapplication.processEvents()
+    assert resources.isVisible()
+
+    resources.close_button.click()
+    qapplication.processEvents()
+
+    assert resources.isVisible() is False
+    assert window._resources_window is resources
+    assert window.session.camera_track.path == "/tmp/example_camera.mp4"
+    assert window.session.heatmap_track.path == "/tmp/example.h5"
+    assert window._current_session_path == Path("/tmp/session.json")
+    assert window.camera_source is None
+    assert window.heatmap_source is None
+
+
 def test_show_resources_window_preserves_geometry(qapplication: QApplication) -> None:
     window = HeatmapAlignmentWindow()
     window._show_resources_window()
