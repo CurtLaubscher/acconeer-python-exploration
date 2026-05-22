@@ -42,6 +42,14 @@ The system SHALL provide a modeless Resources window that summarizes supported h
 - **WHEN** a session path is known
 - **THEN** the Resources window shows the current session path as contextual information without treating the session as a datasource row
 
+#### Scenario: Show obvious window dismissal action
+- **WHEN** the Resources window is visible
+- **THEN** the window provides an obvious in-window dismissal action such as a Close button or window-local close menu item
+
+#### Scenario: Dismiss Resources window without changing state
+- **WHEN** the user invokes the Resources window dismissal action
+- **THEN** the system closes or hides only the Resources window without unloading resources, closing the current session, exiting the main workbench, or changing alignment state
+
 ### Requirement: Resource row presentation
 The system SHALL present each resource row with scan-friendly status, visual identity, path, and detail information.
 

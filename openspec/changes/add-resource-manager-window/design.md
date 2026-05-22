@@ -14,6 +14,7 @@ That layout worked when the app had only Camera Video and Radar Raw (H5) sources
 
 - Add a top-level Resources menu for resource-oriented commands.
 - Add a modeless Resources window that can remain open while the user aligns data.
+- Give modeless utility windows an obvious in-window dismissal affordance, such as a Close button and/or a window-local close menu item, rather than relying only on the title-bar close control.
 - List known resource slots even when unloaded, so the user can see what the workbench supports.
 - Use a small unlabeled color swatch/marker cell rather than a text-labeled "Color" column.
 - Show full resource paths where space allows, with middle elision that tries to preserve the full filename.
@@ -81,6 +82,14 @@ The window should contain:
 The table is the overview; the details area is where longer paths, warnings, and precise actions live. This avoids forcing every action into tiny table cells.
 
 Alternative considered: a modal load/unload dialog. That would be simpler, but it would not work as well as a persistent "what is loaded?" reference while aligning data.
+
+### Provide An Obvious Dismiss Action
+
+Modeless utility windows should provide a visible way to dismiss the window from within the window itself. For the Resources window, a bottom-row `Close` button is sufficient and avoids adding a full menu bar solely for one action. If more window-local actions are added later, a small window-local menu such as `File > Close` can be considered.
+
+Closing the Resources window should only hide or close the manager window. It should not unload resources, close the session, change alignment state, or exit the main workbench.
+
+Alternative considered: rely only on the operating-system title-bar close button. That works technically, but smoke testing showed users can look for an in-window `Close` action in a utility window.
 
 ### Show Fixed Resource Slots First
 

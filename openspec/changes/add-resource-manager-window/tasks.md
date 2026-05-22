@@ -65,3 +65,9 @@
 - [x] 7.6 Keep Resources table headers non-interactive unless sorting or column actions are intentionally implemented
 - [x] 7.7 Add Qt mnemonics to Resources menu and common resource action labels without adding custom Escape-key behavior
 - [x] 7.8 Add focused tests or smoke coverage for the Resources window polish changes
+
+## 8. Resources Window Dismissal
+
+- [ ] 8.1 Add an obvious in-window dismissal action for the Resources window, preferably a bottom-row Close button unless a window-local menu is also justified
+- [ ] 8.2 Ensure dismissing the Resources window only closes or hides that utility window without unloading resources, closing the session, exiting the main workbench, or changing alignment state
+- [ ] 8.3 Add focused tests or smoke coverage for the Resources window dismissal action
