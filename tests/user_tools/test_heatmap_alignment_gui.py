@@ -16,9 +16,11 @@ if str(USER_TOOLS_PATH) not in sys.path:
     sys.path.insert(0, str(USER_TOOLS_PATH))
 
 from heatmap_alignment_gui import (  # noqa: E402
+    RESOURCE_ACTION_LABELS,
     AlignmentTimelineWidget,
     CornerEditorWidget,
     HeatmapAlignmentWindow,
+    ResourcesWindow,
     SignalPlotWidget,
     TimelineRangeModel,
     build_argument_parser,
@@ -27,14 +29,16 @@ from heatmap_alignment_gui import (  # noqa: E402
     track_offset_label_should_show,
 )
 from heatmap_alignment_core import (  # noqa: E402
-    Leg2UltrasonicDatasourceSettings,
-    Leg2UltrasonicSignalSeries,
-    PeakDistanceSignalSeries,
-    load_alignment_session,
-    save_alignment_session,
+    AlignmentResourceRuntime,
     AlignmentSession,
     CameraTrack,
     HeatmapTrack,
+    Leg2UltrasonicDatasourceSettings,
+    Leg2UltrasonicSignalSeries,
+    PeakDistanceSignalSeries,
+    build_alignment_resource_summaries,
+    load_alignment_session,
+    save_alignment_session,
 )
 from scipy.io import savemat
 
@@ -297,6 +301,182 @@ def test_timeline_plot_rect_uses_configured_time_axis_span(
 
     assert plot_rect.left() == pytest.approx(220.0)
     assert plot_rect.right() == pytest.approx(760.0)
+
+
+def test_resources_menu_and_file_menu_actions_exist(qapplication: QApplication) -> None:
+    window = HeatmapAlignmentWindow()
+    menu_bar = window.menuBar()
+    action_texts: set[str] = set()
+    menu_titles: set[str] = set()
+    for bar_action in menu_bar.actions():
+        menu = bar_action.menu()
+        if menu is None:
+            continue
+        menu_titles.add(menu.title().replace("&", ""))
+        for menu_action in menu.actions():
+            if menu_action.isSeparator():
+                continue
+            action_texts.add(menu_action.text().replace("&", ""))
+
+    assert "File" in menu_titles
+    assert "Resources" in menu_titles
+    assert "Manage Resources..." in action_texts
+    assert "&Manage Resources..." in {
+        menu_action.text()
+        for bar_action in menu_bar.actions()
+        if bar_action.menu() is not None
+        for menu_action in bar_action.menu().actions()
+        if not menu_action.isSeparator()
+    }
+    assert "Save Session" in action_texts
+    assert "Close Session" in action_texts
+    assert "Load Camera Video..." in action_texts
+    assert "Unload Camera Video" in action_texts
+
+
+def test_resources_window_lists_fixed_resource_slots(qapplication: QApplication) -> None:
+    window = HeatmapAlignmentWindow()
+    resources = ResourcesWindow(window)
+    summaries = build_alignment_resource_summaries(
+        window.session,
+        AlignmentResourceRuntime(),
+    )
+    resources.refresh(summaries, None)
+
+    assert resources.table.rowCount() == 4
+    assert resources.table.item(0, 1).text() == "Camera Video"
+    assert resources.table.item(3, 1).text() == "Leg2 MAT"
+
+
+def test_resources_window_reuses_single_instance(qapplication: QApplication) -> None:
+    window = HeatmapAlignmentWindow()
+    window._show_resources_window()
+    first = window._resources_window
+    window._show_resources_window()
+
+    assert window._resources_window is first
+
+
+def test_resource_action_labels_use_show_in_file_manager() -> None:
+    assert "File Manager" in RESOURCE_ACTION_LABELS["reveal"].replace("&", "")
+
+
+def test_resources_table_header_is_not_clickable(qapplication: QApplication) -> None:
+    window = HeatmapAlignmentWindow()
+    resources = ResourcesWindow(window)
+
+    header = resources.table.horizontalHeader()
+    assert header.sectionsClickable() is False
+    assert header.highlightSections() is False
+
+
+def test_resources_window_details_hide_path_when_unloaded(
+    qapplication: QApplication,
+) -> None:
+    window = HeatmapAlignmentWindow()
+    resources = ResourcesWindow(window)
+    summaries = build_alignment_resource_summaries(
+        window.session,
+        AlignmentResourceRuntime(),
+    )
+    resources.refresh(summaries, None)
+    resources._select_table_row(0)
+    qapplication.processEvents()
+
+    assert resources.details_identity_label.text() == "Camera Video (Primary)"
+    assert "Unloaded" in resources.details_status_label.text()
+    assert resources.details_path_widget.isVisible() is False
+
+
+def test_resources_window_details_path_is_single_line_block(
+    qapplication: QApplication,
+) -> None:
+    window = HeatmapAlignmentWindow()
+    resources = ResourcesWindow(window)
+    session = AlignmentSession(
+        camera_track=CameraTrack(path="/tmp/example_camera.mp4"),
+        heatmap_track=HeatmapTrack(path=""),
+    )
+    summaries = build_alignment_resource_summaries(
+        session,
+        AlignmentResourceRuntime(),
+    )
+    resources.refresh(summaries, None)
+    resources._select_table_row(0)
+    resources.show()
+    qapplication.processEvents()
+
+    assert resources.details_path_widget.isVisible() is True
+    assert resources.details_path_label.text() == "Path: /tmp/example_camera.mp4"
+    assert "\n" not in resources.details_path_label.text()
+
+
+def test_resources_window_bottom_row_layout(qapplication: QApplication) -> None:
+    window = HeatmapAlignmentWindow()
+    resources = ResourcesWindow(window)
+    resources.show()
+    qapplication.processEvents()
+
+    clear_rect = resources.clear_all_button.geometry()
+    close_rect = resources.close_button.geometry()
+    assert clear_rect.left() < close_rect.left()
+    assert abs(clear_rect.center().y() - close_rect.center().y()) <= 2
+
+
+def test_resources_window_close_button_hides_without_changing_state(
+    qapplication: QApplication,
+) -> None:
+    window = HeatmapAlignmentWindow()
+    window.session.camera_track = CameraTrack(path="/tmp/example_camera.mp4")
+    window.session.heatmap_track = HeatmapTrack(path="/tmp/example.h5")
+    window._current_session_path = Path("/tmp/session.json")
+
+    window._show_resources_window()
+    resources = window._resources_window
+    assert resources is not None
+    resources.show()
+    qapplication.processEvents()
+    assert resources.isVisible()
+
+    resources.close_button.click()
+    qapplication.processEvents()
+
+    assert resources.isVisible() is False
+    assert window._resources_window is resources
+    assert window.session.camera_track.path == "/tmp/example_camera.mp4"
+    assert window.session.heatmap_track.path == "/tmp/example.h5"
+    assert window._current_session_path == Path("/tmp/session.json")
+    assert window.camera_source is None
+    assert window.heatmap_source is None
+
+
+def test_show_resources_window_preserves_geometry(qapplication: QApplication) -> None:
+    window = HeatmapAlignmentWindow()
+    window._show_resources_window()
+    resources = window._resources_window
+    assert resources is not None
+
+    resources.setGeometry(140, 160, 700, 500)
+    qapplication.processEvents()
+    expected_geometry = resources.geometry()
+
+    window._show_resources_window()
+    qapplication.processEvents()
+
+    assert resources.geometry() == expected_geometry
+
+
+def test_resource_menu_enablement_tracks_loaded_state(qapplication: QApplication) -> None:
+    window = HeatmapAlignmentWindow()
+    window._refresh_resources_ui()
+
+    assert window.unload_camera_action.isEnabled() is False
+    assert window.reload_camera_action.isEnabled() is False
+
+    window.session.camera_track = CameraTrack(path="/tmp/example.mp4")
+    window._refresh_resources_ui()
+
+    assert window.reload_camera_action.isEnabled() is True
 
 
 def test_timeline_time_axis_tracks_signal_plot_viewbox(

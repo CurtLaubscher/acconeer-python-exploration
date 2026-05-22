@@ -33,8 +33,14 @@ from typing import Literal
 import cv2
 import numpy as np
 from heatmap_alignment_core import (
+    AlignmentResourceRuntime,
     H5_TIMELINE_TRACK_COLOR_HEX,
     LEG2_TIMELINE_TRACK_COLOR_HEX,
+    ResourceAction,
+    ResourceKind,
+    ResourceSummary,
+    build_alignment_resource_summaries,
+    elide_path_middle,
     SIGNAL_PLOT_BACKGROUND_HEX,
     SIGNAL_PLOT_NO_DETECTION_ALPHA,
     SIGNAL_PLOT_PRIMARY_SEGMENT_ALPHA,
@@ -43,6 +49,7 @@ from heatmap_alignment_core import (
     AlignmentSession,
     CameraTrack,
     CameraVideoSource,
+    HeatmapTrack,
     ExportOverlaySettings,
     HeatmapPlotRenderer,
     HeatmapTruthSource,
@@ -77,8 +84,31 @@ from sparse_iq_peak_distance_core import (
 )
 
 from PySide6 import QtCore, QtGui, QtWidgets
+from PySide6.QtGui import QDesktopServices
+from PySide6.QtCore import QUrl
 
 import pyqtgraph as pg
+
+
+RESOURCE_STATUS_LABELS = {
+    "unloaded": "Unloaded",
+    "loaded": "Loaded",
+    "missing": "Missing",
+    "invalid": "Invalid",
+    "warning": "Warning",
+}
+
+RESOURCES_DETAILS_SECTION_SPACING_PX = 6
+RESOURCES_DETAILS_PATH_BLOCK_TOP_MARGIN_PX = 6
+
+RESOURCE_ACTION_LABELS: dict[ResourceAction, str] = {
+    "load": "&Load...",
+    "replace": "&Replace...",
+    "unload": "&Unload",
+    "reload": "&Reload",
+    "reveal": "Show in &File Manager",
+    "inspect": "Inspect &Warnings",
+}
 
 
 def rgb_to_qpixmap(frame_rgb: np.ndarray) -> QtGui.QPixmap:
@@ -1941,6 +1971,337 @@ class SourceResolutionViewportWorker(QtCore.QObject):
         self.render_finished.emit(result)
 
 
+class ResourceColorSwatchDelegate(QtWidgets.QStyledItemDelegate):
+    def paint(
+        self,
+        painter: QtGui.QPainter,
+        option: QtWidgets.QStyleOptionViewItem,
+        index: QtCore.QModelIndex,
+    ) -> None:
+        item_option = QtWidgets.QStyleOptionViewItem(option)
+        self.initStyleOption(item_option, index)
+        item_option.text = ""
+        style = option.widget.style() if option.widget is not None else QtWidgets.QApplication.style()
+        style.drawControl(
+            QtWidgets.QStyle.ControlElement.CE_ItemViewItem,
+            item_option,
+            painter,
+            option.widget,
+        )
+
+        color_hex = index.data(QtCore.Qt.ItemDataRole.UserRole)
+        painter.save()
+        try:
+            rect = option.rect.adjusted(6, 8, -6, -8)
+            if not color_hex:
+                painter.setPen(QtGui.QPen(QtGui.QColor("#475569")))
+                painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+                painter.drawRect(rect)
+                return
+            color = QtGui.QColor(str(color_hex))
+            if index.data(QtCore.Qt.ItemDataRole.UserRole + 1):
+                color.setAlpha(96)
+            painter.setPen(QtCore.Qt.PenStyle.NoPen)
+            painter.setBrush(color)
+            painter.drawRoundedRect(rect, 3, 3)
+        finally:
+            painter.restore()
+
+
+class ElidedPathItemDelegate(QtWidgets.QStyledItemDelegate):
+    def initStyleOption(
+        self,
+        option: QtWidgets.QStyleOptionViewItem,
+        index: QtCore.QModelIndex,
+    ) -> None:
+        super().initStyleOption(option, index)
+        full_path = str(index.data(QtCore.Qt.ItemDataRole.UserRole) or "")
+        if not full_path:
+            option.text = ""
+            return
+        metrics = option.fontMetrics
+        available_px = max(24, option.rect.width() - 12)
+        avg_char_px = max(1, metrics.horizontalAdvance("n"))
+        max_chars = max(12, available_px // avg_char_px)
+        option.text = elide_path_middle(full_path, max_chars)
+
+
+class ResourcesWindow(QtWidgets.QDialog):
+    """Modeless resource manager owned by the alignment main window."""
+
+    def __init__(self, main_window: HeatmapAlignmentWindow) -> None:
+        super().__init__(main_window)
+        self._main_window = main_window
+        self.setWindowTitle("Resources")
+        self.setModal(False)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose, False)
+        self.resize(920, 520)
+
+        layout = QtWidgets.QVBoxLayout(self)
+
+        self.session_label = QtWidgets.QLabel()
+        self.session_label.setWordWrap(True)
+        layout.addWidget(self.session_label)
+
+        self.table = QtWidgets.QTableWidget(0, 5)
+        self.table.setHorizontalHeaderLabels(["", "Resource", "Role", "Status", "Path"])
+        table_header = self.table.horizontalHeader()
+        table_header.setStretchLastSection(True)
+        table_header.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.Fixed)
+        table_header.setSectionsClickable(False)
+        table_header.setHighlightSections(False)
+        self.table.setColumnWidth(0, 34)
+        self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setAlternatingRowColors(True)
+        self.table.setShowGrid(False)
+        self.table.setCornerButtonEnabled(False)
+        self.table.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._show_row_context_menu)
+        self.table.itemSelectionChanged.connect(self._update_details_for_selection)
+        self.table.setItemDelegateForColumn(0, ResourceColorSwatchDelegate(self.table))
+        self.table.setItemDelegateForColumn(4, ElidedPathItemDelegate(self.table))
+        layout.addWidget(self.table, stretch=1)
+
+        details_group = QtWidgets.QGroupBox("Selected Resource")
+        details_layout = QtWidgets.QVBoxLayout(details_group)
+        details_layout.setSpacing(0)
+        self.details_identity_label = QtWidgets.QLabel()
+        self.details_identity_label.setWordWrap(True)
+        self.details_status_label = QtWidgets.QLabel()
+        self.details_status_label.setWordWrap(True)
+        self.details_messages_label = QtWidgets.QLabel()
+        self.details_messages_label.setWordWrap(True)
+        self.details_messages_label.setTextInteractionFlags(
+            QtCore.Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self.details_path_widget = QtWidgets.QWidget()
+        path_block_layout = QtWidgets.QVBoxLayout(self.details_path_widget)
+        path_block_layout.setContentsMargins(
+            0,
+            RESOURCES_DETAILS_PATH_BLOCK_TOP_MARGIN_PX,
+            0,
+            0,
+        )
+        path_block_layout.setSpacing(0)
+        self.details_path_label = QtWidgets.QLabel()
+        self.details_path_label.setWordWrap(True)
+        self.details_path_label.setTextInteractionFlags(
+            QtCore.Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        path_block_layout.addWidget(self.details_path_label)
+        details_layout.addWidget(self.details_identity_label)
+        details_layout.addSpacing(RESOURCES_DETAILS_SECTION_SPACING_PX)
+        details_layout.addWidget(self.details_status_label)
+        details_layout.addWidget(self.details_messages_label)
+        details_layout.addWidget(self.details_path_widget)
+        details_layout.addSpacing(RESOURCES_DETAILS_SECTION_SPACING_PX)
+
+        action_row = QtWidgets.QHBoxLayout()
+        self.load_button = QtWidgets.QPushButton(RESOURCE_ACTION_LABELS["load"])
+        self.replace_button = QtWidgets.QPushButton(RESOURCE_ACTION_LABELS["replace"])
+        self.unload_button = QtWidgets.QPushButton(RESOURCE_ACTION_LABELS["unload"])
+        self.reload_button = QtWidgets.QPushButton(RESOURCE_ACTION_LABELS["reload"])
+        self.reveal_button = QtWidgets.QPushButton(RESOURCE_ACTION_LABELS["reveal"])
+        self.inspect_button = QtWidgets.QPushButton(RESOURCE_ACTION_LABELS["inspect"])
+        for button in (
+            self.load_button,
+            self.replace_button,
+            self.unload_button,
+            self.reload_button,
+            self.reveal_button,
+            self.inspect_button,
+        ):
+            action_row.addWidget(button)
+        action_row.addStretch(1)
+        details_layout.addLayout(action_row)
+        layout.addWidget(details_group)
+
+        self.load_button.clicked.connect(lambda: self._invoke_action("load"))
+        self.replace_button.clicked.connect(lambda: self._invoke_action("replace"))
+        self.unload_button.clicked.connect(lambda: self._invoke_action("unload"))
+        self.reload_button.clicked.connect(lambda: self._invoke_action("reload"))
+        self.reveal_button.clicked.connect(lambda: self._invoke_action("reveal"))
+        self.inspect_button.clicked.connect(lambda: self._invoke_action("inspect"))
+
+        bottom_row = QtWidgets.QHBoxLayout()
+        self.clear_all_button = QtWidgets.QPushButton("Clear All Resources...")
+        self.clear_all_button.clicked.connect(self._main_window.clear_all_resources)
+        bottom_row.addWidget(self.clear_all_button)
+        bottom_row.addStretch(1)
+        self.close_button = QtWidgets.QPushButton("&Close")
+        self.close_button.clicked.connect(self._dismiss)
+        bottom_row.addWidget(self.close_button)
+        layout.addLayout(bottom_row)
+
+        self._summaries: tuple[ResourceSummary, ...] = ()
+
+    def _dismiss(self) -> None:
+        self.hide()
+
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:
+        event.accept()
+        self.hide()
+
+    @staticmethod
+    def _configure_table_item(item: QtWidgets.QTableWidgetItem) -> None:
+        item.setFlags(
+            QtCore.Qt.ItemFlag.ItemIsSelectable
+            | QtCore.Qt.ItemFlag.ItemIsEnabled
+        )
+
+    def _selected_table_row(self) -> int:
+        selection_model = self.table.selectionModel()
+        if selection_model is not None:
+            selected_rows = selection_model.selectedRows()
+            if selected_rows:
+                return selected_rows[0].row()
+        return self.table.currentRow()
+
+    def _select_table_row(self, row: int) -> None:
+        if row < 0 or row >= self.table.rowCount():
+            return
+        self.table.blockSignals(True)
+        try:
+            self.table.clearSelection()
+            self.table.selectRow(row)
+            self.table.setCurrentCell(row, 0)
+        finally:
+            self.table.blockSignals(False)
+
+    def refresh(self, summaries: tuple[ResourceSummary, ...], session_path: Path | None) -> None:
+        if session_path is None:
+            self.session_label.setText("Session: Untitled Session")
+        else:
+            self.session_label.setText(f"Session: {session_path}")
+        self._summaries = summaries
+        selected_kind = self._selected_kind()
+        self.table.blockSignals(True)
+        try:
+            self.table.setRowCount(len(summaries))
+            for row_index, summary in enumerate(summaries):
+                swatch_item = QtWidgets.QTableWidgetItem()
+                swatch_item.setData(QtCore.Qt.ItemDataRole.UserRole, summary.color_hex)
+                swatch_item.setData(QtCore.Qt.ItemDataRole.UserRole + 1, summary.color_muted)
+                self._configure_table_item(swatch_item)
+                self.table.setItem(row_index, 0, swatch_item)
+
+                name_item = QtWidgets.QTableWidgetItem(summary.display_name)
+                self._configure_table_item(name_item)
+                self.table.setItem(row_index, 1, name_item)
+
+                role_item = QtWidgets.QTableWidgetItem(summary.role)
+                self._configure_table_item(role_item)
+                self.table.setItem(row_index, 2, role_item)
+
+                status_item = QtWidgets.QTableWidgetItem(
+                    RESOURCE_STATUS_LABELS[summary.status]
+                )
+                self._configure_table_item(status_item)
+                self.table.setItem(row_index, 3, status_item)
+
+                path_item = QtWidgets.QTableWidgetItem()
+                path_item.setData(QtCore.Qt.ItemDataRole.UserRole, summary.path)
+                if summary.path:
+                    path_item.setToolTip(summary.path)
+                self._configure_table_item(path_item)
+                self.table.setItem(row_index, 4, path_item)
+
+            if selected_kind is not None:
+                for row_index, summary in enumerate(summaries):
+                    if summary.kind == selected_kind:
+                        self._select_table_row(row_index)
+                        break
+            elif summaries:
+                self._select_table_row(0)
+        finally:
+            self.table.blockSignals(False)
+        self._update_details_for_selection()
+
+    def _selected_summary(self) -> ResourceSummary | None:
+        row = self._selected_table_row()
+        if row < 0 or row >= len(self._summaries):
+            return None
+        return self._summaries[row]
+
+    def _selected_kind(self) -> ResourceKind | None:
+        summary = self._selected_summary()
+        return None if summary is None else summary.kind
+
+    def _update_details_for_selection(self) -> None:
+        summary = self._selected_summary()
+        if summary is None:
+            self.details_identity_label.setText("")
+            self.details_status_label.setText("")
+            self.details_messages_label.setText("")
+            self.details_messages_label.setVisible(False)
+            self.details_path_label.clear()
+            self.details_path_widget.setVisible(False)
+            for button in (
+                self.load_button,
+                self.replace_button,
+                self.unload_button,
+                self.reload_button,
+                self.reveal_button,
+                self.inspect_button,
+            ):
+                button.setEnabled(False)
+            return
+
+        self.details_identity_label.setText(
+            f"{summary.display_name} ({summary.role})"
+        )
+        self.details_status_label.setText(
+            f"{RESOURCE_STATUS_LABELS[summary.status]}\n{summary.details}"
+        )
+        if summary.messages:
+            self.details_messages_label.setText("\n".join(summary.messages))
+            self.details_messages_label.setVisible(True)
+        else:
+            self.details_messages_label.clear()
+            self.details_messages_label.setVisible(False)
+
+        if summary.path:
+            self.details_path_label.setText(f"Path: {summary.path}")
+            self.details_path_widget.setVisible(True)
+        else:
+            self.details_path_label.clear()
+            self.details_path_widget.setVisible(False)
+
+        action_set = set(summary.actions)
+        self.load_button.setEnabled("load" in action_set)
+        self.replace_button.setEnabled("replace" in action_set)
+        self.unload_button.setEnabled("unload" in action_set)
+        self.reload_button.setEnabled("reload" in action_set)
+        self.reveal_button.setEnabled("reveal" in action_set)
+        self.inspect_button.setEnabled("inspect" in action_set)
+
+    def _invoke_action(self, action: ResourceAction) -> None:
+        summary = self._selected_summary()
+        if summary is None:
+            return
+        self._main_window.invoke_resource_action(summary.kind, action)
+
+    def _show_row_context_menu(self, position: QtCore.QPoint) -> None:
+        index = self.table.indexAt(position)
+        if not index.isValid():
+            return
+        self._select_table_row(index.row())
+        summary = self._selected_summary()
+        if summary is None:
+            return
+        menu = QtWidgets.QMenu(self)
+        for action in summary.actions:
+            menu_action = menu.addAction(RESOURCE_ACTION_LABELS[action])
+            menu_action.triggered.connect(
+                lambda _checked=False, kind=summary.kind, chosen=action: (
+                    self._main_window.invoke_resource_action(kind, chosen)
+                )
+            )
+        menu.exec(self.table.viewport().mapToGlobal(position))
+
+
 class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
     """Main window for the manual alignment workbench."""
 
@@ -1952,6 +2313,10 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.resize(1600, 980)
 
         self.session = AlignmentSession()
+        self._current_session_path: Path | None = None
+        self._resources_window: ResourcesWindow | None = None
+        self._resource_reload_errors: dict[ResourceKind, str] = {}
+        self._resource_load_warnings: dict[ResourceKind, tuple[str, ...]] = {}
         self.camera_source: CameraVideoSource | None = None
         self.heatmap_source: HeatmapTruthSource | None = None
         self.current_camera_frame: np.ndarray | None = None
@@ -2003,6 +2368,8 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.signal_plot.attach_timeline_range_model(self.timeline_range_model)
         self._connect_signals()
         self._update_controls_enabled_state()
+        self._refresh_session_title()
+        self._refresh_resources_ui()
         self.statusBar().showMessage("Load camera video and H5 recording to begin.")
         QtCore.QTimer.singleShot(0, self.schedule_timeline_axis_geometry_sync)
 
@@ -2016,45 +2383,28 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
     def _create_menu_bar(self) -> None:
         file_menu = self.menuBar().addMenu("&File")
 
-        load_camera_action = QtGui.QAction("Load Camera...", self)
-        load_camera_action.triggered.connect(self._load_camera_video)
-        file_menu.addAction(load_camera_action)
+        self.open_session_action = QtGui.QAction("Open Session...", self)
+        self.open_session_action.triggered.connect(self._load_session)
+        file_menu.addAction(self.open_session_action)
 
-        load_h5_action = QtGui.QAction("Load H5...", self)
-        load_h5_action.triggered.connect(self._load_h5_recording)
-        file_menu.addAction(load_h5_action)
+        self.save_session_action = QtGui.QAction("Save Session", self)
+        self.save_session_action.setShortcut(QtGui.QKeySequence.StandardKey.Save)
+        self.save_session_action.triggered.connect(self._save_session)
+        file_menu.addAction(self.save_session_action)
 
-        import_peak_action = QtGui.QAction("Import Peak-Distance JSON...", self)
-        import_peak_action.triggered.connect(self._import_peak_distance_json)
-        file_menu.addAction(import_peak_action)
+        self.save_session_as_action = QtGui.QAction("Save Session As...", self)
+        self.save_session_as_action.triggered.connect(self._save_session_as)
+        file_menu.addAction(self.save_session_as_action)
 
-        clear_peak_action = QtGui.QAction("Clear Peak-Distance Datasource", self)
-        clear_peak_action.triggered.connect(self._clear_peak_distance_datasource)
-        file_menu.addAction(clear_peak_action)
-
-        import_leg2_action = QtGui.QAction("Import Leg2 MAT...", self)
-        import_leg2_action.triggered.connect(self._import_leg2_mat)
-        file_menu.addAction(import_leg2_action)
-
-        clear_leg2_action = QtGui.QAction("Clear Leg2 MAT Datasource", self)
-        clear_leg2_action.triggered.connect(self._clear_leg2_ultrasonic_datasource)
-        file_menu.addAction(clear_leg2_action)
+        self.close_session_action = QtGui.QAction("Close Session", self)
+        self.close_session_action.triggered.connect(self._close_session)
+        file_menu.addAction(self.close_session_action)
 
         file_menu.addSeparator()
 
-        open_session_action = QtGui.QAction("Open Session...", self)
-        open_session_action.triggered.connect(self._load_session)
-        file_menu.addAction(open_session_action)
-
-        save_session_action = QtGui.QAction("Save Session As...", self)
-        save_session_action.triggered.connect(self._save_session)
-        file_menu.addAction(save_session_action)
-
-        file_menu.addSeparator()
-
-        export_synced_action = QtGui.QAction("Export Synced Video...", self)
-        export_synced_action.triggered.connect(self._export_synced_video)
-        file_menu.addAction(export_synced_action)
+        self.export_synced_action = QtGui.QAction("Export Synced Video...", self)
+        self.export_synced_action.triggered.connect(self._export_synced_video)
+        file_menu.addAction(self.export_synced_action)
 
         file_menu.addSeparator()
 
@@ -2064,23 +2414,77 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         quit_action.triggered.connect(self.close)
         file_menu.addAction(quit_action)
 
+        resources_menu = self.menuBar().addMenu("&Resources")
+
+        self.manage_resources_action = QtGui.QAction("&Manage Resources...", self)
+        self.manage_resources_action.triggered.connect(self._show_resources_window)
+        resources_menu.addAction(self.manage_resources_action)
+
+        resources_menu.addSeparator()
+
+        self.load_camera_action = QtGui.QAction("&Load Camera Video...", self)
+        self.load_camera_action.triggered.connect(self._load_camera_video)
+        resources_menu.addAction(self.load_camera_action)
+
+        self.load_h5_action = QtGui.QAction("Load Radar Raw (&H5)...", self)
+        self.load_h5_action.triggered.connect(self._load_h5_recording)
+        resources_menu.addAction(self.load_h5_action)
+
+        self.load_peak_action = QtGui.QAction("Load Radar Peak (&JSON)...", self)
+        self.load_peak_action.triggered.connect(self._import_peak_distance_json)
+        resources_menu.addAction(self.load_peak_action)
+
+        self.load_leg2_action = QtGui.QAction("Load &Leg2 MAT...", self)
+        self.load_leg2_action.triggered.connect(self._import_leg2_mat)
+        resources_menu.addAction(self.load_leg2_action)
+
+        resources_menu.addSeparator()
+
+        self.unload_camera_action = QtGui.QAction("&Unload Camera Video", self)
+        self.unload_camera_action.triggered.connect(self.unload_camera_video)
+        resources_menu.addAction(self.unload_camera_action)
+
+        self.unload_h5_action = QtGui.QAction("Unload Radar Raw (&H5)", self)
+        self.unload_h5_action.triggered.connect(self.unload_h5_recording)
+        resources_menu.addAction(self.unload_h5_action)
+
+        self.unload_peak_action = QtGui.QAction("Clear Radar Peak (&JSON)", self)
+        self.unload_peak_action.triggered.connect(self._clear_peak_distance_datasource)
+        resources_menu.addAction(self.unload_peak_action)
+
+        self.unload_leg2_action = QtGui.QAction("Clear &Leg2 MAT", self)
+        self.unload_leg2_action.triggered.connect(self._clear_leg2_ultrasonic_datasource)
+        resources_menu.addAction(self.unload_leg2_action)
+
+        resources_menu.addSeparator()
+
+        self.reload_camera_action = QtGui.QAction("&Reload Camera Video", self)
+        self.reload_camera_action.triggered.connect(
+            lambda: self.invoke_resource_action("camera", "reload")
+        )
+        resources_menu.addAction(self.reload_camera_action)
+
+        self.reload_h5_action = QtGui.QAction("Reload Radar Raw (&H5)", self)
+        self.reload_h5_action.triggered.connect(
+            lambda: self.invoke_resource_action("radar_h5", "reload")
+        )
+        resources_menu.addAction(self.reload_h5_action)
+
+        self.reload_peak_action = QtGui.QAction("Reload Radar Peak (&JSON)", self)
+        self.reload_peak_action.triggered.connect(
+            lambda: self.invoke_resource_action("radar_peak", "reload")
+        )
+        resources_menu.addAction(self.reload_peak_action)
+
+        self.reload_leg2_action = QtGui.QAction("Reload &Leg2 MAT", self)
+        self.reload_leg2_action.triggered.connect(
+            lambda: self.invoke_resource_action("leg2_mat", "reload")
+        )
+        resources_menu.addAction(self.reload_leg2_action)
+
     def _build_ui(self) -> None:
         central = QtWidgets.QWidget(self)
         layout = QtWidgets.QVBoxLayout(central)
-
-        controls = QtWidgets.QHBoxLayout()
-        self.load_camera_button = QtWidgets.QPushButton("Load Camera")
-        self.load_h5_button = QtWidgets.QPushButton("Load H5")
-        self.load_session_button = QtWidgets.QPushButton("Load Session")
-        self.save_session_button = QtWidgets.QPushButton("Save Session")
-        self.export_synced_button = QtWidgets.QPushButton("Export Synced Video")
-        controls.addWidget(self.load_camera_button)
-        controls.addWidget(self.load_h5_button)
-        controls.addWidget(self.load_session_button)
-        controls.addWidget(self.save_session_button)
-        controls.addWidget(self.export_synced_button)
-        controls.addStretch(1)
-        layout.addLayout(controls)
 
         preview_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
         self.camera_view = CornerEditorWidget()
@@ -2182,10 +2586,6 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.viewport_gamma_spin.setSingleStep(0.05)
         self.viewport_gamma_spin.setValue(1.0)
         self.viewport_gamma_spin.setDecimals(2)
-        self.import_peak_json_button = QtWidgets.QPushButton("Import Peak JSON")
-        self.clear_peak_json_button = QtWidgets.QPushButton("Clear Peak JSON")
-        self.import_leg2_mat_button = QtWidgets.QPushButton("Import Leg2 MAT")
-        self.clear_leg2_mat_button = QtWidgets.QPushButton("Clear Leg2 MAT")
         self.leg2_signal_kind_combo = QtWidgets.QComboBox()
         self.leg2_signal_kind_combo.addItem("Raw ultrasonic", "raw")
         self.leg2_signal_kind_combo.addItem("Filtered ultrasonic", "filtered")
@@ -2193,10 +2593,6 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.show_peak_marker_checkbox.setChecked(True)
         self.show_leg2_signal_checkbox = QtWidgets.QCheckBox("Show Leg2 Signal")
         self.show_leg2_signal_checkbox.setChecked(True)
-        self.peak_datasource_label = QtWidgets.QLabel("No peak-distance JSON loaded.")
-        self.peak_datasource_label.setWordWrap(True)
-        self.leg2_datasource_label = QtWidgets.QLabel("No Leg2 MAT loaded.")
-        self.leg2_datasource_label.setWordWrap(True)
         render_layout.addWidget(QtWidgets.QLabel("Color Min"), 0, 0)
         render_layout.addWidget(self.color_min_spin, 0, 1)
         render_layout.addWidget(QtWidgets.QLabel("Color Max"), 0, 2)
@@ -2209,15 +2605,9 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         render_layout.addWidget(self.lag_window_spin, 1, 1)
         render_layout.addWidget(QtWidgets.QLabel("Sample Count"), 1, 2)
         render_layout.addWidget(self.sample_count_spin, 1, 3)
-        render_layout.addWidget(self.import_peak_json_button, 2, 0)
-        render_layout.addWidget(self.clear_peak_json_button, 2, 1)
-        render_layout.addWidget(self.show_peak_marker_checkbox, 2, 2)
-        render_layout.addWidget(self.peak_datasource_label, 2, 3, 1, 5)
-        render_layout.addWidget(self.import_leg2_mat_button, 3, 0)
-        render_layout.addWidget(self.clear_leg2_mat_button, 3, 1)
-        render_layout.addWidget(self.leg2_signal_kind_combo, 3, 2)
-        render_layout.addWidget(self.show_leg2_signal_checkbox, 3, 3)
-        render_layout.addWidget(self.leg2_datasource_label, 3, 4, 1, 4)
+        render_layout.addWidget(self.show_peak_marker_checkbox, 2, 0, 1, 2)
+        render_layout.addWidget(self.leg2_signal_kind_combo, 2, 2)
+        render_layout.addWidget(self.show_leg2_signal_checkbox, 2, 3)
         viewport_controls_layout.addWidget(self.viewport_enhance_checkbox, 0, 0, 1, 2)
         viewport_controls_layout.addWidget(self.viewport_map_to_viridis_checkbox, 0, 2, 1, 2)
         viewport_controls_layout.addWidget(QtWidgets.QLabel("Range"), 1, 0)
@@ -2232,15 +2622,6 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.setCentralWidget(central)
 
     def _connect_signals(self) -> None:
-        self.load_camera_button.clicked.connect(self._load_camera_video)
-        self.load_h5_button.clicked.connect(self._load_h5_recording)
-        self.load_session_button.clicked.connect(self._load_session)
-        self.save_session_button.clicked.connect(self._save_session)
-        self.export_synced_button.clicked.connect(self._export_synced_video)
-        self.import_peak_json_button.clicked.connect(self._import_peak_distance_json)
-        self.clear_peak_json_button.clicked.connect(self._clear_peak_distance_datasource)
-        self.import_leg2_mat_button.clicked.connect(self._import_leg2_mat)
-        self.clear_leg2_mat_button.clicked.connect(self._clear_leg2_ultrasonic_datasource)
         self.leg2_signal_kind_combo.currentIndexChanged.connect(self._leg2_signal_kind_changed)
         self.show_peak_marker_checkbox.toggled.connect(self._peak_marker_visibility_changed)
         self.show_leg2_signal_checkbox.toggled.connect(self._leg2_signal_visibility_changed)
@@ -2365,6 +2746,8 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._update_controls_enabled_state()
         self._sync_previews(camera_access_hint="auto")
         self.settings.setValue("last_camera_path", str(camera_path))
+        self._set_resource_reload_error("camera", None)
+        self._refresh_resources_ui()
         self.statusBar().showMessage(display_message)
 
     def _load_h5_recording(self) -> None:
@@ -2396,6 +2779,8 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._sync_previews(camera_access_hint="auto")
         self.settings.setValue("last_h5_path", str(h5_path))
         self._reload_peak_distance_datasource_from_session()
+        self._set_resource_reload_error("radar_h5", None)
+        self._refresh_resources_ui()
         self.statusBar().showMessage(f"Loaded H5 recording: {h5_path}")
 
     def _peak_csv_rejection_message(self) -> str:
@@ -2444,12 +2829,16 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
                 QtWidgets.QMessageBox.warning(self, "Import failed", message)
             else:
                 self.statusBar().showMessage(status_message)
+            self._set_resource_reload_error("radar_peak", status_message)
+            self._refresh_resources_ui()
             return False
 
         self.peak_distance_datasource = datasource
         self.session.peak_distance_datasource.path = str(json_path)
         self.session.peak_distance_datasource.visible = self.show_peak_marker_checkbox.isChecked()
         self.settings.setValue("last_peak_json_path", str(json_path))
+        self._set_resource_reload_error("radar_peak", None)
+        self._set_resource_warnings("radar_peak", tuple(warnings))
         self._update_peak_datasource_controls()
         self._sync_previews(camera_access_hint="auto")
 
@@ -2466,6 +2855,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             if show_dialogs:
                 QtWidgets.QMessageBox.warning(self, "Import warnings", message)
         self.statusBar().showMessage(message.splitlines()[0])
+        self._refresh_resources_ui()
         return True
 
     def _import_peak_distance_json(self) -> None:
@@ -2488,8 +2878,11 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.peak_distance_datasource = None
         self.session.peak_distance_datasource.path = ""
         self.session.peak_distance_datasource.visible = True
+        self._set_resource_reload_error("radar_peak", None)
+        self._set_resource_warnings("radar_peak", ())
         self._update_peak_datasource_controls()
         self._sync_previews(camera_access_hint="auto")
+        self._refresh_resources_ui()
         self.statusBar().showMessage("Cleared imported peak-distance datasource.")
 
     def load_leg2_mat_from_path(
@@ -2511,6 +2904,8 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
                 QtWidgets.QMessageBox.warning(self, "Import failed", message)
             else:
                 self.statusBar().showMessage(status_message)
+            self._set_resource_reload_error("leg2_mat", status_message)
+            self._refresh_resources_ui()
             return False
         except ValueError as exc:
             message = str(exc)
@@ -2518,14 +2913,19 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
                 QtWidgets.QMessageBox.warning(self, "Import failed", message)
             else:
                 self.statusBar().showMessage(f"Could not load Leg2 MAT: {message}")
+            self._set_resource_reload_error("leg2_mat", message)
+            self._refresh_resources_ui()
             return False
 
         self.leg2_ultrasonic_datasource = datasource
         self.session.leg2_ultrasonic_datasource.path = str(mat_path)
         self.session.leg2_ultrasonic_datasource.visible = self.show_leg2_signal_checkbox.isChecked()
         self.settings.setValue("last_leg2_mat_path", str(mat_path))
+        self._set_resource_reload_error("leg2_mat", None)
+        self._set_resource_warnings("leg2_mat", ())
         self._update_leg2_datasource_controls()
         self._sync_previews(camera_access_hint="auto")
+        self._refresh_resources_ui()
         self.statusBar().showMessage(f"Loaded Leg2 MAT: {mat_path.name}")
         return True
 
@@ -2545,8 +2945,11 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.session.leg2_ultrasonic_datasource.path = ""
         self.session.leg2_ultrasonic_datasource.visible = True
         self.session.leg2_ultrasonic_datasource.offset_s = 0.0
+        self._set_resource_reload_error("leg2_mat", None)
+        self._set_resource_warnings("leg2_mat", ())
         self._update_leg2_datasource_controls()
         self._sync_previews(camera_access_hint="auto")
+        self._refresh_resources_ui()
         self.statusBar().showMessage("Cleared Leg2 MAT ultrasonic datasource.")
 
     def _reload_leg2_ultrasonic_datasource_from_session(self) -> None:
@@ -2558,14 +2961,21 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
 
         mat_path = Path(mat_path_text)
         if not mat_path.exists():
+            self._set_resource_reload_error("leg2_mat", f"File not found: {mat_path}")
             self.statusBar().showMessage(
                 f"Leg2 MAT not found and was not loaded: {mat_path}"
             )
             self._update_leg2_datasource_controls()
+            self._refresh_resources_ui()
             return
 
         if not self.load_leg2_mat_from_path(mat_path, show_dialogs=False):
+            self._set_resource_reload_error(
+                "leg2_mat",
+                f"Could not reload Leg2 MAT: {mat_path.name}",
+            )
             self._update_leg2_datasource_controls()
+            self._refresh_resources_ui()
 
     def _leg2_signal_kind_changed(self, _index: int) -> None:
         signal_kind = self.leg2_signal_kind_combo.currentData()
@@ -2581,31 +2991,32 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
     def _update_leg2_datasource_controls(self) -> None:
         datasource = self.leg2_ultrasonic_datasource
         has_datasource = datasource is not None
-        self.clear_leg2_mat_button.setEnabled(has_datasource)
         self.leg2_signal_kind_combo.setEnabled(has_datasource)
         self.show_leg2_signal_checkbox.setEnabled(has_datasource)
-        if datasource is not None:
-            valid_count = int(np.count_nonzero(datasource.reliable_flag_mask))
-            self.leg2_datasource_label.setText(
-                f"{datasource.path.name} ({valid_count}/{datasource.time_s.size} valid)"
-            )
-        else:
-            self.leg2_datasource_label.setText("No Leg2 MAT loaded.")
         self.timeline_view.update()
 
     def _reload_peak_distance_datasource_from_session(self) -> None:
         self.peak_distance_datasource = None
         json_path_text = self.session.peak_distance_datasource.path
-        if not json_path_text or self.heatmap_source is None:
+        if not json_path_text:
             self._update_peak_datasource_controls()
             return
 
         json_path = Path(json_path_text)
         if not json_path.exists():
+            self._set_resource_reload_error("radar_peak", f"File not found: {json_path}")
             self.statusBar().showMessage(
                 f"Peak-distance JSON not found and was not loaded: {json_path}"
             )
             self._update_peak_datasource_controls()
+            self._refresh_resources_ui()
+            return
+
+        if self.heatmap_source is None:
+            if self.load_peak_distance_from_path(json_path, show_dialogs=False):
+                return
+            self._update_peak_datasource_controls()
+            self._refresh_resources_ui()
             return
 
         try:
@@ -2615,18 +3026,24 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             )
         except ValueError as exc:
             if isinstance(exc, PeakDistanceJsonImportError):
-                self.statusBar().showMessage(exc.primary_message)
+                message = exc.primary_message
             else:
-                self.statusBar().showMessage(f"Could not reload peak-distance JSON: {exc}")
+                message = f"Could not reload peak-distance JSON: {exc}"
+            self._set_resource_reload_error("radar_peak", message)
+            self.statusBar().showMessage(message)
             self._update_peak_datasource_controls()
+            self._refresh_resources_ui()
             return
 
         self.peak_distance_datasource = datasource
+        self._set_resource_reload_error("radar_peak", None)
+        self._set_resource_warnings("radar_peak", tuple(warnings))
         if warnings:
             self.statusBar().showMessage(
                 "Reloaded peak-distance JSON with warnings: " + "; ".join(warnings)
             )
         self._update_peak_datasource_controls()
+        self._refresh_resources_ui()
 
     def _peak_marker_visibility_changed(self, visible: bool) -> None:
         self.session.peak_distance_datasource.visible = visible
@@ -2635,15 +3052,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
     def _update_peak_datasource_controls(self) -> None:
         datasource = self.peak_distance_datasource
         has_datasource = datasource is not None
-        self.clear_peak_json_button.setEnabled(has_datasource)
         self.show_peak_marker_checkbox.setEnabled(has_datasource)
-        if datasource is not None:
-            detected = sum(1 for row in datasource.measurements if row.status == STATUS_DETECTED)
-            self.peak_datasource_label.setText(
-                f"{datasource.path.name} ({detected}/{len(datasource.measurements)} detected)"
-            )
-        else:
-            self.peak_datasource_label.setText("No peak-distance JSON loaded.")
 
     def _peak_overlay_for_frame(self, frame_idx: int) -> tuple[float, float] | None:
         if (
@@ -2684,23 +3093,35 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         )
 
     def _save_session(self) -> None:
+        if self._current_session_path is None:
+            self._save_session_as()
+            return
+        self._write_session_to_path(self._current_session_path)
+
+    def _save_session_as(self) -> None:
+        filename, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Save session as",
+            self._dialog_start_path("last_session_path"),
+            "JSON files (*.json);;All files (*)",
+        )
+        if not filename:
+            return
+        self._write_session_to_path(Path(filename))
+
+    def _write_session_to_path(self, session_path: Path) -> None:
         try:
             validate_alignment_session(self.session, allow_missing_sources=False)
         except ValueError as exc:
             QtWidgets.QMessageBox.warning(self, "Cannot save session", str(exc))
             return
 
-        filename, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self,
-            "Save session",
-            self._dialog_start_path("last_session_path"),
-            "JSON files (*.json);;All files (*)",
-        )
-        if not filename:
-            return
-        save_alignment_session(self.session, Path(filename))
-        self.settings.setValue("last_session_path", filename)
-        self.statusBar().showMessage(f"Saved session: {filename}")
+        save_alignment_session(self.session, session_path)
+        self._current_session_path = session_path
+        self.settings.setValue("last_session_path", str(session_path))
+        self._refresh_session_title()
+        self._refresh_resources_ui()
+        self.statusBar().showMessage(f"Saved session: {session_path}")
 
     def _load_session(self) -> None:
         filename, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -2716,22 +3137,35 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         session = load_alignment_session(session_path)
         self._close_sources()
         self.session = session
+        self._current_session_path = session_path
+        self._resource_reload_errors.clear()
+        self._resource_load_warnings.clear()
 
         if session.camera_track.path:
-            self._open_camera_source(Path(session.camera_track.path), update_session_track=False)
-            self._initialize_default_export_overlay_if_needed()
+            camera_path = Path(session.camera_track.path)
+            if camera_path.exists():
+                self._open_camera_source(camera_path, update_session_track=False)
+                self._initialize_default_export_overlay_if_needed()
+            else:
+                self._set_resource_reload_error("camera", f"File not found: {camera_path}")
         if session.heatmap_track.path:
-            self.heatmap_source = HeatmapTruthSource(
-                Path(session.heatmap_track.path),
-                session_idx=session.heatmap_track.session_idx,
-                group_idx=session.heatmap_track.group_idx,
-                entry_idx=session.heatmap_track.entry_idx,
-                subsweep_idx=session.heatmap_track.subsweep_idx,
-                color_min=session.render.color_min,
-                color_max=session.render.color_max,
-                fixed_levels=session.render.fixed_levels,
-            )
-            self._rebuild_overlay_plot_renderer()
+            h5_path = Path(session.heatmap_track.path)
+            if h5_path.exists():
+                self.heatmap_source = HeatmapTruthSource(
+                    h5_path,
+                    session_idx=session.heatmap_track.session_idx,
+                    group_idx=session.heatmap_track.group_idx,
+                    entry_idx=session.heatmap_track.entry_idx,
+                    subsweep_idx=session.heatmap_track.subsweep_idx,
+                    color_min=session.render.color_min,
+                    color_max=session.render.color_max,
+                    fixed_levels=session.render.fixed_levels,
+                )
+                self._rebuild_overlay_plot_renderer()
+                self._reload_peak_distance_datasource_from_session()
+            else:
+                self._set_resource_reload_error("radar_h5", f"File not found: {h5_path}")
+        else:
             self._reload_peak_distance_datasource_from_session()
         self._reload_leg2_ultrasonic_datasource_from_session()
 
@@ -2746,6 +3180,8 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             self.settings.setValue("last_camera_path", self.session.camera_track.path)
         if self.session.heatmap_track.path:
             self.settings.setValue("last_h5_path", self.session.heatmap_track.path)
+        self._refresh_session_title()
+        self._refresh_resources_ui()
         self.statusBar().showMessage(f"Loaded session: {session_path}")
 
     def _open_camera_source(
@@ -3589,23 +4025,23 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
     def _update_controls_enabled_state(self) -> None:
         has_camera = self.camera_source is not None
         has_heatmap = self.heatmap_source is not None
-        enabled = has_camera or has_heatmap
+        has_optional_signal = (
+            self.peak_distance_datasource is not None
+            or self.leg2_ultrasonic_datasource is not None
+        )
+        enabled = has_camera or has_heatmap or has_optional_signal
         self.play_button.setEnabled(enabled)
         self.timeline_view.setEnabled(enabled)
         self.current_time_slider.setEnabled(enabled)
-        self.offset_spin.setEnabled(enabled)
-        self.nudge_left_small.setEnabled(enabled)
-        self.nudge_right_small.setEnabled(enabled)
-        self.nudge_left_large.setEnabled(enabled)
-        self.nudge_right_large.setEnabled(enabled)
-        self.save_session_button.setEnabled(has_camera and has_heatmap)
-        self.export_synced_button.setEnabled(
-            has_camera and has_heatmap and not self._export_in_progress
-        )
-        self.import_peak_json_button.setEnabled(has_heatmap)
+        self.offset_spin.setEnabled(has_camera)
+        self.nudge_left_small.setEnabled(has_camera)
+        self.nudge_right_small.setEnabled(has_camera)
+        self.nudge_left_large.setEnabled(has_camera)
+        self.nudge_right_large.setEnabled(has_camera)
         self._update_peak_datasource_controls()
         self._update_leg2_datasource_controls()
         self._update_viewport_visibility_controls_enabled()
+        self._refresh_resources_ui()
 
     def _viewport_preview_resized(self) -> None:
         if (
@@ -3618,6 +4054,272 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
 
     def _viewport_drag_finished(self) -> None:
         self._viewport_drag_start_corners = None
+
+    def _resource_runtime(self) -> AlignmentResourceRuntime:
+        peak_detected: int | None = None
+        peak_total: int | None = None
+        if self.peak_distance_datasource is not None:
+            peak_total = len(self.peak_distance_datasource.measurements)
+            peak_detected = sum(
+                1
+                for row in self.peak_distance_datasource.measurements
+                if row.status == STATUS_DETECTED
+            )
+        leg2_valid: int | None = None
+        leg2_samples: int | None = None
+        if self.leg2_ultrasonic_datasource is not None:
+            leg2_samples = int(self.leg2_ultrasonic_datasource.time_s.size)
+            leg2_valid = int(np.count_nonzero(self.leg2_ultrasonic_datasource.reliable_flag_mask))
+
+        return AlignmentResourceRuntime(
+            camera_loaded=self.camera_source is not None,
+            radar_h5_loaded=self.heatmap_source is not None,
+            radar_peak_loaded=self.peak_distance_datasource is not None,
+            leg2_loaded=self.leg2_ultrasonic_datasource is not None,
+            peak_detected_count=peak_detected,
+            peak_measurement_count=peak_total,
+            leg2_valid_segment_count=leg2_valid,
+            leg2_sample_count=leg2_samples,
+            reload_errors=tuple(self._resource_reload_errors.items()),
+            load_warnings=tuple(self._resource_load_warnings.items()),
+        )
+
+    def resource_summaries(self) -> tuple[ResourceSummary, ...]:
+        return build_alignment_resource_summaries(self.session, self._resource_runtime())
+
+    def _refresh_session_title(self) -> None:
+        if self._current_session_path is None:
+            self.setWindowTitle("Heatmap Alignment Workbench — Untitled Session")
+            return
+        self.setWindowTitle(
+            f"Heatmap Alignment Workbench — {self._current_session_path.name}"
+        )
+
+    def _refresh_resources_ui(self) -> None:
+        summaries = self.resource_summaries()
+        if self._resources_window is not None:
+            self._resources_window.refresh(summaries, self._current_session_path)
+
+        has_camera_path = bool(self.session.camera_track.path)
+        has_h5_path = bool(self.session.heatmap_track.path)
+        has_peak_path = bool(self.session.peak_distance_datasource.path)
+        has_leg2_path = bool(self.session.leg2_ultrasonic_datasource.path)
+
+        self.unload_camera_action.setEnabled(self.camera_source is not None)
+        self.unload_h5_action.setEnabled(self.heatmap_source is not None)
+        self.unload_peak_action.setEnabled(
+            self.peak_distance_datasource is not None or has_peak_path
+        )
+        self.unload_leg2_action.setEnabled(
+            self.leg2_ultrasonic_datasource is not None or has_leg2_path
+        )
+        self.reload_camera_action.setEnabled(has_camera_path)
+        self.reload_h5_action.setEnabled(has_h5_path)
+        self.reload_peak_action.setEnabled(has_peak_path)
+        self.reload_leg2_action.setEnabled(has_leg2_path)
+
+        self.save_session_action.setEnabled(
+            self.camera_source is not None and self.heatmap_source is not None
+        )
+        self.export_synced_action.setEnabled(
+            self.camera_source is not None
+            and self.heatmap_source is not None
+            and not self._export_in_progress
+        )
+
+    def _show_resources_window(self) -> None:
+        if self._resources_window is None:
+            self._resources_window = ResourcesWindow(self)
+            self._refresh_resources_ui()
+            self._resources_window.show()
+            return
+
+        saved_geometry = self._resources_window.geometry()
+        self._refresh_resources_ui()
+        self._resources_window.setGeometry(saved_geometry)
+        self._resources_window.show()
+        self._resources_window.raise_()
+
+    def _set_resource_reload_error(self, kind: ResourceKind, message: str | None) -> None:
+        if message:
+            self._resource_reload_errors[kind] = message
+        else:
+            self._resource_reload_errors.pop(kind, None)
+
+    def _set_resource_warnings(
+        self,
+        kind: ResourceKind,
+        warnings: tuple[str, ...] | list[str],
+    ) -> None:
+        if warnings:
+            self._resource_load_warnings[kind] = tuple(warnings)
+        else:
+            self._resource_load_warnings.pop(kind, None)
+
+    def invoke_resource_action(self, kind: ResourceKind, action: ResourceAction) -> None:
+        if action == "load":
+            if kind == "camera":
+                self._load_camera_video()
+            elif kind == "radar_h5":
+                self._load_h5_recording()
+            elif kind == "radar_peak":
+                self._import_peak_distance_json()
+            elif kind == "leg2_mat":
+                self._import_leg2_mat()
+            return
+        if action == "replace":
+            self.invoke_resource_action(kind, "load")
+            return
+        if action == "unload":
+            if kind == "camera":
+                self.unload_camera_video()
+            elif kind == "radar_h5":
+                self.unload_h5_recording()
+            elif kind == "radar_peak":
+                self._clear_peak_distance_datasource()
+            elif kind == "leg2_mat":
+                self._clear_leg2_ultrasonic_datasource()
+            return
+        if action == "reload":
+            self._reload_resource(kind)
+            return
+        if action == "reveal":
+            self._reveal_resource_path(kind)
+            return
+        if action == "inspect":
+            self._inspect_resource_messages(kind)
+
+    def _resource_path_for_kind(self, kind: ResourceKind) -> str:
+        if kind == "camera":
+            return self.session.camera_track.path
+        if kind == "radar_h5":
+            return self.session.heatmap_track.path
+        if kind == "radar_peak":
+            return self.session.peak_distance_datasource.path
+        return self.session.leg2_ultrasonic_datasource.path
+
+    def _reload_resource(self, kind: ResourceKind) -> None:
+        path_text = self._resource_path_for_kind(kind)
+        if not path_text:
+            return
+        path = Path(path_text)
+        if not path.exists():
+            self._set_resource_reload_error(kind, f"File not found: {path}")
+            self._refresh_resources_ui()
+            return
+        self._set_resource_reload_error(kind, None)
+        if kind == "camera":
+            self.load_camera_from_path(path)
+        elif kind == "radar_h5":
+            self.load_h5_from_path(path)
+        elif kind == "radar_peak":
+            self.load_peak_distance_from_path(path, show_dialogs=True, require_heatmap=False)
+        elif kind == "leg2_mat":
+            self.load_leg2_mat_from_path(path, show_dialogs=True)
+
+    def _reveal_resource_path(self, kind: ResourceKind) -> None:
+        path_text = self._resource_path_for_kind(kind)
+        if not path_text:
+            return
+        path = Path(path_text)
+        target = path if path.is_dir() else path.parent
+        if not target.exists():
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Show in File Manager",
+                f"Path does not exist:\n{path}",
+            )
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(target.resolve())))
+
+    def _inspect_resource_messages(self, kind: ResourceKind) -> None:
+        summary = next(
+            (entry for entry in self.resource_summaries() if entry.kind == kind),
+            None,
+        )
+        if summary is None or not summary.messages:
+            return
+        QtWidgets.QMessageBox.warning(
+            self,
+            f"{summary.display_name} details",
+            "\n".join(summary.messages),
+        )
+
+    def unload_camera_video(self) -> None:
+        if self.camera_source is not None:
+            self.camera_source.close()
+            self.camera_source = None
+        self._camera_reference_width = 0
+        self._camera_reference_height = 0
+        self.current_camera_frame = None
+        self.session.camera_track = CameraTrack()
+        self.session.export_overlay = ExportOverlaySettings()
+        self.session.timeline.offset_s = 0.0
+        self.camera_view.set_frame(None)
+        self.camera_view.set_corners(None)
+        self.camera_view.set_export_overlay(self.session.export_overlay)
+        self.camera_view.set_export_overlay_preview_frame(None)
+        self._set_resource_reload_error("camera", None)
+        self._set_resource_warnings("camera", ())
+        self._update_controls_enabled_state()
+        self._sync_previews(camera_access_hint="auto")
+        self._refresh_resources_ui()
+        self.statusBar().showMessage("Unloaded camera video.")
+
+    def unload_h5_recording(self) -> None:
+        if self.heatmap_source is not None:
+            self.heatmap_source.close()
+            self.heatmap_source = None
+        self._overlay_plot_renderer = None
+        self.session.heatmap_track = HeatmapTrack()
+        self.truth_view.set_frame(None)
+        self._set_resource_reload_error("radar_h5", None)
+        self._set_resource_warnings("radar_h5", ())
+        self._update_controls_enabled_state()
+        self._sync_previews(camera_access_hint="auto")
+        self._refresh_resources_ui()
+        self.statusBar().showMessage("Unloaded radar raw H5 recording.")
+
+    def clear_all_resources(self) -> None:
+        reply = QtWidgets.QMessageBox.question(
+            self,
+            "Clear All Resources",
+            (
+                "Unload Camera Video, Radar Raw (H5), Radar Peak (JSON), and Leg2 MAT "
+                "from this workbench?\n\nThe current session path will be kept."
+            ),
+            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+            QtWidgets.QMessageBox.StandardButton.No,
+        )
+        if reply != QtWidgets.QMessageBox.StandardButton.Yes:
+            return
+        self.unload_camera_video()
+        self.unload_h5_recording()
+        self._clear_peak_distance_datasource()
+        self._clear_leg2_ultrasonic_datasource()
+        self.statusBar().showMessage("Cleared all loaded resources.")
+
+    def _close_session(self) -> None:
+        reply = QtWidgets.QMessageBox.question(
+            self,
+            "Close Session",
+            "Close the current session and return to an untitled empty workbench?",
+            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+            QtWidgets.QMessageBox.StandardButton.No,
+        )
+        if reply != QtWidgets.QMessageBox.StandardButton.Yes:
+            return
+        self._close_sources()
+        self.session = AlignmentSession()
+        self._current_session_path = None
+        self._resource_reload_errors.clear()
+        self._resource_load_warnings.clear()
+        self._populate_controls_from_session()
+        self._update_controls_enabled_state()
+        self._sync_previews(camera_access_hint="auto")
+        self._refresh_session_title()
+        self._refresh_resources_ui()
+        self.statusBar().showMessage("Closed session.")
 
     def _dialog_start_path(self, key: str) -> str:
         value = self.settings.value(key, "", type=str)

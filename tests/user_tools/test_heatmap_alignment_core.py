@@ -15,6 +15,7 @@ if str(USER_TOOLS_PATH) not in sys.path:
 from scipy.io import savemat
 
 from heatmap_alignment_core import (  # noqa: E402
+    AlignmentResourceRuntime,
     AlignmentSession,
     CameraTrack,
     CameraVideoSource,
@@ -30,7 +31,9 @@ from heatmap_alignment_core import (  # noqa: E402
     ViewportGeometry,
     ViewportVisibilitySettings,
     apply_viewport_visibility,
+    build_alignment_resource_summaries,
     build_leg2_ultrasonic_signal_series,
+    elide_path_middle,
     build_peak_distance_signal_series,
     compute_xcorr_diagnostics,
     derive_h5_signal_plot_color,
@@ -1211,3 +1214,104 @@ def test_timeline_view_bounds_s_keeps_camera_and_leg2_offsets_independent() -> N
 
     assert camera_bounds == pytest.approx((-1.5, 5.0))
     assert leg2_bounds == pytest.approx((-2.5, 5.0))
+
+
+def test_elide_path_middle_preserves_filename() -> None:
+    path = "/very/long/parent/folders/trial_export.mp4"
+    elided = elide_path_middle(path, 28)
+
+    assert elided.endswith("/trial_export.mp4")
+    assert "..." in elided
+    assert len(elided) <= 28
+
+
+def test_elide_path_middle_preserves_windows_separator_before_filename() -> None:
+    path = r"C:\very\long\parent\folders\trial_export.mp4"
+    elided = elide_path_middle(path, 30)
+
+    assert elided.endswith(r"\trial_export.mp4")
+    assert "..." in elided
+    assert len(elided) <= 30
+
+
+def test_build_alignment_resource_summaries_cover_fixed_slots() -> None:
+    summaries = build_alignment_resource_summaries(
+        AlignmentSession(),
+        AlignmentResourceRuntime(),
+    )
+
+    assert [summary.kind for summary in summaries] == [
+        "camera",
+        "radar_h5",
+        "radar_peak",
+        "leg2_mat",
+    ]
+    assert all(summary.status == "unloaded" for summary in summaries)
+
+
+def test_build_alignment_resource_summaries_mark_missing_remembered_paths() -> None:
+    missing = Path("/tmp/does-not-exist-camera.mp4")
+    session = AlignmentSession(
+        camera_track=CameraTrack(path=str(missing)),
+        heatmap_track=HeatmapTrack(path=""),
+    )
+    summaries = build_alignment_resource_summaries(
+        session,
+        AlignmentResourceRuntime(
+            reload_errors=(("camera", f"File not found: {missing}"),),
+        ),
+    )
+
+    camera_summary = summaries[0]
+    assert camera_summary.status == "missing"
+    assert camera_summary.path == str(missing)
+    assert "reload" in camera_summary.actions
+
+
+def test_build_alignment_resource_summaries_mark_invalid_remembered_paths() -> None:
+    existing = Path(__file__).resolve()
+    session = AlignmentSession(
+        camera_track=CameraTrack(path=str(existing)),
+        heatmap_track=HeatmapTrack(path=""),
+    )
+    summaries = build_alignment_resource_summaries(
+        session,
+        AlignmentResourceRuntime(
+            reload_errors=(("camera", "Could not reload camera video."),),
+        ),
+    )
+
+    assert summaries[0].status == "invalid"
+    assert "inspect" in summaries[0].actions
+
+
+def test_build_alignment_resource_summaries_mark_loaded_state() -> None:
+    session = AlignmentSession(
+        camera_track=CameraTrack(path="/tmp/cam.mp4", duration_s=2.0, fps=30.0, frame_count=60),
+        heatmap_track=HeatmapTrack(path=""),
+    )
+    summaries = build_alignment_resource_summaries(
+        session,
+        AlignmentResourceRuntime(camera_loaded=True),
+    )
+
+    assert summaries[0].status == "loaded"
+    assert "unload" in summaries[0].actions
+
+
+def test_build_alignment_resource_summaries_mark_loaded_warning_state() -> None:
+    session = AlignmentSession(
+        camera_track=CameraTrack(path="/tmp/cam.mp4", duration_s=2.0, fps=30.0, frame_count=60),
+        heatmap_track=HeatmapTrack(path=""),
+    )
+    summaries = build_alignment_resource_summaries(
+        session,
+        AlignmentResourceRuntime(
+            camera_loaded=True,
+            load_warnings=(("camera", "Proxy preview unavailable."),),
+        ),
+    )
+
+    assert summaries[0].status == "warning"
+    assert "inspect" in summaries[0].actions
+    assert "Proxy preview unavailable." in summaries[0].messages

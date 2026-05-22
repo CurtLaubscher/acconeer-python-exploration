@@ -38,6 +38,7 @@ from sparse_iq_peak_distance_core import (
 SESSION_VERSION = 1
 
 H5_TIMELINE_TRACK_COLOR_HEX = "#22c55e"
+CAMERA_TIMELINE_TRACK_COLOR_HEX = "#f97316"
 LEG2_TIMELINE_TRACK_COLOR_HEX = "#6366f1"
 SIGNAL_PLOT_BACKGROUND_HEX = "#0f1720"
 SIGNAL_PLOT_NO_DETECTION_ALPHA = 72
@@ -1741,3 +1742,301 @@ def compute_xcorr_diagnostics(
         scores.append(score)
 
     return lag_values, np.array(scores, dtype=np.float64)
+
+
+ResourceKind = Literal["camera", "radar_h5", "radar_peak", "leg2_mat"]
+ResourceStatus = Literal["unloaded", "loaded", "missing", "invalid", "warning"]
+ResourceAction = Literal[
+    "load",
+    "replace",
+    "unload",
+    "reload",
+    "reveal",
+    "inspect",
+]
+
+
+@dataclass(frozen=True)
+class ResourceSummary:
+    """Scan-friendly summary for one heatmap alignment resource slot."""
+
+    kind: ResourceKind
+    display_name: str
+    role: str
+    status: ResourceStatus
+    path: str
+    color_hex: str | None
+    color_muted: bool
+    details: str
+    messages: tuple[str, ...]
+    actions: tuple[ResourceAction, ...]
+
+
+@dataclass(frozen=True)
+class AlignmentResourceRuntime:
+    """Runtime load state used when building resource summaries."""
+
+    camera_loaded: bool = False
+    radar_h5_loaded: bool = False
+    radar_peak_loaded: bool = False
+    leg2_loaded: bool = False
+    peak_detected_count: int | None = None
+    peak_measurement_count: int | None = None
+    leg2_valid_segment_count: int | None = None
+    leg2_sample_count: int | None = None
+    reload_errors: tuple[tuple[ResourceKind, str], ...] = ()
+    load_warnings: tuple[tuple[ResourceKind, str], ...] = ()
+
+
+def elide_path_middle(path_text: str, max_chars: int) -> str:
+    """Elide a path in the middle while preserving the filename when possible."""
+
+    if max_chars < 4 or len(path_text) <= max_chars:
+        return path_text
+
+    path = Path(path_text)
+    filename = path.name or path_text
+    if not filename:
+        return path_text[:max_chars]
+
+    if path_text.endswith(filename):
+        separator_index = len(path_text) - len(filename) - 1
+        if separator_index >= 0 and path_text[separator_index] in "/\\":
+            suffix = path_text[separator_index:]
+        else:
+            suffix = filename
+    else:
+        suffix = filename
+
+    if len(suffix) >= max_chars:
+        return f"...{suffix[-(max_chars - 3) :]}"
+
+    ellipsis = "..."
+    prefix_budget = max_chars - len(suffix) - len(ellipsis)
+    if prefix_budget <= 0:
+        return suffix[:max_chars]
+
+    prefix = path_text[:prefix_budget]
+    return f"{prefix}{ellipsis}{suffix}"
+
+
+def _resource_messages(
+    kind: ResourceKind,
+    runtime: AlignmentResourceRuntime,
+) -> tuple[str, ...]:
+    messages = [text for key, text in runtime.reload_errors if key == kind]
+    messages.extend(text for key, text in runtime.load_warnings if key == kind)
+    return tuple(messages)
+
+
+def _resource_status(
+    *,
+    path_text: str,
+    loaded: bool,
+    messages: tuple[str, ...],
+) -> ResourceStatus:
+    if loaded:
+        if messages:
+            return "warning"
+        return "loaded"
+    if not path_text:
+        return "unloaded"
+    path = Path(path_text)
+    if not path.exists():
+        return "missing"
+    if messages:
+        return "invalid"
+    return "unloaded"
+
+
+def _resource_actions(
+    *,
+    status: ResourceStatus,
+    path_text: str,
+    can_unload: bool,
+    messages: tuple[str, ...],
+) -> tuple[ResourceAction, ...]:
+    actions: list[ResourceAction] = []
+    if status in ("unloaded", "missing", "invalid"):
+        actions.append("load")
+    elif status in ("loaded", "warning"):
+        actions.extend(("replace", "unload"))
+
+    if path_text:
+        if status in ("missing", "invalid", "unloaded"):
+            actions.append("reload")
+        elif status in ("loaded", "warning"):
+            actions.append("reload")
+        actions.append("reveal")
+
+    if messages:
+        actions.append("inspect")
+
+    if can_unload and "unload" not in actions and status in ("loaded", "warning"):
+        actions.append("unload")
+
+    deduped: list[ResourceAction] = []
+    for action in actions:
+        if action not in deduped:
+            deduped.append(action)
+    return tuple(deduped)
+
+
+def build_alignment_resource_summaries(
+    session: AlignmentSession,
+    runtime: AlignmentResourceRuntime,
+) -> tuple[ResourceSummary, ...]:
+    """Build fixed-slot resource summaries for the Resources window."""
+
+    summaries: list[ResourceSummary] = []
+
+    camera_path = session.camera_track.path
+    camera_messages = _resource_messages("camera", runtime)
+    camera_status = _resource_status(
+        path_text=camera_path,
+        loaded=runtime.camera_loaded,
+        messages=camera_messages,
+    )
+    camera_details = "No camera video loaded."
+    if runtime.camera_loaded:
+        camera_details = (
+            f"{session.camera_track.frame_count} frames, "
+            f"{session.camera_track.fps:.3f} fps, "
+            f"{session.camera_track.duration_s:.3f} s"
+        )
+    elif camera_path:
+        camera_details = "Remembered camera path is not currently loaded."
+    summaries.append(
+        ResourceSummary(
+            kind="camera",
+            display_name="Camera Video",
+            role="Primary",
+            status=camera_status,
+            path=camera_path,
+            color_hex=CAMERA_TIMELINE_TRACK_COLOR_HEX,
+            color_muted=not runtime.camera_loaded,
+            details=camera_details,
+            messages=camera_messages,
+            actions=_resource_actions(
+                status=camera_status,
+                path_text=camera_path,
+                can_unload=runtime.camera_loaded,
+                messages=camera_messages,
+            ),
+        )
+    )
+
+    h5_path = session.heatmap_track.path
+    h5_messages = _resource_messages("radar_h5", runtime)
+    h5_status = _resource_status(
+        path_text=h5_path,
+        loaded=runtime.radar_h5_loaded,
+        messages=h5_messages,
+    )
+    h5_details = "No radar raw H5 recording loaded."
+    if runtime.radar_h5_loaded:
+        frame_count = max(
+            1,
+            int(round(session.heatmap_track.duration_s * max(session.heatmap_track.fps, 0.0))),
+        )
+        if session.heatmap_track.fps > 0:
+            frame_count = int(round(session.heatmap_track.duration_s * session.heatmap_track.fps))
+        h5_details = (
+            f"{frame_count} frames, "
+            f"{session.heatmap_track.fps:.3f} fps, "
+            f"{session.heatmap_track.duration_s:.3f} s"
+        )
+    elif h5_path:
+        h5_details = "Remembered H5 path is not currently loaded."
+    summaries.append(
+        ResourceSummary(
+            kind="radar_h5",
+            display_name="Radar Raw (H5)",
+            role="Primary",
+            status=h5_status,
+            path=h5_path,
+            color_hex=H5_TIMELINE_TRACK_COLOR_HEX,
+            color_muted=not runtime.radar_h5_loaded,
+            details=h5_details,
+            messages=h5_messages,
+            actions=_resource_actions(
+                status=h5_status,
+                path_text=h5_path,
+                can_unload=runtime.radar_h5_loaded,
+                messages=h5_messages,
+            ),
+        )
+    )
+
+    peak_path = session.peak_distance_datasource.path
+    peak_messages = _resource_messages("radar_peak", runtime)
+    peak_status = _resource_status(
+        path_text=peak_path,
+        loaded=runtime.radar_peak_loaded,
+        messages=peak_messages,
+    )
+    peak_details = "No radar peak JSON loaded."
+    if runtime.radar_peak_loaded and runtime.peak_detected_count is not None:
+        total = runtime.peak_measurement_count or 0
+        peak_details = (
+            f"{runtime.peak_detected_count}/{total} frames detected"
+            if total
+            else f"{runtime.peak_detected_count} detections"
+        )
+    elif peak_path:
+        peak_details = "Remembered peak JSON path is not currently loaded."
+    summaries.append(
+        ResourceSummary(
+            kind="radar_peak",
+            display_name="Radar Peak (JSON)",
+            role="Optional signal",
+            status=peak_status,
+            path=peak_path,
+            color_hex=H5_TIMELINE_TRACK_COLOR_HEX,
+            color_muted=not runtime.radar_peak_loaded,
+            details=peak_details,
+            messages=peak_messages,
+            actions=_resource_actions(
+                status=peak_status,
+                path_text=peak_path,
+                can_unload=runtime.radar_peak_loaded or bool(peak_path),
+                messages=peak_messages,
+            ),
+        )
+    )
+
+    leg2_path = session.leg2_ultrasonic_datasource.path
+    leg2_messages = _resource_messages("leg2_mat", runtime)
+    leg2_status = _resource_status(
+        path_text=leg2_path,
+        loaded=runtime.leg2_loaded,
+        messages=leg2_messages,
+    )
+    leg2_details = "No Leg2 MAT loaded."
+    if runtime.leg2_loaded and runtime.leg2_sample_count is not None:
+        valid = runtime.leg2_valid_segment_count or 0
+        total = runtime.leg2_sample_count
+        leg2_details = f"{total} samples, {valid}/{total} reliable segments"
+    elif leg2_path:
+        leg2_details = "Remembered Leg2 MAT path is not currently loaded."
+    summaries.append(
+        ResourceSummary(
+            kind="leg2_mat",
+            display_name="Leg2 MAT",
+            role="Optional signal",
+            status=leg2_status,
+            path=leg2_path,
+            color_hex=LEG2_TIMELINE_TRACK_COLOR_HEX,
+            color_muted=not runtime.leg2_loaded,
+            details=leg2_details,
+            messages=leg2_messages,
+            actions=_resource_actions(
+                status=leg2_status,
+                path_text=leg2_path,
+                can_unload=runtime.leg2_loaded or bool(leg2_path),
+                messages=leg2_messages,
+            ),
+        )
+    )
+
+    return tuple(summaries)
