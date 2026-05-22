@@ -19,6 +19,7 @@ from heatmap_alignment_gui import (  # noqa: E402
     AlignmentTimelineWidget,
     CornerEditorWidget,
     HeatmapAlignmentWindow,
+    ResourcesWindow,
     SignalPlotWidget,
     TimelineRangeModel,
     build_argument_parser,
@@ -27,14 +28,16 @@ from heatmap_alignment_gui import (  # noqa: E402
     track_offset_label_should_show,
 )
 from heatmap_alignment_core import (  # noqa: E402
-    Leg2UltrasonicDatasourceSettings,
-    Leg2UltrasonicSignalSeries,
-    PeakDistanceSignalSeries,
-    load_alignment_session,
-    save_alignment_session,
+    AlignmentResourceRuntime,
     AlignmentSession,
     CameraTrack,
     HeatmapTrack,
+    Leg2UltrasonicDatasourceSettings,
+    Leg2UltrasonicSignalSeries,
+    PeakDistanceSignalSeries,
+    build_alignment_resource_summaries,
+    load_alignment_session,
+    save_alignment_session,
 )
 from scipy.io import savemat
 
@@ -297,6 +300,66 @@ def test_timeline_plot_rect_uses_configured_time_axis_span(
 
     assert plot_rect.left() == pytest.approx(220.0)
     assert plot_rect.right() == pytest.approx(760.0)
+
+
+def test_resources_menu_and_file_menu_actions_exist(qapplication: QApplication) -> None:
+    window = HeatmapAlignmentWindow()
+    menu_bar = window.menuBar()
+    action_texts: set[str] = set()
+    menu_titles: set[str] = set()
+    for bar_action in menu_bar.actions():
+        menu = bar_action.menu()
+        if menu is None:
+            continue
+        menu_titles.add(menu.title().replace("&", ""))
+        for menu_action in menu.actions():
+            if menu_action.isSeparator():
+                continue
+            action_texts.add(menu_action.text().replace("&", ""))
+
+    assert "File" in menu_titles
+    assert "Resources" in menu_titles
+    assert "Manage Resources..." in action_texts
+    assert "Save Session" in action_texts
+    assert "Close Session" in action_texts
+    assert "Load Camera Video..." in action_texts
+    assert "Unload Camera Video" in action_texts
+
+
+def test_resources_window_lists_fixed_resource_slots(qapplication: QApplication) -> None:
+    window = HeatmapAlignmentWindow()
+    resources = ResourcesWindow(window)
+    summaries = build_alignment_resource_summaries(
+        window.session,
+        AlignmentResourceRuntime(),
+    )
+    resources.refresh(summaries, None)
+
+    assert resources.table.rowCount() == 4
+    assert resources.table.item(0, 1).text() == "Camera Video"
+    assert resources.table.item(3, 1).text() == "Leg2 MAT"
+
+
+def test_resources_window_reuses_single_instance(qapplication: QApplication) -> None:
+    window = HeatmapAlignmentWindow()
+    window._show_resources_window()
+    first = window._resources_window
+    window._show_resources_window()
+
+    assert window._resources_window is first
+
+
+def test_resource_menu_enablement_tracks_loaded_state(qapplication: QApplication) -> None:
+    window = HeatmapAlignmentWindow()
+    window._refresh_resources_ui()
+
+    assert window.unload_camera_action.isEnabled() is False
+    assert window.reload_camera_action.isEnabled() is False
+
+    window.session.camera_track = CameraTrack(path="/tmp/example.mp4")
+    window._refresh_resources_ui()
+
+    assert window.reload_camera_action.isEnabled() is True
 
 
 def test_timeline_time_axis_tracks_signal_plot_viewbox(
