@@ -28,7 +28,7 @@ The system SHALL provide a modeless Resources window that summarizes supported h
 
 #### Scenario: Reopen existing Resources window
 - **WHEN** the Resources window is already open and the user chooses the Resources window action again
-- **THEN** the system brings the existing Resources window to the foreground instead of creating a duplicate Resources window
+- **THEN** the system brings the existing Resources window to the foreground instead of creating a duplicate Resources window or moving the existing window from its user-chosen position
 
 #### Scenario: List supported resource slots
 - **WHEN** the Resources window is visible
@@ -61,9 +61,21 @@ The system SHALL present each resource row with scan-friendly status, visual ide
 - **WHEN** a resource row has a file path
 - **THEN** the table displays the full path when it fits and uses middle elision when it does not fit, preserving the full filename at the end of the path when the available width allows it
 
+#### Scenario: Preserve separator before elided filename
+- **WHEN** a resource path is middle-elided and the available width allows preserving the filename
+- **THEN** the elided path includes the path separator immediately before the filename in the preserved suffix
+
 #### Scenario: Show unelided path in details
 - **WHEN** the user selects a resource row with a file path
 - **THEN** the selected-row details provide access to the unelided full path
+
+#### Scenario: Show selected resource identity first
+- **WHEN** the user selects a resource row
+- **THEN** the selected-resource details area presents the resource type or name before status, metadata, warnings, or path details
+
+#### Scenario: Omit empty path details
+- **WHEN** the user selects an unloaded resource row without a remembered path
+- **THEN** the selected-resource details area omits the path detail instead of showing a placeholder path value
 
 #### Scenario: Show resource details
 - **WHEN** a resource row has loaded metadata
@@ -111,6 +123,10 @@ The system SHALL allow users to manage resources from the Resources window.
 #### Scenario: Reveal resource path
 - **WHEN** the user selects a resource row with an existing file path and invokes reveal path
 - **THEN** the system opens the platform file browser at that path or its containing folder when supported
+
+#### Scenario: Label file manager action clearly
+- **WHEN** the Resources window or resource row context menu shows the action that opens the platform file browser
+- **THEN** the action is labeled "Show in File Manager"
 
 #### Scenario: Inspect resource warnings
 - **WHEN** the user selects a resource row with warnings or load errors
@@ -192,3 +208,33 @@ The system SHALL structure resource summaries so the Resources window can later 
 #### Scenario: Preserve current workflow constraints
 - **WHEN** the Resources window is implemented for this change
 - **THEN** it supports the current single Camera Video, single Radar Raw (H5), single Radar Peak (JSON), and single Leg2 MAT resource slots without requiring generic arbitrary resource loading
+
+### Requirement: Resources table interaction polish
+The system SHALL keep Resources table selection and header behavior simple and predictable.
+
+#### Scenario: Select one resource row
+- **WHEN** the user selects a resource in the Resources table
+- **THEN** the table selects at most one full resource row and does not show a separate selected cell state that conflicts with the selected row
+
+#### Scenario: Preserve selected-row painting with custom delegates
+- **WHEN** the Resources table uses custom cell delegates for swatches, paths, or other presentation
+- **THEN** those delegates preserve normal selected-row background behavior
+
+#### Scenario: Ignore modifier multi-select
+- **WHEN** the user uses Ctrl or Shift while selecting Resources table rows
+- **THEN** the table does not enter a multi-row or mixed cell-selection state
+
+#### Scenario: Keep headers non-interactive unless sorting exists
+- **WHEN** the Resources table does not support sorting or column actions
+- **THEN** clicking column headers does not sort, change resource selection, or create persistent header selection state
+
+### Requirement: Resource manager keyboard access
+The system SHALL expose basic keyboard mnemonics for resource management actions without adding custom Escape-key behavior to the modeless Resources window.
+
+#### Scenario: Show menu and action mnemonics
+- **WHEN** the user uses keyboard menu navigation
+- **THEN** the Resources menu and common resource actions expose Qt mnemonics where natural
+
+#### Scenario: Do not add custom Escape close behavior
+- **WHEN** the Resources window is focused and the user presses Escape
+- **THEN** the system is not required to close the Resources window beyond any default platform or Qt behavior already present

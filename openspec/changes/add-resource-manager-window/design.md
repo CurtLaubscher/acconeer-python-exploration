@@ -19,6 +19,8 @@ That layout worked when the app had only Camera Video and Radar Raw (H5) sources
 - Show full resource paths where space allows, with middle elision that tries to preserve the full filename.
 - Provide load/replace and unload/clear actions from the Resources window.
 - Provide selected-row action buttons and matching row context-menu actions in the Resources window.
+- Use clear user-facing action labels, including `Show in File Manager` for the action that reveals a resource path in the platform file browser.
+- Keep Resources table selection simple and native-feeling: one selected row, no cell-like secondary selection state, no custom selection visuals that obscure the selected row, and no interactive header behavior unless sorting is intentionally added later.
 - Provide a confirmed "Clear All Resources" action that clears loaded resources without forgetting the current session path.
 - Show the current session identity in the main window title and support both `Save Session` and `Save Session As...`.
 - Provide a File-menu action to close the current session without exiting the workbench.
@@ -68,7 +70,7 @@ Alternative considered: put session open/save in Resources too. That would group
 
 ### Use A Modeless Resource Manager Window
 
-Use a modeless `QDialog` or secondary `QWidget` owned by the main window. It should stay synchronized with the main window state and allow users to keep it open while loading, unloading, dragging tracks, and saving sessions. Reopening Resources while the window already exists should raise/focus the existing window instead of creating duplicates.
+Use a modeless `QDialog` or secondary `QWidget` owned by the main window. It should stay synchronized with the main window state and allow users to keep it open while loading, unloading, dragging tracks, and saving sessions. Reopening Resources while the window already exists should raise/focus the existing window instead of creating duplicates, without moving a window that the user has already positioned. If the existing window is minimized, restoring it is appropriate.
 
 The window should contain:
 
@@ -107,9 +109,9 @@ Alternative considered: a normal column labeled `Color`. That is explicit, but i
 
 ### Preserve Filenames In Elided Full Paths
 
-The resource table should show full paths, not only filenames, because files from different trial folders may share names. When the path does not fit, use middle elision so the drive/root and filename remain visible and the filename is preserved when the available width allows it. At extremely narrow widths the UI should still prefer middle elision, but the details area and tooltip should be the authoritative place for the unelided full path.
+The resource table should show full paths, not only filenames, because files from different trial folders may share names. When the path does not fit, use middle elision so the drive/root and filename remain visible and the filename is preserved when the available width allows it. The preserved suffix should try to include the path separator immediately before the filename, such as `\trial.h5` on Windows or `/trial.h5` on Linux, so the filename does not read like a standalone token. At extremely narrow widths the UI should still prefer middle elision, but the details area and tooltip should be the authoritative place for the unelided full path.
 
-The details area should show the unelided full path and offer reveal/copy actions where available.
+The details area should show the selected resource type/name first, then status/details/warnings, then the unelided full path when one exists. For unloaded resources without a remembered path, omit the path row instead of showing a dash or placeholder. The details area should offer reveal/copy actions where available.
 
 Alternative considered: table shows filename only and details show path. That scans well, but it does not solve the common ambiguity where multiple resources have identical exported names.
 
@@ -117,7 +119,7 @@ Alternative considered: table shows filename only and details show path. That sc
 
 The Resources window should allow users to load/replace and unload/clear resources. Menu actions are useful shortcuts, but the window should be a complete resource management surface rather than a read-only status table.
 
-Row selection should update visible action buttons in the details area or toolbar. Direct row context menus should provide the same row-scoped actions for convenience, but they should not be the only way to access resource commands. Do not add double-click load behavior in this change; explicit buttons and context menus are clearer and easier to test.
+Row selection should update visible action buttons in the details area or toolbar. Direct row context menus should provide the same row-scoped actions for convenience, but they should not be the only way to access resource commands. The reveal action should be labeled `Show in File Manager` rather than `Reveal Path`, because it describes the user-visible behavior. Do not add double-click load behavior in this change; explicit buttons and context menus are clearer and easier to test.
 
 The Resources window should also provide `Clear All Resources...`. This action should ask for confirmation using wording that makes it clear the current session path is preserved. It should unload Camera Video, Radar Raw (H5), Radar Peak (JSON), Leg2 MAT, and dependent previews/signals/timeline state. It should not clear the current session path or turn the session into a new untitled session.
 
@@ -128,6 +130,20 @@ Unloading a primary resource should only clear state that directly depends on th
 - Optional signal resources use the shared timeline's absolute zero-time coordinate even when Radar Raw (H5) is not loaded. If both Radar Peak (JSON) and Leg2 MAT are loaded, both can display; if one is loaded, only that one displays; if neither is loaded, no optional signal resource displays.
 
 Alternative considered: window is read-only and all actions live in menus. That preserves a simple implementation but splits status and action across two places, which is the problem this change is trying to fix.
+
+### Keep The Resources Table Predictable
+
+The Resources table should use single-row selection and avoid custom row/cell styling that makes a focused cell look selected independently from the selected row. If custom delegates are used for swatches or elided paths, they should preserve normal selected-row background behavior. The selected resource should be derived from the selected row rather than an unrelated current cell when possible.
+
+The header should not appear to offer sortable or clickable column behavior unless sorting is intentionally implemented. If header press feedback causes visual confusion without adding behavior, disable clickable headers.
+
+Alternative considered: allow default cell focus and header press behavior. That is less code, but smoke testing showed it can look like multiple selection states or transient header style changes in a manager that is intended to be simple.
+
+### Add Basic Keyboard Mnemonics Without Special Escape Handling
+
+Menu actions and resource action buttons should use Qt mnemonics where natural, such as `&Resources`, `&Manage Resources...`, `&Load`, `&Unload`, and `Show in &File Manager`. This improves keyboard navigation without requiring a new shortcut system.
+
+Do not add custom `Esc` behavior for the Resources window in this change. Native menu dismissal is enough; the modeless Resources window should not gain extra close-on-Esc behavior as part of this polish pass.
 
 ### Move Duplicated Controls Out Of The Main Layout
 

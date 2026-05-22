@@ -188,6 +188,7 @@ Possible directions:
 - Keep common first-run actions discoverable if buttons are removed.
 - Use the same organization for future data sources so new imports do not keep expanding the main control row.
 - Add dirty-session tracking after the resource manager/session identity cleanup: mark the session as modified after resource, viewport, alignment, render, signal, or export-overlay changes; reflect the dirty state in the window title; and prompt to save, discard, or cancel before quitting, opening another session, closing the current session, or performing another action that would discard unsaved session state.
+- Make status-bar messages transient for one-shot actions such as loading or saving sessions/resources. Persistent state should live in the window title, Resources window, or resource rows; action confirmations should clear after a short timeout so stale "Saved session" or "Loaded session" text is not mistaken for current-state labeling.
 
 ### Render panel control layout cleanup
 

@@ -8,6 +8,7 @@ The heatmap alignment workbench now has several independently loadable resources
 - Add a modeless Resources window that lists supported resource slots, including loaded and unloaded resources.
 - Show each resource's status, semantic color swatch, resource type/role, full file path with middle elision, and useful resource-specific details.
 - Provide load/replace, unload/clear, reload, reveal path, and warning-inspection actions from the Resources window.
+- Polish the Resources window after smoke testing by clarifying action labels, preserving window placement when refocusing, simplifying table selection behavior, improving selected-resource details, and adding keyboard mnemonics where useful.
 - Add row context menus in the Resources window for the same row-scoped resource actions exposed by selected-row buttons.
 - Add a confirmed "Clear All Resources" action that clears loaded resources without forgetting the current session path.
 - Add current-session identity to the main window title and support both `Save Session` and `Save Session As...`.
