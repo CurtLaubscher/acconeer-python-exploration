@@ -1796,20 +1796,28 @@ def elide_path_middle(path_text: str, max_chars: int) -> str:
 
     path = Path(path_text)
     filename = path.name or path_text
-    if len(filename) >= max_chars:
-        return f"...{filename[-(max_chars - 3) :]}"
+    if not filename:
+        return path_text[:max_chars]
 
-    prefix_budget = max_chars - len(filename) - 3
+    if path_text.endswith(filename):
+        separator_index = len(path_text) - len(filename) - 1
+        if separator_index >= 0 and path_text[separator_index] in "/\\":
+            suffix = path_text[separator_index:]
+        else:
+            suffix = filename
+    else:
+        suffix = filename
+
+    if len(suffix) >= max_chars:
+        return f"...{suffix[-(max_chars - 3) :]}"
+
+    ellipsis = "..."
+    prefix_budget = max_chars - len(suffix) - len(ellipsis)
     if prefix_budget <= 0:
-        return filename[:max_chars]
+        return suffix[:max_chars]
 
     prefix = path_text[:prefix_budget]
-    if prefix.endswith(("/", "\\")):
-        return f"{prefix}...{filename}"
-    parent = path.parent.as_posix() if path.parent != Path(".") else ""
-    if parent and not prefix.endswith(parent[: len(prefix)]):
-        return f"{prefix}...{filename}"
-    return f"{prefix}...{filename}"
+    return f"{prefix}{ellipsis}{suffix}"
 
 
 def _resource_messages(

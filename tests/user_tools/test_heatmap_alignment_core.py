@@ -1220,9 +1220,18 @@ def test_elide_path_middle_preserves_filename() -> None:
     path = "/very/long/parent/folders/trial_export.mp4"
     elided = elide_path_middle(path, 28)
 
-    assert elided.endswith("trial_export.mp4")
+    assert elided.endswith("/trial_export.mp4")
     assert "..." in elided
     assert len(elided) <= 28
+
+
+def test_elide_path_middle_preserves_windows_separator_before_filename() -> None:
+    path = r"C:\very\long\parent\folders\trial_export.mp4"
+    elided = elide_path_middle(path, 30)
+
+    assert elided.endswith(r"\trial_export.mp4")
+    assert "..." in elided
+    assert len(elided) <= 30
 
 
 def test_build_alignment_resource_summaries_cover_fixed_slots() -> None:

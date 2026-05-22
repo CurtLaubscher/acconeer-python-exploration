@@ -98,6 +98,18 @@ RESOURCE_STATUS_LABELS = {
     "warning": "Warning",
 }
 
+RESOURCES_DETAILS_SECTION_SPACING_PX = 6
+RESOURCES_DETAILS_PATH_BLOCK_TOP_MARGIN_PX = 6
+
+RESOURCE_ACTION_LABELS: dict[ResourceAction, str] = {
+    "load": "&Load...",
+    "replace": "&Replace...",
+    "unload": "&Unload",
+    "reload": "&Reload",
+    "reveal": "Show in &File Manager",
+    "inspect": "Inspect &Warnings",
+}
+
 
 def rgb_to_qpixmap(frame_rgb: np.ndarray) -> QtGui.QPixmap:
     if frame_rgb.ndim != 3 or frame_rgb.shape[2] != 3:
@@ -1966,6 +1978,17 @@ class ResourceColorSwatchDelegate(QtWidgets.QStyledItemDelegate):
         option: QtWidgets.QStyleOptionViewItem,
         index: QtCore.QModelIndex,
     ) -> None:
+        item_option = QtWidgets.QStyleOptionViewItem(option)
+        self.initStyleOption(item_option, index)
+        item_option.text = ""
+        style = option.widget.style() if option.widget is not None else QtWidgets.QApplication.style()
+        style.drawControl(
+            QtWidgets.QStyle.ControlElement.CE_ItemViewItem,
+            item_option,
+            painter,
+            option.widget,
+        )
+
         color_hex = index.data(QtCore.Qt.ItemDataRole.UserRole)
         painter.save()
         try:
@@ -2029,13 +2052,18 @@ class ResourcesWindow(QtWidgets.QDialog):
 
         self.table = QtWidgets.QTableWidget(0, 5)
         self.table.setHorizontalHeaderLabels(["", "Resource", "Role", "Status", "Path"])
-        self.table.horizontalHeader().setStretchLastSection(True)
-        self.table.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.Fixed)
+        table_header = self.table.horizontalHeader()
+        table_header.setStretchLastSection(True)
+        table_header.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.Fixed)
+        table_header.setSectionsClickable(False)
+        table_header.setHighlightSections(False)
         self.table.setColumnWidth(0, 34)
         self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
         self.table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setAlternatingRowColors(True)
+        self.table.setShowGrid(False)
+        self.table.setCornerButtonEnabled(False)
         self.table.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._show_row_context_menu)
         self.table.itemSelectionChanged.connect(self._update_details_for_selection)
@@ -2045,29 +2073,44 @@ class ResourcesWindow(QtWidgets.QDialog):
 
         details_group = QtWidgets.QGroupBox("Selected Resource")
         details_layout = QtWidgets.QVBoxLayout(details_group)
-        self.details_path_label = QtWidgets.QLabel("Path: —")
-        self.details_path_label.setWordWrap(True)
-        self.details_path_label.setTextInteractionFlags(
-            QtCore.Qt.TextInteractionFlag.TextSelectableByMouse
-        )
-        self.details_meta_label = QtWidgets.QLabel()
-        self.details_meta_label.setWordWrap(True)
+        details_layout.setSpacing(0)
+        self.details_identity_label = QtWidgets.QLabel()
+        self.details_identity_label.setWordWrap(True)
+        self.details_status_label = QtWidgets.QLabel()
+        self.details_status_label.setWordWrap(True)
         self.details_messages_label = QtWidgets.QLabel()
         self.details_messages_label.setWordWrap(True)
         self.details_messages_label.setTextInteractionFlags(
             QtCore.Qt.TextInteractionFlag.TextSelectableByMouse
         )
-        details_layout.addWidget(self.details_path_label)
-        details_layout.addWidget(self.details_meta_label)
+        self.details_path_widget = QtWidgets.QWidget()
+        path_block_layout = QtWidgets.QVBoxLayout(self.details_path_widget)
+        path_block_layout.setContentsMargins(
+            0,
+            RESOURCES_DETAILS_PATH_BLOCK_TOP_MARGIN_PX,
+            0,
+            0,
+        )
+        path_block_layout.setSpacing(0)
+        self.details_path_label = QtWidgets.QLabel()
+        self.details_path_label.setWordWrap(True)
+        self.details_path_label.setTextInteractionFlags(
+            QtCore.Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        path_block_layout.addWidget(self.details_path_label)
+        details_layout.addWidget(self.details_identity_label)
+        details_layout.addSpacing(RESOURCES_DETAILS_SECTION_SPACING_PX)
+        details_layout.addWidget(self.details_status_label)
         details_layout.addWidget(self.details_messages_label)
+        details_layout.addWidget(self.details_path_widget)
 
         action_row = QtWidgets.QHBoxLayout()
-        self.load_button = QtWidgets.QPushButton("Load...")
-        self.replace_button = QtWidgets.QPushButton("Replace...")
-        self.unload_button = QtWidgets.QPushButton("Unload")
-        self.reload_button = QtWidgets.QPushButton("Reload")
-        self.reveal_button = QtWidgets.QPushButton("Reveal Path")
-        self.inspect_button = QtWidgets.QPushButton("Inspect Warnings")
+        self.load_button = QtWidgets.QPushButton(RESOURCE_ACTION_LABELS["load"])
+        self.replace_button = QtWidgets.QPushButton(RESOURCE_ACTION_LABELS["replace"])
+        self.unload_button = QtWidgets.QPushButton(RESOURCE_ACTION_LABELS["unload"])
+        self.reload_button = QtWidgets.QPushButton(RESOURCE_ACTION_LABELS["reload"])
+        self.reveal_button = QtWidgets.QPushButton(RESOURCE_ACTION_LABELS["reveal"])
+        self.inspect_button = QtWidgets.QPushButton(RESOURCE_ACTION_LABELS["inspect"])
         for button in (
             self.load_button,
             self.replace_button,
@@ -2090,6 +2133,32 @@ class ResourcesWindow(QtWidgets.QDialog):
 
         self._summaries: tuple[ResourceSummary, ...] = ()
 
+    @staticmethod
+    def _configure_table_item(item: QtWidgets.QTableWidgetItem) -> None:
+        item.setFlags(
+            QtCore.Qt.ItemFlag.ItemIsSelectable
+            | QtCore.Qt.ItemFlag.ItemIsEnabled
+        )
+
+    def _selected_table_row(self) -> int:
+        selection_model = self.table.selectionModel()
+        if selection_model is not None:
+            selected_rows = selection_model.selectedRows()
+            if selected_rows:
+                return selected_rows[0].row()
+        return self.table.currentRow()
+
+    def _select_table_row(self, row: int) -> None:
+        if row < 0 or row >= self.table.rowCount():
+            return
+        self.table.blockSignals(True)
+        try:
+            self.table.clearSelection()
+            self.table.selectRow(row)
+            self.table.setCurrentCell(row, 0)
+        finally:
+            self.table.blockSignals(False)
+
     def refresh(self, summaries: tuple[ResourceSummary, ...], session_path: Path | None) -> None:
         if session_path is None:
             self.session_label.setText("Session: Untitled Session")
@@ -2097,38 +2166,50 @@ class ResourcesWindow(QtWidgets.QDialog):
             self.session_label.setText(f"Session: {session_path}")
         self._summaries = summaries
         selected_kind = self._selected_kind()
-        self.table.setRowCount(len(summaries))
-        for row_index, summary in enumerate(summaries):
-            swatch_item = QtWidgets.QTableWidgetItem()
-            swatch_item.setData(QtCore.Qt.ItemDataRole.UserRole, summary.color_hex)
-            swatch_item.setData(QtCore.Qt.ItemDataRole.UserRole + 1, summary.color_muted)
-            self.table.setItem(row_index, 0, swatch_item)
-
-            name_item = QtWidgets.QTableWidgetItem(summary.display_name)
-            self.table.setItem(row_index, 1, name_item)
-
-            role_item = QtWidgets.QTableWidgetItem(summary.role)
-            self.table.setItem(row_index, 2, role_item)
-
-            status_item = QtWidgets.QTableWidgetItem(RESOURCE_STATUS_LABELS[summary.status])
-            self.table.setItem(row_index, 3, status_item)
-
-            path_item = QtWidgets.QTableWidgetItem()
-            path_item.setData(QtCore.Qt.ItemDataRole.UserRole, summary.path)
-            path_item.setToolTip(summary.path)
-            self.table.setItem(row_index, 4, path_item)
-
-        if selected_kind is not None:
+        self.table.blockSignals(True)
+        try:
+            self.table.setRowCount(len(summaries))
             for row_index, summary in enumerate(summaries):
-                if summary.kind == selected_kind:
-                    self.table.selectRow(row_index)
-                    break
-        elif summaries:
-            self.table.selectRow(0)
+                swatch_item = QtWidgets.QTableWidgetItem()
+                swatch_item.setData(QtCore.Qt.ItemDataRole.UserRole, summary.color_hex)
+                swatch_item.setData(QtCore.Qt.ItemDataRole.UserRole + 1, summary.color_muted)
+                self._configure_table_item(swatch_item)
+                self.table.setItem(row_index, 0, swatch_item)
+
+                name_item = QtWidgets.QTableWidgetItem(summary.display_name)
+                self._configure_table_item(name_item)
+                self.table.setItem(row_index, 1, name_item)
+
+                role_item = QtWidgets.QTableWidgetItem(summary.role)
+                self._configure_table_item(role_item)
+                self.table.setItem(row_index, 2, role_item)
+
+                status_item = QtWidgets.QTableWidgetItem(
+                    RESOURCE_STATUS_LABELS[summary.status]
+                )
+                self._configure_table_item(status_item)
+                self.table.setItem(row_index, 3, status_item)
+
+                path_item = QtWidgets.QTableWidgetItem()
+                path_item.setData(QtCore.Qt.ItemDataRole.UserRole, summary.path)
+                if summary.path:
+                    path_item.setToolTip(summary.path)
+                self._configure_table_item(path_item)
+                self.table.setItem(row_index, 4, path_item)
+
+            if selected_kind is not None:
+                for row_index, summary in enumerate(summaries):
+                    if summary.kind == selected_kind:
+                        self._select_table_row(row_index)
+                        break
+            elif summaries:
+                self._select_table_row(0)
+        finally:
+            self.table.blockSignals(False)
         self._update_details_for_selection()
 
     def _selected_summary(self) -> ResourceSummary | None:
-        row = self.table.currentRow()
+        row = self._selected_table_row()
         if row < 0 or row >= len(self._summaries):
             return None
         return self._summaries[row]
@@ -2140,9 +2221,12 @@ class ResourcesWindow(QtWidgets.QDialog):
     def _update_details_for_selection(self) -> None:
         summary = self._selected_summary()
         if summary is None:
-            self.details_path_label.setText("Path: —")
-            self.details_meta_label.setText("")
+            self.details_identity_label.setText("")
+            self.details_status_label.setText("")
             self.details_messages_label.setText("")
+            self.details_messages_label.setVisible(False)
+            self.details_path_label.clear()
+            self.details_path_widget.setVisible(False)
             for button in (
                 self.load_button,
                 self.replace_button,
@@ -2154,16 +2238,25 @@ class ResourcesWindow(QtWidgets.QDialog):
                 button.setEnabled(False)
             return
 
-        path_text = summary.path or "—"
-        self.details_path_label.setText(f"Path: {path_text}")
-        self.details_meta_label.setText(
-            f"{summary.display_name} ({summary.role}) — "
+        self.details_identity_label.setText(
+            f"{summary.display_name} ({summary.role})"
+        )
+        self.details_status_label.setText(
             f"{RESOURCE_STATUS_LABELS[summary.status]}\n{summary.details}"
         )
         if summary.messages:
             self.details_messages_label.setText("\n".join(summary.messages))
+            self.details_messages_label.setVisible(True)
         else:
-            self.details_messages_label.setText("")
+            self.details_messages_label.clear()
+            self.details_messages_label.setVisible(False)
+
+        if summary.path:
+            self.details_path_label.setText(f"Path: {summary.path}")
+            self.details_path_widget.setVisible(True)
+        else:
+            self.details_path_label.clear()
+            self.details_path_widget.setVisible(False)
 
         action_set = set(summary.actions)
         self.load_button.setEnabled("load" in action_set)
@@ -2183,21 +2276,13 @@ class ResourcesWindow(QtWidgets.QDialog):
         index = self.table.indexAt(position)
         if not index.isValid():
             return
-        self.table.selectRow(index.row())
+        self._select_table_row(index.row())
         summary = self._selected_summary()
         if summary is None:
             return
         menu = QtWidgets.QMenu(self)
-        action_labels: dict[ResourceAction, str] = {
-            "load": "Load...",
-            "replace": "Replace...",
-            "unload": "Unload",
-            "reload": "Reload",
-            "reveal": "Reveal Path",
-            "inspect": "Inspect Warnings",
-        }
         for action in summary.actions:
-            menu_action = menu.addAction(action_labels[action])
+            menu_action = menu.addAction(RESOURCE_ACTION_LABELS[action])
             menu_action.triggered.connect(
                 lambda _checked=False, kind=summary.kind, chosen=action: (
                     self._main_window.invoke_resource_action(kind, chosen)
@@ -2320,67 +2405,67 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
 
         resources_menu = self.menuBar().addMenu("&Resources")
 
-        self.manage_resources_action = QtGui.QAction("Manage Resources...", self)
+        self.manage_resources_action = QtGui.QAction("&Manage Resources...", self)
         self.manage_resources_action.triggered.connect(self._show_resources_window)
         resources_menu.addAction(self.manage_resources_action)
 
         resources_menu.addSeparator()
 
-        self.load_camera_action = QtGui.QAction("Load Camera Video...", self)
+        self.load_camera_action = QtGui.QAction("&Load Camera Video...", self)
         self.load_camera_action.triggered.connect(self._load_camera_video)
         resources_menu.addAction(self.load_camera_action)
 
-        self.load_h5_action = QtGui.QAction("Load Radar Raw (H5)...", self)
+        self.load_h5_action = QtGui.QAction("Load Radar Raw (&H5)...", self)
         self.load_h5_action.triggered.connect(self._load_h5_recording)
         resources_menu.addAction(self.load_h5_action)
 
-        self.load_peak_action = QtGui.QAction("Load Radar Peak (JSON)...", self)
+        self.load_peak_action = QtGui.QAction("Load Radar Peak (&JSON)...", self)
         self.load_peak_action.triggered.connect(self._import_peak_distance_json)
         resources_menu.addAction(self.load_peak_action)
 
-        self.load_leg2_action = QtGui.QAction("Load Leg2 MAT...", self)
+        self.load_leg2_action = QtGui.QAction("Load &Leg2 MAT...", self)
         self.load_leg2_action.triggered.connect(self._import_leg2_mat)
         resources_menu.addAction(self.load_leg2_action)
 
         resources_menu.addSeparator()
 
-        self.unload_camera_action = QtGui.QAction("Unload Camera Video", self)
+        self.unload_camera_action = QtGui.QAction("&Unload Camera Video", self)
         self.unload_camera_action.triggered.connect(self.unload_camera_video)
         resources_menu.addAction(self.unload_camera_action)
 
-        self.unload_h5_action = QtGui.QAction("Unload Radar Raw (H5)", self)
+        self.unload_h5_action = QtGui.QAction("Unload Radar Raw (&H5)", self)
         self.unload_h5_action.triggered.connect(self.unload_h5_recording)
         resources_menu.addAction(self.unload_h5_action)
 
-        self.unload_peak_action = QtGui.QAction("Clear Radar Peak (JSON)", self)
+        self.unload_peak_action = QtGui.QAction("Clear Radar Peak (&JSON)", self)
         self.unload_peak_action.triggered.connect(self._clear_peak_distance_datasource)
         resources_menu.addAction(self.unload_peak_action)
 
-        self.unload_leg2_action = QtGui.QAction("Clear Leg2 MAT", self)
+        self.unload_leg2_action = QtGui.QAction("Clear &Leg2 MAT", self)
         self.unload_leg2_action.triggered.connect(self._clear_leg2_ultrasonic_datasource)
         resources_menu.addAction(self.unload_leg2_action)
 
         resources_menu.addSeparator()
 
-        self.reload_camera_action = QtGui.QAction("Reload Camera Video", self)
+        self.reload_camera_action = QtGui.QAction("&Reload Camera Video", self)
         self.reload_camera_action.triggered.connect(
             lambda: self.invoke_resource_action("camera", "reload")
         )
         resources_menu.addAction(self.reload_camera_action)
 
-        self.reload_h5_action = QtGui.QAction("Reload Radar Raw (H5)", self)
+        self.reload_h5_action = QtGui.QAction("Reload Radar Raw (&H5)", self)
         self.reload_h5_action.triggered.connect(
             lambda: self.invoke_resource_action("radar_h5", "reload")
         )
         resources_menu.addAction(self.reload_h5_action)
 
-        self.reload_peak_action = QtGui.QAction("Reload Radar Peak (JSON)", self)
+        self.reload_peak_action = QtGui.QAction("Reload Radar Peak (&JSON)", self)
         self.reload_peak_action.triggered.connect(
             lambda: self.invoke_resource_action("radar_peak", "reload")
         )
         resources_menu.addAction(self.reload_peak_action)
 
-        self.reload_leg2_action = QtGui.QAction("Reload Leg2 MAT", self)
+        self.reload_leg2_action = QtGui.QAction("Reload &Leg2 MAT", self)
         self.reload_leg2_action.triggered.connect(
             lambda: self.invoke_resource_action("leg2_mat", "reload")
         )
@@ -4034,10 +4119,15 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
     def _show_resources_window(self) -> None:
         if self._resources_window is None:
             self._resources_window = ResourcesWindow(self)
+            self._refresh_resources_ui()
+            self._resources_window.show()
+            return
+
+        saved_geometry = self._resources_window.geometry()
         self._refresh_resources_ui()
+        self._resources_window.setGeometry(saved_geometry)
         self._resources_window.show()
         self._resources_window.raise_()
-        self._resources_window.activateWindow()
 
     def _set_resource_reload_error(self, kind: ResourceKind, message: str | None) -> None:
         if message:
@@ -4125,7 +4215,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         if not target.exists():
             QtWidgets.QMessageBox.warning(
                 self,
-                "Reveal path",
+                "Show in File Manager",
                 f"Path does not exist:\n{path}",
             )
             return

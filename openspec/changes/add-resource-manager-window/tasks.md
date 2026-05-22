@@ -50,18 +50,18 @@
 ## 6. Verification
 
 - [x] 6.1 Run focused GUI/resource tests with the repo-managed Hatch environment
-- [ ] 6.2 Manually smoke-test opening the Resources window, loading/replacing/unloading each current resource type, and keeping the window open during alignment interaction
-- [ ] 6.3 Manually smoke-test a session with a missing remembered resource path and confirm the row shows the remembered path with a missing or invalid status
-- [ ] 6.4 Manually smoke-test Save Session, Save Session As, Close Session, Clear All Resources, and Resources window refocus behavior
+- [x] 6.2 Manually smoke-test opening the Resources window, loading/replacing/unloading each current resource type, and keeping the window open during alignment interaction
+- [x] 6.3 Manually smoke-test a session with a missing remembered resource path and confirm the row shows the remembered path with a missing or invalid status
+- [x] 6.4 Manually smoke-test Save Session, Save Session As, Close Session, Clear All Resources, and Resources window refocus behavior
 - [x] 6.5 Run `openspec validate add-resource-manager-window --strict`
 
 ## 7. Smoke-Test Polish Follow-Ups
 
-- [ ] 7.1 Rename resource reveal actions from "Reveal Path" to "Show in File Manager"
-- [ ] 7.2 Update path elision to preserve the separator immediately before the filename when width allows
-- [ ] 7.3 Refocus an already-open Resources window without moving it from the user's chosen position
-- [ ] 7.4 Reorder selected-resource details so resource identity appears first, and omit the path detail when no path exists
-- [ ] 7.5 Normalize Resources table selection so it uses one full selected row, preserves selection painting in custom delegates, and avoids mixed current-cell visuals
-- [ ] 7.6 Keep Resources table headers non-interactive unless sorting or column actions are intentionally implemented
-- [ ] 7.7 Add Qt mnemonics to Resources menu and common resource action labels without adding custom Escape-key behavior
-- [ ] 7.8 Add focused tests or smoke coverage for the Resources window polish changes
+- [x] 7.1 Rename resource reveal actions from "Reveal Path" to "Show in File Manager"
+- [x] 7.2 Update path elision to preserve the separator immediately before the filename when width allows
+- [x] 7.3 Refocus an already-open Resources window without moving it from the user's chosen position
+- [x] 7.4 Reorder selected-resource details so resource identity appears first, and omit the path detail when no path exists
+- [x] 7.5 Normalize Resources table selection so it uses one full selected row, preserves selection painting in custom delegates, and avoids mixed current-cell visuals
+- [x] 7.6 Keep Resources table headers non-interactive unless sorting or column actions are intentionally implemented
+- [x] 7.7 Add Qt mnemonics to Resources menu and common resource action labels without adding custom Escape-key behavior
+- [x] 7.8 Add focused tests or smoke coverage for the Resources window polish changes
