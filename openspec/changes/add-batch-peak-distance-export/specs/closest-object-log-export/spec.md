@@ -48,6 +48,11 @@ The system SHALL allow the standalone peak-distance export command to process mu
 - **WHEN** the user runs a batch export with `--output-dir`
 - **THEN** the system writes each output into that directory using `<input_stem>_peak_distances.json` for JSON exports or `<input_stem>_peak_distances.csv` for CSV exports
 
+#### Scenario: Reject output directory path that is a file
+- **WHEN** the user provides `--output-dir` and that path exists as a file
+- **THEN** the system exits with an error before processing any inputs
+- **AND** the error identifies the invalid output directory path
+
 #### Scenario: Reject single output path for multiple inputs
 - **WHEN** the user provides `--output` and the input arguments resolve to more than one H5 recording
 - **THEN** the system exits with an error before processing any inputs

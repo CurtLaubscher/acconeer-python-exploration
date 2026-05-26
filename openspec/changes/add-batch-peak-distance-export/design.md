@@ -59,7 +59,7 @@ Alternative considered: include parent directory names or hashes in all batch ou
 
 ### Reject Ambiguous Or Colliding Output Plans Before Processing
 
-`--output` remains valid only when exactly one H5 input is resolved, regardless of whether that single input came from a file, glob, or directory. Multiple resolved inputs must use default beside-source output paths or `--output-dir`. If two resolved inputs map to the same output path, or if any planned output already exists, the command should fail before processing and list the conflicting paths.
+`--output` remains valid only when exactly one H5 input is resolved, regardless of whether that single input came from a file, glob, or directory. Multiple resolved inputs must use default beside-source output paths or `--output-dir`. If `--output-dir` points to an existing file, if two resolved inputs map to the same output path, or if any planned output already exists, the command should fail before processing and list the conflicting paths.
 
 Alternative considered: overwrite or auto-disambiguate. Silent overwrite risks data loss, while automatic disambiguation creates filenames users did not choose. A later `--overwrite` option can be added if rerun workflows need it.
 
