@@ -127,6 +127,7 @@ Future in-app direction:
 - Reuse the same non-GUI peak calculation core from the script.
 - Consider threshold preview only if repeated CLI runs are too slow or awkward.
 - Add a visibility toggle for the imported/generated peak datasource.
+- If batch peak generation becomes slow in real datasets, consider adding parallel execution to the standalone script after measuring memory use and HDF5 behavior. Keep the first batch implementation serial but structured around independent per-file jobs so a future `--jobs` option does not require redesigning input/output planning.
 
 Possible rendering directions:
 - Overlay the current frame's peak marker directly on the heatmap plot at `(peak_distance_m, 0 m/s)`.
