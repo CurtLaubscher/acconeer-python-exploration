@@ -17,20 +17,20 @@
 
 ## 3. Render stance patches on Signals plot
 
-- [ ] 3.1 Add method to `SignalPlotWidget` to create and add stance phase patch items to the plot
-- [ ] 3.2 Create filled regions using pyqtgraph (likely `pg.FillBetween` or `QGraphicsRectItem`)
-- [ ] 3.3 Style patches with Leg2 color using `derive_signal_plot_color(LEG2_TIMELINE_TRACK_COLOR_HEX)` and `SIGNAL_PLOT_PRIMARY_SEGMENT_ALPHA`
-- [ ] 3.4 Fill from plot's lower y-limit up to y=0 for each stance interval
-- [ ] 3.5 Call patch rendering method when `set_plotted_signals()` updates with Leg2 data
-- [ ] 3.6 Ensure patches clear when Leg2 signal is hidden or unloaded
-- [ ] 3.7 Test that patches do not affect y-axis auto-scaling (verify `visible_signal_y_range()` output is unchanged)
+- [x] 3.1 Add method to `SignalPlotWidget` to create and add stance phase patch items to the plot
+- [x] 3.2 Create filled regions using pyqtgraph (likely `pg.FillBetween` or `QGraphicsRectItem`)
+- [x] 3.3 Style patches with Leg2 color using `derive_signal_plot_color(LEG2_TIMELINE_TRACK_COLOR_HEX)` and `SIGNAL_PLOT_PRIMARY_SEGMENT_ALPHA`
+- [x] 3.4 Fill from plot's lower y-limit up to y=0 for each stance interval
+- [x] 3.5 Call patch rendering method when `set_plotted_signals()` updates with Leg2 data
+- [x] 3.6 Ensure patches clear when Leg2 signal is hidden or unloaded
+- [x] 3.7 Test that patches do not affect y-axis auto-scaling (verify `visible_signal_y_range()` output is unchanged)
 
 ## 4. Update signal plot legend
 
-- [ ] 4.1 Add "Stance phase" legend entry when Leg2 signal becomes visible
-- [ ] 4.2 Use same color and transparency as patch visualization
-- [ ] 4.3 Remove "Stance phase" from legend when Leg2 signal is hidden
-- [ ] 4.4 Place "Stance phase" entry after Leg2 ultrasonic signal entries (primary/faded) in the legend, matching existing legend ordering pattern
+- [x] 4.1 Add "Stance phase" legend entry when Leg2 signal becomes visible
+- [x] 4.2 Use same color and transparency as patch visualization
+- [x] 4.3 Remove "Stance phase" from legend when Leg2 signal is hidden
+- [x] 4.4 Place "Stance phase" entry after Leg2 ultrasonic signal entries (primary/faded) in the legend, matching existing legend ordering pattern
 
 ## 5. Handle track offset changes
 
