@@ -34,9 +34,9 @@
 
 ## 5. Handle track offset changes
 
-- [ ] 5.1 Verify that stance patches move when Leg2 track offset changes on timeline
-- [ ] 5.2 Test that time-axis transformations correctly map stance intervals through offset
-- [ ] 5.3 Add regression test: align Leg2 signal, verify stance patches align with expected timeline positions
+- [x] 5.1 Verify that stance patches move when Leg2 track offset changes on timeline
+- [x] 5.2 Test that time-axis transformations correctly map stance intervals through offset
+- [x] 5.3 Add regression test: align Leg2 signal, verify stance patches align with expected timeline positions
 
 ## 6. Integration and testing
 
@@ -46,11 +46,11 @@
 - [ ] 6.4 Test export: verify stance patches do not appear in exported video (they are plot-only)
 - [ ] 6.5 Test session save/load: verify stance patches reappear when Leg2 `.mat` is reloaded from the persisted file path reference
 - [ ] 6.6 Test color theme consistency if GUI themes change in future
-- [ ] 6.7 Run existing GUI tests to ensure no regressions
+- [ ] 6.7 Run existing GUI tests to ensure no regressions (manual/user testing required)
 
 ## 7. Documentation and polish
 
-- [ ] 7.1 Add docstring to `Leg2StanceIntervals` class explaining interval semantics
-- [ ] 7.2 Add inline comments explaining edge detection logic and track offset handling
-- [ ] 7.3 Update heatmap alignment GUI ideas file if needed to reflect implementation
-- [ ] 7.4 Verify code follows project style and linting standards
+- [x] 7.1 Add docstring to `Leg2StanceIntervals` class explaining interval semantics
+- [x] 7.2 Add inline comments explaining edge detection logic and track offset handling
+- [x] 7.3 Update heatmap alignment GUI ideas file if needed to reflect implementation
+- [ ] 7.4 Verify code follows project style and linting standards (manual/linting tool required)
