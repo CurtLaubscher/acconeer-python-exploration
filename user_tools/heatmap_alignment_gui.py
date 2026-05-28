@@ -82,12 +82,15 @@ from heatmap_alignment_resource_jobs import (
     ResourceJobError,
     ResourceJobKind,
     ResourceJobSnapshot,
+    ResourceJobSlotState,
     begin_resource_job,
     build_h5_truth_source_from_payload,
     clear_resource_job,
     complete_resource_job,
     load_h5_resource_payload,
     mark_resource_job_phase,
+    release_resource_job_result,
+    replacement_viewport_needs_default_reset,
     request_cancel_resource_job,
     resolve_replacement_viewport_corners,
     resource_job_blocks_export,
@@ -2184,6 +2187,7 @@ class ResourceJobManager(QtCore.QObject):
         self._h5_active = False
         self._proxy_processes: dict[int, object] = {}
         self._pending_results: dict[tuple[ResourceJobKind, int], object] = {}
+        self._cancelled_generations: set[tuple[ResourceJobKind, int]] = set()
         self.job_succeeded.connect(self._handle_job_success)
         self.job_failed.connect(self._handle_job_failure)
 
@@ -2199,6 +2203,40 @@ class ResourceJobManager(QtCore.QObject):
     def blocks_export(self) -> bool:
         return resource_job_blocks_export(self._board)
 
+    def _generation_cancelled(self, kind: ResourceJobKind, generation: int) -> bool:
+        return (kind, generation) in self._cancelled_generations
+
+    def _cancel_generation(self, kind: ResourceJobKind, generation: int) -> None:
+        if generation <= 0:
+            return
+        self._cancelled_generations.add((kind, generation))
+        if kind != "camera":
+            return
+        process = self._proxy_processes.pop(generation, None)
+        if process is None:
+            return
+        try:
+            process.terminate()
+        except OSError:
+            pass
+
+    def _release_job_result(self, kind: ResourceJobKind, generation: int, result: object) -> None:
+        release_resource_job_result(kind, result)
+        self._pending_results.pop((kind, generation), None)
+
+    def _discard_all_pending_results(self) -> None:
+        for (kind, generation), result in list(self._pending_results.items()):
+            self._release_job_result(kind, generation, result)
+
+    def abandon_all_jobs(self) -> None:
+        for kind in ("camera", "radar_h5"):
+            slot = self._board.slot(kind)
+            if slot.phase not in ("idle", "failed"):
+                self._cancel_generation(kind, slot.generation)
+            clear_resource_job(self._board, kind)
+        self._discard_all_pending_results()
+        self.job_state_changed.emit()
+
     def start_camera_job(
         self,
         camera_path: Path,
@@ -2206,6 +2244,9 @@ class ResourceJobManager(QtCore.QObject):
         replaces_active: bool,
         cache_root: Path | None = None,
     ) -> int:
+        slot = self._board.camera
+        if slot.phase not in ("idle", "failed"):
+            self._cancel_generation("camera", slot.generation)
         generation = begin_resource_job(
             self._board,
             "camera",
@@ -2231,6 +2272,9 @@ class ResourceJobManager(QtCore.QObject):
         color_max: float | None,
         fixed_levels: bool,
     ) -> int:
+        slot = self._board.radar_h5
+        if slot.phase not in ("idle", "failed"):
+            self._cancel_generation("radar_h5", slot.generation)
         generation = begin_resource_job(
             self._board,
             "radar_h5",
@@ -2257,12 +2301,7 @@ class ResourceJobManager(QtCore.QObject):
         if not request_cancel_resource_job(self._board, kind):
             return False
         slot = self._board.slot(kind)
-        process = self._proxy_processes.pop(slot.generation, None)
-        if process is not None:
-            try:
-                process.terminate()
-            except OSError:
-                pass
+        self._cancel_generation(kind, slot.generation)
         self.job_state_changed.emit()
         return True
 
@@ -2274,14 +2313,27 @@ class ResourceJobManager(QtCore.QObject):
         cache_root: Path | None,
     ) -> None:
         def _wait_for_proxy_slot() -> None:
+            if self._proxy_active:
+                mark_resource_job_phase(
+                    self._board,
+                    "camera",
+                    generation,
+                    "waiting",
+                    message=f"Waiting to build preview proxy for {camera_path.name}...",
+                )
+                QtCore.QMetaObject.invokeMethod(
+                    self,
+                    "_emit_job_state_changed",
+                    QtCore.Qt.ConnectionType.QueuedConnection,
+                )
             while self._proxy_active:
-                if self._board.camera.cancel_requested:
+                if self._generation_cancelled("camera", generation):
                     raise ResourceJobError("Camera load cancelled.")
                 QtCore.QThread.msleep(25)
 
         def _worker() -> CameraResourceJobResult:
             _wait_for_proxy_slot()
-            if self._board.camera.cancel_requested:
+            if self._generation_cancelled("camera", generation):
                 raise ResourceJobError("Camera load cancelled.")
             self._proxy_active = True
             mark_resource_job_phase(
@@ -2304,12 +2356,13 @@ class ResourceJobManager(QtCore.QObject):
                 return run_camera_resource_job(
                     camera_path,
                     cache_root=cache_root,
-                    cancel_check=lambda: self._board.camera.cancel_requested,
+                    cancel_check=lambda: self._generation_cancelled("camera", generation),
                     process_hook=_process_hook,
                 )
             finally:
                 self._proxy_active = False
                 self._proxy_processes.pop(generation, None)
+                self._cancelled_generations.discard(("camera", generation))
 
         runnable = _ResourceJobRunnable(self, "camera", generation, _worker)
         self._thread_pool.start(runnable, priority=0)
@@ -2328,14 +2381,27 @@ class ResourceJobManager(QtCore.QObject):
         fixed_levels: bool,
     ) -> None:
         def _wait_for_h5_slot() -> None:
+            if self._h5_active:
+                mark_resource_job_phase(
+                    self._board,
+                    "radar_h5",
+                    generation,
+                    "waiting",
+                    message=f"Waiting to load {h5_path.name}...",
+                )
+                QtCore.QMetaObject.invokeMethod(
+                    self,
+                    "_emit_job_state_changed",
+                    QtCore.Qt.ConnectionType.QueuedConnection,
+                )
             while self._h5_active:
-                if self._board.radar_h5.cancel_requested:
+                if self._generation_cancelled("radar_h5", generation):
                     raise ResourceJobError("H5 load cancelled.")
                 QtCore.QThread.msleep(25)
 
         def _worker() -> LoadedH5ResourcePayload:
             _wait_for_h5_slot()
-            if self._board.radar_h5.cancel_requested:
+            if self._generation_cancelled("radar_h5", generation):
                 raise ResourceJobError("H5 load cancelled.")
             self._h5_active = True
             try:
@@ -2348,10 +2414,11 @@ class ResourceJobManager(QtCore.QObject):
                     color_min=color_min,
                     color_max=color_max,
                     fixed_levels=fixed_levels,
-                    cancel_check=lambda: self._board.radar_h5.cancel_requested,
+                    cancel_check=lambda: self._generation_cancelled("radar_h5", generation),
                 )
             finally:
                 self._h5_active = False
+                self._cancelled_generations.discard(("radar_h5", generation))
 
         runnable = _ResourceJobRunnable(self, "radar_h5", generation, _worker)
         self._thread_pool.start(runnable, priority=0)
@@ -2384,6 +2451,7 @@ class ResourceJobManager(QtCore.QObject):
     ) -> None:
         slot = self._board.slot(kind)
         if not should_apply_job_result(slot, generation):
+            self._release_job_result(kind, generation, result)
             return
         complete_resource_job(self._board, kind, generation, phase="idle")
         self._pending_results[(kind, generation)] = result
@@ -2393,7 +2461,7 @@ class ResourceJobManager(QtCore.QObject):
         slot = self._board.slot(kind)
         if not should_apply_job_result(slot, generation):
             return
-        if slot.cancel_requested:
+        if slot.cancel_requested or self._generation_cancelled(kind, generation):
             complete_resource_job(self._board, kind, generation, phase="idle")
         else:
             complete_resource_job(
@@ -2812,6 +2880,11 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._close_sources()
         super().closeEvent(event)
 
+    def _abandon_resource_jobs(self) -> None:
+        self._resource_job_manager.abandon_all_jobs()
+        self._camera_replacement_backup = None
+        self._h5_replacement_backup = None
+
     def _create_menu_bar(self) -> None:
         file_menu = self.menuBar().addMenu("&File")
 
@@ -3133,6 +3206,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         return group
 
     def _close_sources(self) -> None:
+        self._abandon_resource_jobs()
         self._set_playback_active(False, refresh_viewport=False)
         self.viewport_source_resolution_timer.stop()
         self._source_resolution_request_token += 1
@@ -3682,7 +3756,14 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         )
         if resolved_corners is not None:
             self.session.viewport.corners = resolved_corners
-        elif not self.session.viewport.corners:
+        elif replacement_viewport_needs_default_reset(
+            previous_corners=previous_corners,
+            previous_native_size=previous_size,
+            replacement_native_size=(
+                self._camera_reference_width,
+                self._camera_reference_height,
+            ),
+        ) or not self.session.viewport.corners:
             self._initialize_default_viewport_corners_native()
         self._initialize_default_export_overlay_if_needed()
         self._load_current_camera_frame(access_hint="random")
@@ -3694,9 +3775,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.settings.setValue("last_camera_path", str(result.source_path))
         self._camera_replacement_backup = None
         if result.proxy_result.state == "proxy_built":
-            message = (
-                f"Loaded camera video with cached preview proxy: {result.source_path.name}"
-            )
+            message = f"Loaded camera video with new preview proxy: {result.source_path.name}"
         elif result.proxy_result.state == "proxy_reused":
             message = f"Loaded camera video via cached preview proxy: {result.source_path.name}"
         else:
@@ -3710,12 +3789,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             self._h5_replacement_backup.heatmap_source.close()
         elif self.heatmap_source is not None:
             self.heatmap_source.close()
-        self.heatmap_source = build_h5_truth_source_from_payload(
-            payload,
-            color_min=self.color_min_spin.value(),
-            color_max=self.color_max_spin.value(),
-            fixed_levels=True,
-        )
+        self.heatmap_source = build_h5_truth_source_from_payload(payload)
         self.session.heatmap_track = payload.metadata
         self.session.viewport.output_width = payload.first_frame_shape[1]
         self.session.viewport.output_height = payload.first_frame_shape[0]
@@ -3797,13 +3871,22 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._update_resource_loading_overlays()
         self._refresh_resources_ui()
 
+    def _resource_loading_overlay_message(self, slot: ResourceJobSlotState) -> str:
+        if slot.message:
+            return slot.message
+        target = resource_job_target_filename(slot.target_path)
+        if slot.phase == "waiting":
+            return f"Waiting for {target}..."
+        if slot.phase == "building":
+            return f"Building preview proxy for {target}..."
+        return f"Loading {target}..."
+
     def _update_resource_loading_overlays(self) -> None:
         camera_slot = self._resource_job_manager.board().camera
         if camera_slot.phase in ("pending", "loading", "building", "waiting", "cancelling"):
-            target = resource_job_target_filename(camera_slot.target_path)
             self.camera_view.set_loading_overlay(
                 True,
-                f"Loading {target}...",
+                self._resource_loading_overlay_message(camera_slot),
                 dim_content=self.camera_source is not None,
             )
         else:
@@ -3811,10 +3894,9 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
 
         h5_slot = self._resource_job_manager.board().radar_h5
         if h5_slot.phase in ("pending", "loading", "building", "waiting", "cancelling"):
-            target = resource_job_target_filename(h5_slot.target_path)
             self.truth_view.set_loading_overlay(
                 True,
-                f"Loading {target}...",
+                self._resource_loading_overlay_message(h5_slot),
                 dim_content=self.heatmap_source is not None,
             )
         else:

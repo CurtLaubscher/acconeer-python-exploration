@@ -928,6 +928,12 @@ def prepare_proxy_video(
     max_dimension: int = 1280,
     cache_root: Path | None = None,
 ) -> ProxyVideoResult:
+    """Prepare a preview proxy for large camera videos.
+
+    Small sources at or below ``max_dimension`` are returned unchanged. Larger
+    sources require ffmpeg; when ffmpeg is unavailable the call raises instead
+    of falling back to full-resolution interactive preview.
+    """
     source_probe = probe_video(source_path)
     if max(source_probe.width, source_probe.height) <= max_dimension:
         return ProxyVideoResult(
@@ -1245,6 +1251,7 @@ class HeatmapTruthSource:
         color_min: float = 0.0,
         color_max: float | None = 3000.0,
         fixed_levels: bool = True,
+        resolved_fixed_color_level: float | None = None,
     ) -> HeatmapTruthSource:
         """Construct a truth source from a worker-loaded ``HeatmapRecord``."""
 
@@ -1255,7 +1262,12 @@ class HeatmapTruthSource:
         instance.color_min = color_min
         instance.color_max = color_max
         instance.fixed_levels = fixed_levels
-        instance._fixed_color_level = instance._resolve_fixed_color_level()
+        if fixed_levels and resolved_fixed_color_level is not None:
+            instance._fixed_color_level = resolved_fixed_color_level
+        elif fixed_levels:
+            instance._fixed_color_level = instance._resolve_fixed_color_level()
+        else:
+            instance._fixed_color_level = None
         return instance
 
     def close(self) -> None:
@@ -2014,6 +2026,8 @@ def build_alignment_resource_summaries(
         target = camera_job.target_filename or Path(camera_path).name
         if camera_job.phase == "building":
             camera_details = f"Building preview proxy for {target}..."
+        elif camera_job.phase == "waiting":
+            camera_details = camera_job.detail or f"Waiting for {target}..."
         elif camera_job.phase == "cancelling":
             camera_details = f"Cancelling load for {target}..."
         elif camera_job.phase == "failed":
@@ -2067,6 +2081,8 @@ def build_alignment_resource_summaries(
         target = h5_job.target_filename or Path(h5_path).name
         if h5_job.phase == "cancelling":
             h5_details = f"Cancelling load for {target}..."
+        elif h5_job.phase == "waiting":
+            h5_details = h5_job.detail or f"Waiting for {target}..."
         elif h5_job.phase == "failed":
             h5_details = h5_job.detail or f"Failed to load {target}."
         else:

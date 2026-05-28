@@ -1,3 +1,9 @@
+## Status
+
+Initial implementation landed in commit `51fc67ce`. Review follow-up corrections from section 7 are implemented on branch `claub/async-resource-loading-jobs`.
+
+**Task counts (sections 1–7):** 41 total, 41 complete, 0 remaining.
+
 ## 1. Job State Foundation
 
 - [x] 1.1 Add runtime resource job state models for pending, loading, building, waiting, cancelling, failed, and superseded states without changing saved session JSON.
@@ -48,3 +54,14 @@
 - [x] 6.4 Add tests for H5 replacement success, failure restore, safe H5 ownership behavior, and automatic peak datasource clearing on different H5 success.
 - [x] 6.5 Add GUI-focused tests for Resources window loading/failure/cancel row presentation where practical.
 - [x] 6.6 Run focused heatmap alignment tests through the Hatch-managed test environment and document any known Windows Qt teardown noise separately from assertion failures.
+
+## 7. Review Corrections
+
+- [x] 7.1 When a same-resource load supersedes a pending job, actively request cancellation of the superseded in-flight work, including terminating active preview-proxy ffmpeg processes when possible, so the newest request can start promptly instead of waiting for discarded work to finish.
+- [x] 7.2 On window close and session close, cancel or abandon active camera/H5 resource jobs, clear job board state and replacement backups, and prevent late completions from applying to a closed or reset workbench.
+- [x] 7.3 On successful camera replacement, when aspect ratio is incompatible or scaled viewport geometry is invalid, explicitly reset or repair native viewport corners to a valid default instead of retaining previous-camera corners that are out of bounds for the replacement source.
+- [x] 7.4 Add direct H5 replacement coverage: success apply, failure restore, safe ownership/handoff after worker load, automatic peak datasource clearing on different H5 success, and preserving prior H5/peaks on failed replacement.
+- [x] 7.5 Emit and present the `waiting` job phase while a resource job is queued behind bounded expensive-work slots, so Resources rows and overlays distinguish waiting from actively loading/building.
+- [x] 7.6 Carry the worker-computed resolved fixed color level in the H5 load payload (or equivalent immutable handoff data) so main-thread adoption does not repeat expensive color-level computation and reintroduce H5 UI freeze risk.
+- [x] 7.7 Discard and release stale or superseded pending job results promptly so ignored completions cannot retain record handles or other payload resources in manager state.
+- [x] 7.8 Clarify proxy success messaging (`proxy_built` vs `proxy_reused`) and document that large-camera proxy preparation requires ffmpeg; synchronous `prepare_proxy_video()` callers should treat missing ffmpeg as an explicit error rather than a full-resolution interactive fallback.

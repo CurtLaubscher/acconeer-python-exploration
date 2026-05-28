@@ -241,6 +241,10 @@ class LoadedH5ResourcePayload:
     subsweep_idx: int
     metadata: HeatmapTrack
     first_frame_shape: tuple[int, int]
+    color_min: float = 0.0
+    color_max: float | None = 3000.0
+    fixed_levels: bool = True
+    resolved_fixed_color_level: float | None = None
 
 
 def load_h5_resource_payload(
@@ -316,30 +320,44 @@ def load_h5_resource_payload(
         duration_s=record.duration_s,
         fps=record.fps,
     )
+    resolved_level: float | None = None
+    if fixed_levels:
+        resolved_level = resolved_color_max
+
     return LoadedH5ResourcePayload(
         path=h5_path,
         record=record,
         subsweep_idx=resolved_subsweep_idx,
         metadata=metadata,
         first_frame_shape=(first_frame.shape[0], first_frame.shape[1]),
+        color_min=color_min,
+        color_max=color_max,
+        fixed_levels=fixed_levels,
+        resolved_fixed_color_level=resolved_level,
     )
 
 
-def build_h5_truth_source_from_payload(
-    payload: LoadedH5ResourcePayload,
-    *,
-    color_min: float,
-    color_max: float | None,
-    fixed_levels: bool,
-) -> HeatmapTruthSource:
+def build_h5_truth_source_from_payload(payload: LoadedH5ResourcePayload) -> HeatmapTruthSource:
     return HeatmapTruthSource.from_loaded_record(
         payload.record,
         path=payload.path,
         subsweep_idx=payload.subsweep_idx,
-        color_min=color_min,
-        color_max=color_max,
-        fixed_levels=fixed_levels,
+        color_min=payload.color_min,
+        color_max=payload.color_max,
+        fixed_levels=payload.fixed_levels,
+        resolved_fixed_color_level=payload.resolved_fixed_color_level,
     )
+
+
+def release_resource_job_result(kind: ResourceJobKind, result: object) -> None:
+    """Release disposable resources held by an ignored or abandoned job result."""
+
+    if kind != "radar_h5" or not isinstance(result, LoadedH5ResourcePayload):
+        return
+    record = result.record
+    close = getattr(record, "close", None)
+    if callable(close):
+        close()
 
 
 @dataclass(frozen=True)
@@ -574,3 +592,23 @@ def resolve_replacement_viewport_corners(
     if _corners_within_bounds(scaled, new_w, new_h):
         return scaled.tolist()
     return None
+
+
+def replacement_viewport_needs_default_reset(
+    *,
+    previous_corners: list[list[float]] | None,
+    previous_native_size: tuple[int, int],
+    replacement_native_size: tuple[int, int],
+) -> bool:
+    """Return True when a replacement should reset viewport corners to defaults."""
+
+    if not previous_corners or previous_native_size == (0, 0):
+        return False
+    return (
+        resolve_replacement_viewport_corners(
+            existing_corners=previous_corners,
+            previous_native_size=previous_native_size,
+            replacement_native_size=replacement_native_size,
+        )
+        is None
+    )

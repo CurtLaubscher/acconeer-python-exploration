@@ -13,19 +13,26 @@ if str(USER_TOOLS_PATH) not in sys.path:
     sys.path.insert(0, str(USER_TOOLS_PATH))
 
 from heatmap_alignment_resource_jobs import (  # noqa: E402
+    LoadedH5ResourcePayload,
     ProxyBuildError,
     ResourceJobBoard,
     begin_resource_job,
+    build_h5_truth_source_from_payload,
     build_preview_proxy_video,
     complete_resource_job,
+    release_resource_job_result,
+    replacement_viewport_needs_default_reset,
     request_cancel_resource_job,
     resolve_replacement_viewport_corners,
     resource_job_blocks_export,
     should_apply_job_result,
 )
 from heatmap_alignment_core import (  # noqa: E402
+    HeatmapTrack,
+    HeatmapTruthSource,
     VideoProbe,
     _proxy_cache_path,
+    prepare_proxy_video,
 )
 
 
@@ -231,3 +238,138 @@ def test_cancel_request_marks_job_cancelling() -> None:
     assert request_cancel_resource_job(board, "camera") is True
     assert board.camera.phase == "cancelling"
     assert board.camera.cancel_requested is True
+
+
+def test_replacement_viewport_needs_default_reset_for_incompatible_aspect() -> None:
+    corners = [[100.0, 50.0], [900.0, 50.0], [900.0, 550.0], [100.0, 550.0]]
+
+    assert replacement_viewport_needs_default_reset(
+        previous_corners=corners,
+        previous_native_size=(1000, 600),
+        replacement_native_size=(1600, 900),
+    )
+
+
+def test_replacement_viewport_does_not_need_default_reset_for_first_load() -> None:
+    assert not replacement_viewport_needs_default_reset(
+        previous_corners=None,
+        previous_native_size=(0, 0),
+        replacement_native_size=(1920, 1080),
+    )
+
+
+def test_release_resource_job_result_closes_h5_record() -> None:
+    class _FakeRecord:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    record = _FakeRecord()
+    payload = LoadedH5ResourcePayload(
+        path=Path("trial.h5"),
+        record=record,
+        subsweep_idx=0,
+        metadata=HeatmapTrack(path="trial.h5"),
+        first_frame_shape=(10, 10),
+        resolved_fixed_color_level=123.0,
+    )
+
+    release_resource_job_result("radar_h5", payload)
+
+    assert record.closed is True
+
+
+def test_from_loaded_record_reuses_worker_resolved_color_level(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resolve_calls: list[str] = []
+
+    def _unexpected_resolve(self: HeatmapTruthSource) -> float:
+        resolve_calls.append("resolve")
+        return 1.0
+
+    monkeypatch.setattr(HeatmapTruthSource, "_resolve_fixed_color_level", _unexpected_resolve)
+
+    class _FakeRecord:
+        session_idx = 0
+        group_idx = 0
+        entry_idx = 0
+        duration_s = 1.0
+        fps = 1.0
+        results: list[object] = []
+
+        def close(self) -> None:
+            return None
+
+    source = HeatmapTruthSource.from_loaded_record(
+        _FakeRecord(),
+        path=Path("trial.h5"),
+        subsweep_idx=0,
+        resolved_fixed_color_level=321.0,
+    )
+
+    assert source._fixed_color_level == 321.0
+    assert resolve_calls == []
+
+
+def test_build_h5_truth_source_from_payload_uses_worker_color_level(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resolve_calls: list[str] = []
+
+    def _unexpected_resolve(self: HeatmapTruthSource) -> float:
+        resolve_calls.append("resolve")
+        return 1.0
+
+    monkeypatch.setattr(HeatmapTruthSource, "_resolve_fixed_color_level", _unexpected_resolve)
+
+    class _FakeRecord:
+        session_idx = 0
+        group_idx = 0
+        entry_idx = 0
+        duration_s = 1.0
+        fps = 1.0
+        results: list[object] = []
+
+        def close(self) -> None:
+            return None
+
+    payload = LoadedH5ResourcePayload(
+        path=Path("trial.h5"),
+        record=_FakeRecord(),
+        subsweep_idx=0,
+        metadata=HeatmapTrack(path="trial.h5"),
+        first_frame_shape=(10, 10),
+        resolved_fixed_color_level=456.0,
+    )
+
+    source = build_h5_truth_source_from_payload(payload)
+
+    assert source._fixed_color_level == 456.0
+    assert resolve_calls == []
+
+
+def test_prepare_proxy_video_requires_ffmpeg_for_large_sources(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import heatmap_alignment_core as core
+
+    source_path = tmp_path / "large.mp4"
+    source_path.write_bytes(b"source")
+    probe = VideoProbe(
+        path=source_path,
+        fps=30.0,
+        frame_count=300,
+        duration_s=10.0,
+        width=3840,
+        height=2160,
+    )
+
+    monkeypatch.setattr(core, "probe_video", lambda path: probe)
+    monkeypatch.setattr(core, "_find_ffmpeg", lambda: None)
+
+    with pytest.raises(RuntimeError, match="ffmpeg was not found"):
+        prepare_proxy_video(source_path, max_dimension=1280)

@@ -35,6 +35,22 @@ Rationale: cancellation may not stop immediately, especially for subprocess-back
 
 Alternative considered: block replacement until the prior job exits. This keeps state simpler but preserves the frustrating UI behavior and makes same-resource replacement feel slow.
 
+### Supersede and cancellation lifecycle
+
+When a same-resource load supersedes an earlier pending job, the manager must actively request cancellation of the superseded work, not only bump the generation token. For camera jobs this includes terminating an in-flight preview-proxy ffmpeg process when one is registered for the superseded generation. For H5 jobs this includes marking the superseded runnable cancelled so it stops holding the bounded H5 slot as soon as practical.
+
+Rationale: generation checks prevent stale session mutation, but leaving superseded ffmpeg/H5 work running still blocks bounded slots and makes newest-request-wins feel like waiting for the wrong file.
+
+Ignored or superseded successful completions must also discard their pending result payloads promptly so stale results do not retain HDF5-backed records or other resources in manager state.
+
+### Workbench close and session reset lifecycle
+
+Window close, session close, and other workbench reset paths that call `_close_sources()` must cancel or abandon active camera/H5 resource jobs before teardown completes. These paths must clear job board state and replacement backups so late worker completions cannot apply camera/H5 results to a closed or freshly reset session, and so replacement backups do not reference sources closed during reset.
+
+Rationale: generation tokens alone are insufficient if the workbench lifetime ends while jobs are still running.
+
+Alternative considered: wait synchronously for all jobs to finish on close. This is simpler to reason about but can hang shutdown on long proxy builds; cancel/abandon with ignored late results is the preferred trade-off.
+
 ### Keep Qt widgets and active session mutation on the main thread
 
 Background jobs should produce plain result payloads such as metadata, proxy path, warnings, loaded value objects that are safe to transfer, or error text. The main thread remains responsible for updating widgets and mutating the active session.
@@ -45,7 +61,9 @@ Rationale: Qt widgets are not thread-safe, and mutating the session from worker 
 
 H5 jobs must not construct a thread-owned `HeatmapTruthSource` and then hand that live HDF5-backed object to the UI thread. The implementation must either return immutable loaded data that is safe for UI ownership, or keep H5 access owned by a worker/actor thread with explicit asynchronous frame/render requests.
 
-Rationale: the measured H5 initialization cost is large enough to move off the GUI path, but HDF5/file-backed object ownership can be unsafe or unclear across threads. The change should remove the freeze without replacing it with thread-affinity bugs.
+The worker-loaded handoff payload should include any expensive derived render settings computed off-thread, especially the resolved fixed color level when auto color-max behavior is in effect, so main-thread adoption via `HeatmapTruthSource.from_loaded_record()` does not repeat a full recording scan and reintroduce the measured 2-6 second GUI freeze.
+
+Rationale: the measured H5 initialization cost is large enough to move off the GUI path, but HDF5/file-backed object ownership can be unsafe or unclear across threads. The change should remove the freeze without replacing it with thread-affinity bugs or duplicated main-thread initialization work.
 
 Alternative considered: have the worker validate/probe H5 and then let the UI construct the current `HeatmapTruthSource`. This avoids thread ownership risk but likely keeps the 2-6 second GUI freeze, so it does not satisfy the user-visible goal.
 
@@ -71,13 +89,13 @@ Rationale: existing proxy reuse is based on the final cache path existing. Writi
 
 ### Preserve viewport geometry for compatible camera replacements
 
-When a replacement camera has the same source dimensions as the active camera, the existing native viewport corners should be preserved exactly after the replacement succeeds. When dimensions differ but aspect ratio is compatible, the implementation may proportionally scale the native viewport if the result remains valid. When aspect ratio is incompatible or the scaled geometry is invalid, the viewport should be reset or repaired to a valid default.
+When a replacement camera has the same source dimensions as the active camera, the existing native viewport corners should be preserved exactly after the replacement succeeds. When dimensions differ but aspect ratio is compatible, the implementation may proportionally scale the native viewport if the result remains valid. When aspect ratio is incompatible or the scaled geometry is invalid, the implementation must reset or repair the viewport to a valid default and must not retain previous-camera corners that are out of bounds for the replacement source.
 
 Rationale: repeated trials from the same experiment are likely to have the heatmap display in roughly the same place, so preserving viewport placement saves work. Different aspect ratios may indicate cropping, padding, rotation, or a different capture layout where automatic scaling could look plausible but be wrong.
 
 ### Use bounded parallelism by job category
 
-The first implementation should allow camera and H5 work to overlap, but avoid unbounded concurrency. Proxy/transcode jobs should run one at a time. H5/resource-load jobs may run alongside one proxy job. Preview-frame jobs should use latest-request-wins behavior rather than queueing stale work.
+The first implementation should allow camera and H5 work to overlap, but avoid unbounded concurrency. Proxy/transcode jobs should run one at a time. H5/resource-load jobs may run alongside one proxy job. Preview-frame jobs should use latest-request-wins behavior rather than queueing stale work. When a job is blocked waiting for a bounded slot, present it as `waiting` rather than as actively loading/building.
 
 Rationale: ffmpeg proxy builds can consume substantial CPU/disk bandwidth. Bounded parallelism preserves responsiveness while still allowing useful cross-resource work.
 
@@ -95,7 +113,9 @@ Rationale: peak JSON is derived from a specific H5 source and is overwhelmingly 
 
 ## Risks / Trade-offs
 
-- [Risk] Background results apply after the user has requested a different file. -> Use per-resource generation tokens and ignore stale completions.
+- [Risk] Background results apply after the user has requested a different file. -> Use per-resource generation tokens, ignore stale completions, and discard superseded pending payloads promptly.
+- [Risk] Superseded proxy/ffmpeg work blocks newer same-resource loads. -> Actively cancel or terminate superseded in-flight work when a newer same-resource request starts.
+- [Risk] Late job completions mutate a closed or reset workbench. -> Cancel/abandon jobs and clear replacement backups during window close and session reset.
 - [Risk] Worker-owned OpenCV/HDF5 objects are unsafe to use from the main thread. -> Do not hand live thread-owned HDF5/OpenCV handles to the UI; use immutable loaded data or a worker-owned actor with explicit requests.
 - [Risk] Cancelled proxy generation leaves a partial cache file. -> Write to a temporary path and atomically promote only successful proxy output.
 - [Risk] Proxy failure leaves camera unusable. -> Report the proxy failure in the Resources window and affected camera panel; allow replacement/retry rather than silently falling back to full-resolution interaction.
@@ -114,4 +134,5 @@ Rationale: peak JSON is derived from a specific H5 source and is overwhelmingly 
 ## Open Questions
 
 - Should proxy progress be a real percentage if ffmpeg progress parsing is straightforward, or an indeterminate busy state for the first implementation?
-- Should current MAT and peak JSON loads be routed through the job manager immediately for consistency, or remain synchronous until larger files demonstrate a need?
+- Should current MAT and peak JSON loads be routed through the job manager immediately for consistency, or remain synchronous until larger files demonstrate a need? **Decision for this change:** keep MAT and peak JSON synchronous; only camera and H5 use the resource job manager here.
+- Should synchronous `prepare_proxy_video()` retain a non-interactive fallback when ffmpeg is unavailable? **Decision for this change:** large-camera proxy preparation is required; missing ffmpeg is an explicit error, not a full-resolution interactive fallback.

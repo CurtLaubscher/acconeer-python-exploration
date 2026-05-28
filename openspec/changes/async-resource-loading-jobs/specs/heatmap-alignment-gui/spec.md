@@ -26,6 +26,10 @@ The system SHALL treat a pending same-resource load request as replaceable by th
 - **WHEN** a camera video load is pending and the user starts loading another camera video
 - **THEN** the system supersedes the earlier pending camera load without asking the user to cancel it first
 
+#### Scenario: Cancel superseded in-flight camera work promptly
+- **WHEN** a camera video load is superseded while preview proxy generation or other in-flight camera preparation is still running
+- **THEN** the system actively requests cancellation of the superseded work, including terminating an active preview-proxy ffmpeg process when possible, so the newest camera load request is not blocked waiting for discarded work to finish
+
 #### Scenario: Ignore stale camera load result
 - **WHEN** a superseded camera load finishes after a newer camera load request has started
 - **THEN** the system ignores the stale result and does not apply it to the session or previews
@@ -54,6 +58,10 @@ The system SHALL treat a pending same-resource load request as replaceable by th
 - **WHEN** a replacement camera video successfully loads with different source dimensions than the previously active camera video
 - **THEN** the system either proportionally scales the existing viewport when the source aspect ratio is compatible and the scaled viewport remains valid, or resets or repairs the viewport to a valid default
 
+#### Scenario: Do not retain invalid viewport after incompatible camera replacement
+- **WHEN** a replacement camera video successfully loads and the previous viewport corners cannot be preserved or scaled into valid geometry for the replacement source dimensions
+- **THEN** the system resets or repairs the viewport to a valid default instead of retaining previous-camera corners that are out of bounds for the replacement source
+
 ### Requirement: Camera proxy readiness
 The system SHALL require a usable low-quality camera preview source before enabling normal camera playback and scrubbing for a newly loaded high-resolution camera video.
 
@@ -68,6 +76,10 @@ The system SHALL require a usable low-quality camera preview source before enabl
 #### Scenario: Report proxy generation failure
 - **WHEN** preview proxy generation fails for a camera video that requires a proxy
 - **THEN** the system marks the camera load as failed and exposes the failure reason in the resource UI without falling back to full-resolution interactive preview
+
+#### Scenario: Require ffmpeg for large-camera proxy preparation
+- **WHEN** a camera video requires preview proxy generation and ffmpeg is unavailable
+- **THEN** the system reports the camera load as failed with an explicit ffmpeg-missing reason rather than enabling full-resolution interactive preview as a fallback
 
 #### Scenario: Reuse cached proxy quickly
 - **WHEN** a camera video has an existing valid preview proxy
@@ -95,12 +107,20 @@ The system SHALL complete background H5 loading without transferring unsafe work
 - **WHEN** a background H5 load job succeeds
 - **THEN** the system does not perform another long-running H5 initialization step on the main GUI thread before presenting the loaded H5 resource
 
+#### Scenario: Reuse worker-computed H5 render settings on adoption
+- **WHEN** a background H5 load job computed resolved fixed color levels or other expensive render settings off the GUI thread
+- **THEN** the main thread adopts those worker-computed settings from the load payload instead of repeating the same expensive computation during resource application
+
 ### Requirement: Resource loading presentation
 The system SHALL present pending, failed, and cancelled resource work in the Resources window and affected preview panels.
 
 #### Scenario: Show loading resource row
 - **WHEN** a resource load or replacement is pending
 - **THEN** the Resources window shows that resource row as loading, building, waiting, or cancelling with the target filename visible
+
+#### Scenario: Show waiting while queued for bounded work
+- **WHEN** a resource job is accepted but blocked waiting for a bounded expensive-work slot such as the single preview-proxy transcode slot
+- **THEN** the Resources window and affected preview presentation show the job as waiting for that target filename rather than as actively loading or building
 
 #### Scenario: Show affected panel loading overlay
 - **WHEN** the camera or rendered heatmap preview cannot show the pending target resource yet
@@ -117,6 +137,21 @@ The system SHALL present pending, failed, and cancelled resource work in the Res
 #### Scenario: Cancel pending replacement
 - **WHEN** the user cancels a pending replacement for a resource that already has an active loaded value
 - **THEN** the system leaves the active loaded resource in effect and restores its usable preview state
+
+### Requirement: Workbench lifecycle during resource jobs
+The system SHALL cancel or abandon active camera and H5 resource jobs safely when the workbench is closed or reset so late completions cannot mutate a closed session.
+
+#### Scenario: Abandon jobs on window close
+- **WHEN** the main workbench window closes while a camera or H5 resource job is pending
+- **THEN** the system cancels or abandons those jobs, clears pending job state and replacement backups, and does not apply their completions to a later workbench instance
+
+#### Scenario: Abandon jobs on session close
+- **WHEN** the user closes the current session and returns to an empty workbench while a camera or H5 resource job is pending
+- **THEN** the system cancels or abandons those jobs, clears pending job state and replacement backups, and does not apply their completions to the reset session
+
+#### Scenario: Discard stale pending job payloads
+- **WHEN** a superseded or otherwise ignored camera or H5 job completion would leave a pending result payload unused
+- **THEN** the system discards that payload promptly so stale results cannot retain HDF5-backed records or other resources in manager state
 
 ### Requirement: H5 replacement clears peak datasource
 The system SHALL clear imported Radar Peak (JSON) datasource state when a different Radar Raw (H5) resource successfully replaces the current H5 recording.
