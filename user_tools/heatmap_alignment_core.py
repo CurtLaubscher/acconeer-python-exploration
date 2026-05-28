@@ -22,9 +22,9 @@ from typing import Any, Literal
 
 import cv2
 import numpy as np
-from scipy.io import loadmat
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
+from scipy.io import loadmat
 from sparse_iq_peak_distance_core import (
     STATUS_DETECTED,
     FramePeakMeasurement,
@@ -1936,9 +1936,7 @@ def _resource_actions(
         actions.extend(("replace", "unload"))
 
     if path_text:
-        if status in ("missing", "invalid", "unloaded"):
-            actions.append("reload")
-        elif status in ("loaded", "warning"):
+        if status in ("missing", "invalid", "unloaded") or status in ("loaded", "warning"):
             actions.append("reload")
         actions.append("reveal")
 

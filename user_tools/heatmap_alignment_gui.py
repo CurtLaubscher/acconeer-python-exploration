@@ -33,37 +33,36 @@ from typing import Literal
 import cv2
 import numpy as np
 from heatmap_alignment_core import (
-    AlignmentResourceRuntime,
     H5_TIMELINE_TRACK_COLOR_HEX,
     LEG2_TIMELINE_TRACK_COLOR_HEX,
-    ResourceAction,
-    ResourceKind,
-    ResourceSummary,
-    build_alignment_resource_summaries,
-    elide_path_middle,
+    SIGNAL_PLAYHEAD_ALPHA,
     SIGNAL_PLOT_BACKGROUND_HEX,
     SIGNAL_PLOT_NO_DETECTION_ALPHA,
     SIGNAL_PLOT_PRIMARY_SEGMENT_ALPHA,
-    SIGNAL_PLAYHEAD_ALPHA,
     TIMELINE_PLAYHEAD_COLOR_HEX,
+    AlignmentResourceRuntime,
     AlignmentSession,
     CameraTrack,
     CameraVideoSource,
-    HeatmapTrack,
     ExportOverlaySettings,
     HeatmapPlotRenderer,
+    HeatmapTrack,
     HeatmapTruthSource,
     Leg2MatImportError,
-    Leg2UltrasonicSignalKind,
     Leg2UltrasonicSignalSeries,
     LoadedLeg2UltrasonicDatasource,
     LoadedPeakDistanceDatasource,
     PeakDistanceSignalSeries,
+    ResourceAction,
+    ResourceKind,
+    ResourceSummary,
     SignalPlotViewSettings,
     apply_viewport_visibility,
+    build_alignment_resource_summaries,
     build_leg2_ultrasonic_signal_series,
     build_peak_distance_signal_series,
     derive_signal_plot_color,
+    elide_path_middle,
     import_leg2_mat_for_heatmap,
     import_peak_distance_json_for_heatmap,
     load_alignment_session,
@@ -84,8 +83,8 @@ from sparse_iq_peak_distance_core import (
 )
 
 from PySide6 import QtCore, QtGui, QtWidgets
-from PySide6.QtGui import QDesktopServices
 from PySide6.QtCore import QUrl
+from PySide6.QtGui import QDesktopServices
 
 import pyqtgraph as pg
 
@@ -3987,16 +3986,15 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         )
 
         truth_frame = None
-        if self.heatmap_source is not None:
-            if (
-                0.0
-                <= self.session.timeline.current_time_s
-                <= self.session.heatmap_track.duration_s
-            ):
-                frame_idx, truth_frame = self.heatmap_source.frame_at_seconds(
-                    self.session.timeline.current_time_s
-                )
-                truth_frame = self._annotate_truth_frame_with_peak(truth_frame, frame_idx)
+        if self.heatmap_source is not None and (
+            0.0
+            <= self.session.timeline.current_time_s
+            <= self.session.heatmap_track.duration_s
+        ):
+            frame_idx, truth_frame = self.heatmap_source.frame_at_seconds(
+                self.session.timeline.current_time_s
+            )
+            truth_frame = self._annotate_truth_frame_with_peak(truth_frame, frame_idx)
         self.truth_view.set_frame(truth_frame)
         if (
             not self.session.export_overlay.visible
