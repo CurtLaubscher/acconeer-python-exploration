@@ -934,11 +934,13 @@ def _write_sample_leg2_mat(
     distance_mm = np.array([1200.0, 1500.0, np.nan], dtype=np.float64)
     filtered_mm = np.array([1180.0, 1490.0, 1600.0], dtype=np.float64)
     reliable_flag = np.array([1.0, 0.0, 1.0], dtype=np.float64)
+    robust_fc = np.array([1.0, 1.0, 0.0], dtype=np.float64)
     if include_trailing_zero_time:
         time_out = np.append(time_out, 0.0)
         distance_mm = np.append(distance_mm, 999.0)
         filtered_mm = np.append(filtered_mm, 999.0)
         reliable_flag = np.append(reliable_flag, 1.0)
+        robust_fc = np.append(robust_fc, 0.0)
     savemat(
         path,
         {
@@ -946,6 +948,7 @@ def _write_sample_leg2_mat(
                 "timeOut": time_out,
                 "ultrasonic_filtered": filtered_mm,
                 "ReliableFlag": reliable_flag,
+                "robustFC": robust_fc,
             },
             "Ultrasonic": {"Distance": distance_mm},
         },
@@ -985,6 +988,7 @@ def test_load_leg2_mat_ultrasonic_requires_filtered_signal(tmp_path: Path) -> No
             "DataRecordCommon": {
                 "timeOut": np.array([1.0, 2.0, 3.0], dtype=np.float64),
                 "ReliableFlag": np.array([1.0, 1.0, 1.0], dtype=np.float64),
+                "robustFC": np.array([1.0, 1.0, 0.0], dtype=np.float64),
             },
             "Ultrasonic": {"Distance": np.array([1000.0, 1100.0, 1200.0], dtype=np.float64)},
         },
@@ -1002,6 +1006,7 @@ def test_load_leg2_mat_ultrasonic_requires_reliable_flag(tmp_path: Path) -> None
             "DataRecordCommon": {
                 "timeOut": np.array([1.0, 2.0, 3.0], dtype=np.float64),
                 "ultrasonic_filtered": np.array([1000.0, 1100.0, 1200.0], dtype=np.float64),
+                "robustFC": np.array([1.0, 1.0, 0.0], dtype=np.float64),
             },
             "Ultrasonic": {"Distance": np.array([1000.0, 1100.0, 1200.0], dtype=np.float64)},
         },
@@ -1020,6 +1025,7 @@ def test_load_leg2_mat_ultrasonic_rejects_length_mismatch(tmp_path: Path) -> Non
                 "timeOut": np.array([1.0, 2.0, 3.0], dtype=np.float64),
                 "ultrasonic_filtered": np.array([1000.0, 1100.0], dtype=np.float64),
                 "ReliableFlag": np.array([1.0, 1.0, 1.0], dtype=np.float64),
+                "robustFC": np.array([1.0, 1.0, 0.0], dtype=np.float64),
             },
             "Ultrasonic": {"Distance": np.array([1000.0, 1100.0, 1200.0], dtype=np.float64)},
         },
