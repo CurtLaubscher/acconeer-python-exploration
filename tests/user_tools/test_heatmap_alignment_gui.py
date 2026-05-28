@@ -641,6 +641,17 @@ def test_resource_summaries_expose_waiting_job_state() -> None:
     assert "replacement.mp4" in camera_summary.details
 
 
+def test_resource_loading_overlays_support_empty_camera_view(
+    qapplication: QApplication,
+) -> None:
+    window = HeatmapAlignmentWindow()
+
+    window._update_resource_loading_overlays()
+
+    assert window.camera_view._loading_overlay_active is False
+    assert window.truth_view._loading_overlay_active is False
+
+
 def test_resource_job_manager_supersede_cancels_prior_generation(
     qapplication: QApplication,
 ) -> None:

@@ -104,6 +104,10 @@ Possible directions:
 - Consider making existing offset controls apply to the currently selected track or selected linked group instead of being permanently camera-specific.
 - Allow track offsets to be typed directly, possibly by making the offset value shown beside each timeline track bar editable in place.
 
+### Session lifecycle polish
+
+The current Close Session action asks for confirmation even when the workbench is already an untitled empty session. A future polish pass should detect this no-op state and either disable the action or close/reset silently without showing "Close the current session and return to an untitled empty workbench?".
+
 ### Peak-distance datasource and Calculate Peaks
 
 Add support for derived peak-distance measurements generated from recorded H5 Sparse IQ logs.

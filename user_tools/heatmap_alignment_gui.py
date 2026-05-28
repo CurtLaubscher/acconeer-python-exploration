@@ -1513,10 +1513,25 @@ class CornerEditorWidget(QtWidgets.QWidget):
         self._overlay_drag_center = False
         self._overlay_drag_anchor_image_pos: QtCore.QPointF | None = None
         self._overlay_drag_start_rect: QtCore.QRectF | None = None
+        self._loading_overlay_active = False
+        self._loading_overlay_message = ""
+        self._dim_content = False
 
     def set_frame(self, frame_rgb: np.ndarray | None) -> None:
         self._frame_rgb = frame_rgb
         self._pixmap = rgb_to_qpixmap(frame_rgb) if frame_rgb is not None else None
+        self.update()
+
+    def set_loading_overlay(
+        self,
+        active: bool,
+        message: str = "",
+        *,
+        dim_content: bool = True,
+    ) -> None:
+        self._loading_overlay_active = active
+        self._loading_overlay_message = message
+        self._dim_content = dim_content
         self.update()
 
     def set_corners(self, corners: list[list[float]] | np.ndarray | None) -> None:
@@ -1581,12 +1596,17 @@ class CornerEditorWidget(QtWidgets.QWidget):
                     QtCore.Qt.AlignmentFlag.AlignCenter,
                     "Camera Video",
                 )
+                self._paint_loading_overlay(painter)
                 return
 
             target_rect = self._target_rect()
+            if self._loading_overlay_active and self._dim_content:
+                painter.setOpacity(0.35)
             painter.drawPixmap(target_rect.toRect(), self._pixmap)
+            painter.setOpacity(1.0)
             self._paint_export_overlay(painter)
             if self._corners is None:
+                self._paint_loading_overlay(painter)
                 return
 
             display_corners = [
@@ -1600,8 +1620,23 @@ class CornerEditorWidget(QtWidgets.QWidget):
             painter.setBrush(brush)
             for point in display_corners:
                 painter.drawEllipse(point, self._handle_radius, self._handle_radius)
+            self._paint_loading_overlay(painter)
         finally:
             painter.end()
+
+    def _paint_loading_overlay(self, painter: QtGui.QPainter) -> None:
+        if not self._loading_overlay_active:
+            return
+        painter.fillRect(
+            self.rect(),
+            QtGui.QColor(15, 23, 32, 180),
+        )
+        painter.setPen(QtGui.QColor("#d7dde6"))
+        painter.drawText(
+            self.rect(),
+            int(QtCore.Qt.AlignmentFlag.AlignCenter),
+            self._loading_overlay_message or "Loading...",
+        )
 
     def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:
         if self._frame_rgb is None:
