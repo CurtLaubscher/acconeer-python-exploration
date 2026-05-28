@@ -657,7 +657,7 @@ class SignalPlotWidget(pg.PlotWidget):
                 self._leg2_faded_curve,
                 str(self._leg2_faded_curve.opts.get("name", "Leg2 ultrasonic (not valid)")),
             )
-            stance_legend_item = pg.GraphicsRectItem(QtCore.QRectF(0, 0, 1, 1))
+            stance_legend_item = QtWidgets.QGraphicsRectItem(QtCore.QRectF(0, 0, 1, 1))
             patch_color = _plot_color_with_alpha(self._leg2_plot_color, self._leg2_plot_alpha)
             qcolor = QtGui.QColor(patch_color)
             stance_legend_item.setPen(pg.mkPen(None))
@@ -699,7 +699,7 @@ class SignalPlotWidget(pg.PlotWidget):
                 float(end_s - start_s),
                 float(y_max - y_min),
             )
-            patch = pg.GraphicsRectItem(rect)
+            patch = QtWidgets.QGraphicsRectItem(rect)
             patch.setPen(pg.mkPen(None))
             patch.setBrush(pg.mkBrush(qcolor))
             patch.setZValue(-1)
