@@ -657,11 +657,10 @@ class SignalPlotWidget(pg.PlotWidget):
                 self._leg2_faded_curve,
                 str(self._leg2_faded_curve.opts.get("name", "Leg2 ultrasonic (not valid)")),
             )
-            stance_legend_item = QtWidgets.QGraphicsRectItem(QtCore.QRectF(0, 0, 1, 1))
+            stance_legend_item = QtWidgets.QGraphicsRectItem(QtCore.QRectF(0, 0, 15, 15))
             patch_color = _plot_color_with_alpha(self._leg2_plot_color, self._leg2_plot_alpha)
-            qcolor = QtGui.QColor(patch_color)
             stance_legend_item.setPen(pg.mkPen(None))
-            stance_legend_item.setBrush(pg.mkBrush(qcolor))
+            stance_legend_item.setBrush(pg.mkBrush(patch_color))
             legend.addItem(stance_legend_item, "Stance phase")
         legend.setVisible(self._peak_visible or self._leg2_visible)
 
@@ -693,20 +692,28 @@ class SignalPlotWidget(pg.PlotWidget):
         for start_s, end_s in zip(
             stance_intervals.start_times_s, stance_intervals.end_times_s
         ):
-            patch = pg.LinearRegionItem(
-                values=(float(start_s), float(end_s)),
-                orientation="vertical",
-                brush=qbrush,
-                pen=pg.mkPen(None),
+            rect = QtCore.QRectF(
+                float(start_s),
+                float(y_min),
+                float(end_s - start_s),
+                float(0 - y_min),
             )
+            patch = QtWidgets.QGraphicsRectItem(rect)
+            patch.setPen(pg.mkPen(None))
+            patch.setBrush(qbrush)
             patch.setZValue(-1)
             view_box.addItem(patch)
             self._stance_patch_items.append(patch)
 
     def _update_stance_patches_on_y_range(self) -> None:
-        """Update stance patch x-ranges when time view changes (LinearRegionItem handles y automatically)."""
+        """Update stance patch y-values when y-limits change."""
         if not self._stance_patch_items or self._leg2_series is None:
             return
+
+        plot_item = self.getPlotItem()
+        view_box = plot_item.getViewBox()
+        view_range = view_box.viewRange()
+        y_min, y_max = view_range[1]
 
         stance_intervals = self._leg2_series.stance_intervals
         for patch_item, start_s, end_s in zip(
@@ -714,7 +721,13 @@ class SignalPlotWidget(pg.PlotWidget):
             stance_intervals.start_times_s,
             stance_intervals.end_times_s,
         ):
-            patch_item.setRegion((float(start_s), float(end_s)))
+            rect = QtCore.QRectF(
+                float(start_s),
+                float(y_min),
+                float(end_s - start_s),
+                float(0 - y_min),
+            )
+            patch_item.setRect(rect)
 
     def _configure_range_mode_menu(self, view_box: pg.ViewBox) -> None:
         menu = view_box.menu
