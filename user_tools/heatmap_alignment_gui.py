@@ -688,33 +688,25 @@ class SignalPlotWidget(pg.PlotWidget):
         y_min, y_max = view_range[1]
 
         patch_color = _plot_color_with_alpha(self._leg2_plot_color, self._leg2_plot_alpha)
-        qcolor = QtGui.QColor(patch_color)
+        qbrush = pg.mkBrush(patch_color)
 
         for start_s, end_s in zip(
             stance_intervals.start_times_s, stance_intervals.end_times_s
         ):
-            rect = QtCore.QRectF(
-                float(start_s),
-                float(y_min),
-                float(end_s - start_s),
-                float(y_max - y_min),
+            patch = pg.LinearRegionItem(
+                values=(float(start_s), float(end_s)),
+                orientation="vertical",
+                brush=qbrush,
+                pen=pg.mkPen(None),
             )
-            patch = QtWidgets.QGraphicsRectItem(rect)
-            patch.setPen(pg.mkPen(None))
-            patch.setBrush(pg.mkBrush(qcolor))
             patch.setZValue(-1)
-            plot_item.addItem(patch)
+            view_box.addItem(patch)
             self._stance_patch_items.append(patch)
 
     def _update_stance_patches_on_y_range(self) -> None:
-        """Update stance patch y-values when y-limits change."""
+        """Update stance patch x-ranges when time view changes (LinearRegionItem handles y automatically)."""
         if not self._stance_patch_items or self._leg2_series is None:
             return
-
-        plot_item = self.getPlotItem()
-        view_box = plot_item.getViewBox()
-        view_range = view_box.viewRange()
-        y_min, y_max = view_range[1]
 
         stance_intervals = self._leg2_series.stance_intervals
         for patch_item, start_s, end_s in zip(
@@ -722,13 +714,7 @@ class SignalPlotWidget(pg.PlotWidget):
             stance_intervals.start_times_s,
             stance_intervals.end_times_s,
         ):
-            rect = QtCore.QRectF(
-                float(start_s),
-                float(y_min),
-                float(end_s - start_s),
-                float(y_max - y_min),
-            )
-            patch_item.setRect(rect)
+            patch_item.setRegion((float(start_s), float(end_s)))
 
     def _configure_range_mode_menu(self, view_box: pg.ViewBox) -> None:
         menu = view_box.menu
