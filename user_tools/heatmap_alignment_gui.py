@@ -33,37 +33,36 @@ from typing import Literal
 import cv2
 import numpy as np
 from heatmap_alignment_core import (
-    AlignmentResourceRuntime,
     H5_TIMELINE_TRACK_COLOR_HEX,
     LEG2_TIMELINE_TRACK_COLOR_HEX,
-    ResourceAction,
-    ResourceKind,
-    ResourceSummary,
-    build_alignment_resource_summaries,
-    elide_path_middle,
+    SIGNAL_PLAYHEAD_ALPHA,
     SIGNAL_PLOT_BACKGROUND_HEX,
     SIGNAL_PLOT_NO_DETECTION_ALPHA,
     SIGNAL_PLOT_PRIMARY_SEGMENT_ALPHA,
-    SIGNAL_PLAYHEAD_ALPHA,
     TIMELINE_PLAYHEAD_COLOR_HEX,
+    AlignmentResourceRuntime,
     AlignmentSession,
     CameraTrack,
     CameraVideoSource,
-    HeatmapTrack,
     ExportOverlaySettings,
     HeatmapPlotRenderer,
+    HeatmapTrack,
     HeatmapTruthSource,
     Leg2MatImportError,
-    Leg2UltrasonicSignalKind,
     Leg2UltrasonicSignalSeries,
     LoadedLeg2UltrasonicDatasource,
     LoadedPeakDistanceDatasource,
     PeakDistanceSignalSeries,
+    ResourceAction,
+    ResourceKind,
+    ResourceSummary,
     SignalPlotViewSettings,
     apply_viewport_visibility,
+    build_alignment_resource_summaries,
     build_leg2_ultrasonic_signal_series,
     build_peak_distance_signal_series,
     derive_signal_plot_color,
+    elide_path_middle,
     import_leg2_mat_for_heatmap,
     import_peak_distance_json_for_heatmap,
     load_alignment_session,
@@ -84,8 +83,8 @@ from sparse_iq_peak_distance_core import (
 )
 
 from PySide6 import QtCore, QtGui, QtWidgets
-from PySide6.QtGui import QDesktopServices
 from PySide6.QtCore import QUrl
+from PySide6.QtGui import QDesktopServices
 
 import pyqtgraph as pg
 
@@ -490,10 +489,13 @@ class SignalPlotWidget(pg.PlotWidget):
         self._peak_visible = False
         self._leg2_visible = False
         self._applying_view = False
+        self._stance_patch_items: list[QtWidgets.QGraphicsItem] = []
         h5_plot_color = derive_signal_plot_color(H5_TIMELINE_TRACK_COLOR_HEX)
         leg2_plot_color = derive_signal_plot_color(LEG2_TIMELINE_TRACK_COLOR_HEX)
         detected_pen, candidate_pen = _make_h5_signal_plot_pens(h5_plot_color)
         primary_pen, faded_pen = _make_leg2_signal_plot_pens(leg2_plot_color)
+        self._leg2_plot_color = leg2_plot_color
+        self._leg2_plot_alpha = SIGNAL_PLOT_PRIMARY_SEGMENT_ALPHA
         self._candidate_curve = self.plot(
             pen=candidate_pen,
             connect="finite",
@@ -631,8 +633,10 @@ class SignalPlotWidget(pg.PlotWidget):
             self._leg2_primary_curve.setData([], [])
             self._leg2_faded_curve.setData([], [])
 
+        self._render_stance_patches()
         self._sync_signal_plot_legend()
         self._apply_view_settings()
+        self._update_stance_patches_on_y_range()
         self.axis_geometry_sync_requested.emit()
 
     def _sync_signal_plot_legend(self) -> None:
@@ -653,7 +657,78 @@ class SignalPlotWidget(pg.PlotWidget):
                 self._leg2_faded_curve,
                 str(self._leg2_faded_curve.opts.get("name", "Leg2 ultrasonic (not valid)")),
             )
+            stance_legend_item = QtWidgets.QGraphicsRectItem(QtCore.QRectF(0, 0, 15, 15))
+            patch_color = _plot_color_with_alpha(self._leg2_plot_color, self._leg2_plot_alpha)
+            stance_legend_item.setPen(pg.mkPen(None))
+            stance_legend_item.setBrush(pg.mkBrush(patch_color))
+            legend.addItem(stance_legend_item, "Stance phase")
         legend.setVisible(self._peak_visible or self._leg2_visible)
+
+    def _clear_stance_patches(self) -> None:
+        """Remove all stance phase patch items from the plot."""
+        plot_item = self.getPlotItem()
+        view_box = plot_item.getViewBox()
+        for item in self._stance_patch_items:
+            view_box.removeItem(item)
+        self._stance_patch_items.clear()
+
+    def _render_stance_patches(self) -> None:
+        """Render stance phase patches on the plot from leg2_series.stance_intervals."""
+        self._clear_stance_patches()
+        if not self._leg2_visible or self._leg2_series is None:
+            return
+
+        stance_intervals = self._leg2_series.stance_intervals
+        if stance_intervals.start_times_s.size == 0:
+            return
+
+        plot_item = self.getPlotItem()
+        view_box = plot_item.getViewBox()
+        view_range = view_box.viewRange()
+        y_min = view_range[1][0]
+
+        patch_color = _plot_color_with_alpha(self._leg2_plot_color, self._leg2_plot_alpha)
+        qbrush = pg.mkBrush(patch_color)
+
+        for start_s, end_s in zip(
+            stance_intervals.start_times_s, stance_intervals.end_times_s
+        ):
+            rect = QtCore.QRectF(
+                float(start_s),
+                float(y_min),
+                float(end_s - start_s),
+                float(0 - y_min),
+            )
+            patch = QtWidgets.QGraphicsRectItem(rect)
+            patch.setPen(pg.mkPen(None))
+            patch.setBrush(qbrush)
+            patch.setZValue(-1)
+            view_box.addItem(patch)
+            self._stance_patch_items.append(patch)
+
+    def _update_stance_patches_on_y_range(self) -> None:
+        """Update stance patch y-values when y-limits change."""
+        if not self._stance_patch_items or self._leg2_series is None:
+            return
+
+        plot_item = self.getPlotItem()
+        view_box = plot_item.getViewBox()
+        view_range = view_box.viewRange()
+        y_min = view_range[1][0]
+
+        stance_intervals = self._leg2_series.stance_intervals
+        for patch_item, start_s, end_s in zip(
+            self._stance_patch_items,
+            stance_intervals.start_times_s,
+            stance_intervals.end_times_s,
+        ):
+            rect = QtCore.QRectF(
+                float(start_s),
+                float(y_min),
+                float(end_s - start_s),
+                float(0 - y_min),
+            )
+            patch_item.setRect(rect)
 
     def _configure_range_mode_menu(self, view_box: pg.ViewBox) -> None:
         menu = view_box.menu
@@ -839,6 +914,7 @@ class SignalPlotWidget(pg.PlotWidget):
                 self._apply_y_auto_range()
             finally:
                 self._applying_view = False
+        self._update_stance_patches_on_y_range()
         if changed:
             self.view_settings_changed.emit()
 
@@ -3910,16 +3986,15 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         )
 
         truth_frame = None
-        if self.heatmap_source is not None:
-            if (
-                0.0
-                <= self.session.timeline.current_time_s
-                <= self.session.heatmap_track.duration_s
-            ):
-                frame_idx, truth_frame = self.heatmap_source.frame_at_seconds(
-                    self.session.timeline.current_time_s
-                )
-                truth_frame = self._annotate_truth_frame_with_peak(truth_frame, frame_idx)
+        if self.heatmap_source is not None and (
+            0.0
+            <= self.session.timeline.current_time_s
+            <= self.session.heatmap_track.duration_s
+        ):
+            frame_idx, truth_frame = self.heatmap_source.frame_at_seconds(
+                self.session.timeline.current_time_s
+            )
+            truth_frame = self._annotate_truth_frame_with_peak(truth_frame, frame_idx)
         self.truth_view.set_frame(truth_frame)
         if (
             not self.session.export_overlay.visible

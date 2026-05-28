@@ -22,9 +22,9 @@ from typing import Any, Literal
 
 import cv2
 import numpy as np
-from scipy.io import loadmat
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
+from scipy.io import loadmat
 from sparse_iq_peak_distance_core import (
     STATUS_DETECTED,
     FramePeakMeasurement,
@@ -141,6 +141,7 @@ class LoadedLeg2UltrasonicDatasource:
     raw_distance_m: np.ndarray
     filtered_distance_m: np.ndarray
     reliable_flag_mask: np.ndarray
+    stance_phase_mask: np.ndarray
     duration_s: float
 
 
@@ -153,11 +154,24 @@ class PeakDistanceSignalSeries:
 
 
 @dataclass(frozen=True)
+class Leg2StanceIntervals:
+    """Stance phase intervals from robustFC mask.
+
+    Represents gait stance phases (foot in contact) as time intervals,
+    with track offset already applied. Used to render filled patches on
+    the Signals plot as a temporal context aid for manual alignment.
+    """
+    start_times_s: np.ndarray
+    end_times_s: np.ndarray
+
+
+@dataclass(frozen=True)
 class Leg2UltrasonicSignalSeries:
     primary_time_s: np.ndarray
     primary_distance_m: np.ndarray
     faded_time_s: np.ndarray
     faded_distance_m: np.ndarray
+    stance_intervals: Leg2StanceIntervals
 
 
 class Leg2MatImportError(ValueError):
@@ -496,6 +510,7 @@ def load_leg2_mat_ultrasonic(mat_path: Path) -> LoadedLeg2UltrasonicDatasource:
         ("Ultrasonic", "Distance"),
         ("DataRecordCommon", "ultrasonic_filtered"),
         ("DataRecordCommon", "ReliableFlag"),
+        ("DataRecordCommon", "robustFC"),
     )
     extracted: dict[tuple[str, str], Any] = {}
     for struct_name, field_name in required_paths:
@@ -528,6 +543,10 @@ def load_leg2_mat_ultrasonic(mat_path: Path) -> LoadedLeg2UltrasonicDatasource:
             extracted[("DataRecordCommon", "ReliableFlag")],
             field_label="DataRecordCommon.ReliableFlag",
         )
+        robust_fc = _read_mat_1d_bool_array(
+            extracted[("DataRecordCommon", "robustFC")],
+            field_label="DataRecordCommon.robustFC",
+        )
     except Leg2MatImportError:
         raise
     except (KeyError, TypeError, ValueError) as exc:
@@ -540,17 +559,19 @@ def load_leg2_mat_ultrasonic(mat_path: Path) -> LoadedLeg2UltrasonicDatasource:
         "Ultrasonic.Distance": raw_distance_mm.size,
         "DataRecordCommon.ultrasonic_filtered": filtered_distance_mm.size,
         "DataRecordCommon.ReliableFlag": reliable_flag_mask.size,
+        "DataRecordCommon.robustFC": robust_fc.size,
     }
     unique_lengths = set(lengths.values())
     if len(unique_lengths) != 1:
         detail = ", ".join(f"{name}={count}" for name, count in lengths.items())
         raise _leg2_mat_import_error(f"Incompatible array lengths after cleanup: {detail}")
 
-    time_s, (raw_distance_mm, filtered_distance_mm, reliable_flag_mask) = _trim_trailing_zero_time_samples(
+    time_s, (raw_distance_mm, filtered_distance_mm, reliable_flag_mask, robust_fc) = _trim_trailing_zero_time_samples(
         time_raw,
         raw_distance_mm,
         filtered_distance_mm,
         reliable_flag_mask,
+        robust_fc,
     )
     _validate_increasing_time_axis(time_s)
 
@@ -566,6 +587,7 @@ def load_leg2_mat_ultrasonic(mat_path: Path) -> LoadedLeg2UltrasonicDatasource:
         raw_distance_m=raw_distance_m.astype(np.float64, copy=False),
         filtered_distance_m=filtered_distance_m.astype(np.float64, copy=False),
         reliable_flag_mask=reliable_flag_mask.astype(bool, copy=False),
+        stance_phase_mask=robust_fc.astype(bool, copy=False),
         duration_s=duration_s,
     )
 
@@ -578,6 +600,50 @@ def _plottable_leg2_distance_m(distance_m: float) -> float | None:
     if not math.isfinite(distance_m):
         return None
     return float(distance_m)
+
+
+def _compute_leg2_stance_intervals(
+    time_s: np.ndarray,
+    stance_phase_mask: np.ndarray,
+    offset_s: float,
+) -> Leg2StanceIntervals:
+    """Compute stance intervals from robustFC mask using rising/falling edge detection.
+
+    Intervals span from time_s[i] where stance starts to time_s[i] where stance ends.
+    Treat first time step as implicit rising edge if recording starts in stance (stance_phase_mask[0]==1),
+    and last time step as implicit falling edge if recording ends in stance (stance_phase_mask[-1]==1).
+    """
+    if time_s.size == 0:
+        return Leg2StanceIntervals(
+            start_times_s=np.asarray([], dtype=np.float64),
+            end_times_s=np.asarray([], dtype=np.float64),
+        )
+
+    track_start_s = -offset_s
+    start_times: list[float] = []
+    end_times: list[float] = []
+
+    # Detect rising and falling edges in stance phase mask.
+    # Track offset is applied to all time values so intervals move with the signal.
+    for i in range(len(stance_phase_mask)):
+        is_stance = stance_phase_mask[i]
+        is_prev_stance = stance_phase_mask[i - 1] if i > 0 else False
+
+        # Detect rising edge (0 -> 1 or implicit at start)
+        if is_stance and not is_prev_stance:
+            start_times.append(float(time_s[i]) + track_start_s)
+
+        # Detect falling edge (1 -> 0 or implicit at end)
+        if not is_stance and is_prev_stance:
+            end_times.append(float(time_s[i - 1]) + track_start_s)
+        elif is_stance and i == len(stance_phase_mask) - 1:
+            # Implicit falling edge at end if recording ends in stance
+            end_times.append(float(time_s[i]) + track_start_s)
+
+    return Leg2StanceIntervals(
+        start_times_s=np.asarray(start_times, dtype=np.float64),
+        end_times_s=np.asarray(end_times, dtype=np.float64),
+    )
 
 
 def build_leg2_ultrasonic_signal_series(
@@ -652,11 +718,18 @@ def build_leg2_ultrasonic_signal_series(
             faded_time_s.append(aligned_time_s)
             faded_distance_m.append(plottable_distance_m)
 
+    stance_intervals = _compute_leg2_stance_intervals(
+        datasource.time_s,
+        datasource.stance_phase_mask,
+        offset_s,
+    )
+
     return Leg2UltrasonicSignalSeries(
         primary_time_s=np.asarray(primary_time_s, dtype=np.float64),
         primary_distance_m=np.asarray(primary_distance_m, dtype=np.float64),
         faded_time_s=np.asarray(faded_time_s, dtype=np.float64),
         faded_distance_m=np.asarray(faded_distance_m, dtype=np.float64),
+        stance_intervals=stance_intervals,
     )
 
 
@@ -1863,9 +1936,7 @@ def _resource_actions(
         actions.extend(("replace", "unload"))
 
     if path_text:
-        if status in ("missing", "invalid", "unloaded"):
-            actions.append("reload")
-        elif status in ("loaded", "warning"):
+        if status in ("missing", "invalid", "unloaded") or status in ("loaded", "warning"):
             actions.append("reload")
         actions.append("reveal")
 

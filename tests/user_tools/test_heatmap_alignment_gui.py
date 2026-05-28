@@ -33,6 +33,7 @@ from heatmap_alignment_core import (  # noqa: E402
     AlignmentSession,
     CameraTrack,
     HeatmapTrack,
+    Leg2StanceIntervals,
     Leg2UltrasonicDatasourceSettings,
     Leg2UltrasonicSignalSeries,
     PeakDistanceSignalSeries,
@@ -196,6 +197,7 @@ def test_startup_mat_overrides_session_leg2_path(tmp_path: Path, qapplication: Q
                     "timeOut": np.array([0.0, 1.0, 2.0], dtype=np.float64),
                     "ultrasonic_filtered": np.array([1000.0, 1100.0, 1200.0], dtype=np.float64),
                     "ReliableFlag": np.array([1.0, 1.0, 1.0], dtype=np.float64),
+                    "robustFC": np.array([1.0, 1.0, 0.0], dtype=np.float64),
                 },
                 "Ultrasonic": {"Distance": np.array([1000.0, 1100.0, 1200.0], dtype=np.float64)},
             },
@@ -228,6 +230,10 @@ def _sample_leg2_signal_series() -> Leg2UltrasonicSignalSeries:
         primary_distance_m=np.array([1.2, 1.3], dtype=np.float64),
         faded_time_s=np.array([0.5, np.nan], dtype=np.float64),
         faded_distance_m=np.array([1.25, np.nan], dtype=np.float64),
+        stance_intervals=Leg2StanceIntervals(
+            start_times_s=np.array([], dtype=np.float64),
+            end_times_s=np.array([], dtype=np.float64),
+        ),
     )
 
 
@@ -254,6 +260,7 @@ def test_signal_plot_legend_shows_leg2_valid_and_not_valid_labels(
     assert _legend_item_labels(legend) == [
         "Leg2 raw ultrasonic (valid)",
         "Leg2 raw ultrasonic (not valid)",
+        "Stance phase",
     ]
 
 

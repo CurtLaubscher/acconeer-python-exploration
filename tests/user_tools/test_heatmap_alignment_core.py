@@ -30,6 +30,7 @@ from heatmap_alignment_core import (  # noqa: E402
     TimelineState,
     ViewportGeometry,
     ViewportVisibilitySettings,
+    _compute_leg2_stance_intervals,
     apply_viewport_visibility,
     build_alignment_resource_summaries,
     build_leg2_ultrasonic_signal_series,
@@ -934,11 +935,13 @@ def _write_sample_leg2_mat(
     distance_mm = np.array([1200.0, 1500.0, np.nan], dtype=np.float64)
     filtered_mm = np.array([1180.0, 1490.0, 1600.0], dtype=np.float64)
     reliable_flag = np.array([1.0, 0.0, 1.0], dtype=np.float64)
+    robust_fc = np.array([1.0, 1.0, 0.0], dtype=np.float64)
     if include_trailing_zero_time:
         time_out = np.append(time_out, 0.0)
         distance_mm = np.append(distance_mm, 999.0)
         filtered_mm = np.append(filtered_mm, 999.0)
         reliable_flag = np.append(reliable_flag, 1.0)
+        robust_fc = np.append(robust_fc, 0.0)
     savemat(
         path,
         {
@@ -946,6 +949,7 @@ def _write_sample_leg2_mat(
                 "timeOut": time_out,
                 "ultrasonic_filtered": filtered_mm,
                 "ReliableFlag": reliable_flag,
+                "robustFC": robust_fc,
             },
             "Ultrasonic": {"Distance": distance_mm},
         },
@@ -985,6 +989,7 @@ def test_load_leg2_mat_ultrasonic_requires_filtered_signal(tmp_path: Path) -> No
             "DataRecordCommon": {
                 "timeOut": np.array([1.0, 2.0, 3.0], dtype=np.float64),
                 "ReliableFlag": np.array([1.0, 1.0, 1.0], dtype=np.float64),
+                "robustFC": np.array([1.0, 1.0, 0.0], dtype=np.float64),
             },
             "Ultrasonic": {"Distance": np.array([1000.0, 1100.0, 1200.0], dtype=np.float64)},
         },
@@ -1002,6 +1007,7 @@ def test_load_leg2_mat_ultrasonic_requires_reliable_flag(tmp_path: Path) -> None
             "DataRecordCommon": {
                 "timeOut": np.array([1.0, 2.0, 3.0], dtype=np.float64),
                 "ultrasonic_filtered": np.array([1000.0, 1100.0, 1200.0], dtype=np.float64),
+                "robustFC": np.array([1.0, 1.0, 0.0], dtype=np.float64),
             },
             "Ultrasonic": {"Distance": np.array([1000.0, 1100.0, 1200.0], dtype=np.float64)},
         },
@@ -1020,6 +1026,7 @@ def test_load_leg2_mat_ultrasonic_rejects_length_mismatch(tmp_path: Path) -> Non
                 "timeOut": np.array([1.0, 2.0, 3.0], dtype=np.float64),
                 "ultrasonic_filtered": np.array([1000.0, 1100.0], dtype=np.float64),
                 "ReliableFlag": np.array([1.0, 1.0, 1.0], dtype=np.float64),
+                "robustFC": np.array([1.0, 1.0, 0.0], dtype=np.float64),
             },
             "Ultrasonic": {"Distance": np.array([1000.0, 1100.0, 1200.0], dtype=np.float64)},
         },
@@ -1069,6 +1076,62 @@ def test_build_leg2_ultrasonic_signal_series_preserves_true_missing_value_gaps(
 
     assert np.isnan(series.primary_time_s[-1])
     assert np.isnan(series.faded_time_s[-1])
+
+
+def test_compute_leg2_stance_intervals_single_stance_sample() -> None:
+    """Stance mask [1, 0] should produce interval from time 0 to time 0 (single sample period)."""
+    time_s = np.array([0.0, 1.0], dtype=np.float64)
+    stance_phase_mask = np.array([1.0, 0.0], dtype=np.float64)
+
+    intervals = _compute_leg2_stance_intervals(time_s, stance_phase_mask, offset_s=0.0)
+
+    assert intervals.start_times_s.tolist() == [0.0]
+    assert intervals.end_times_s.tolist() == [0.0]
+
+
+def test_compute_leg2_stance_intervals_multiple_stance_samples() -> None:
+    """Stance mask [1, 1, 0] should produce interval from time 0 to time 1."""
+    time_s = np.array([0.0, 1.0, 2.0], dtype=np.float64)
+    stance_phase_mask = np.array([1.0, 1.0, 0.0], dtype=np.float64)
+
+    intervals = _compute_leg2_stance_intervals(time_s, stance_phase_mask, offset_s=0.0)
+
+    assert intervals.start_times_s.tolist() == [0.0]
+    assert intervals.end_times_s.tolist() == [1.0]
+
+
+def test_compute_leg2_stance_intervals_swing_to_stance_to_swing() -> None:
+    """Stance mask [0, 1, 0] should produce interval from time 1 to time 1."""
+    time_s = np.array([0.0, 1.0, 2.0], dtype=np.float64)
+    stance_phase_mask = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+
+    intervals = _compute_leg2_stance_intervals(time_s, stance_phase_mask, offset_s=0.0)
+
+    assert intervals.start_times_s.tolist() == [1.0]
+    assert intervals.end_times_s.tolist() == [1.0]
+
+
+def test_compute_leg2_stance_intervals_ends_in_stance() -> None:
+    """Stance mask [0, 1, 1] should produce interval from time 1 to time 2 (implicit end at last sample)."""
+    time_s = np.array([0.0, 1.0, 2.0], dtype=np.float64)
+    stance_phase_mask = np.array([0.0, 1.0, 1.0], dtype=np.float64)
+
+    intervals = _compute_leg2_stance_intervals(time_s, stance_phase_mask, offset_s=0.0)
+
+    assert intervals.start_times_s.tolist() == [1.0]
+    assert intervals.end_times_s.tolist() == [2.0]
+
+
+def test_compute_leg2_stance_intervals_with_track_offset() -> None:
+    """Verify track offset is applied to all interval times."""
+    time_s = np.array([0.0, 1.0, 2.0], dtype=np.float64)
+    stance_phase_mask = np.array([1.0, 1.0, 0.0], dtype=np.float64)
+
+    intervals = _compute_leg2_stance_intervals(time_s, stance_phase_mask, offset_s=0.5)
+
+    # Offset -0.5 applied to times
+    assert intervals.start_times_s.tolist() == pytest.approx([-0.5])
+    assert intervals.end_times_s.tolist() == pytest.approx([0.5])
 
 
 def test_build_peak_distance_signal_series_bridges_detected_transitions() -> None:
