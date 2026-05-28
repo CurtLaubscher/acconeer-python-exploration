@@ -609,6 +609,7 @@ def _compute_leg2_stance_intervals(
 ) -> Leg2StanceIntervals:
     """Compute stance intervals from robustFC mask using rising/falling edge detection.
 
+    Intervals span from time_s[i] where stance starts to time_s[i] where stance ends.
     Treat first time step as implicit rising edge if recording starts in stance (stance_phase_mask[0]==1),
     and last time step as implicit falling edge if recording ends in stance (stance_phase_mask[-1]==1).
     """

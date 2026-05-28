@@ -637,6 +637,7 @@ class SignalPlotWidget(pg.PlotWidget):
         self._render_stance_patches()
         self._sync_signal_plot_legend()
         self._apply_view_settings()
+        self._update_stance_patches_on_y_range()
         self.axis_geometry_sync_requested.emit()
 
     def _sync_signal_plot_legend(self) -> None:
@@ -685,7 +686,7 @@ class SignalPlotWidget(pg.PlotWidget):
         plot_item = self.getPlotItem()
         view_box = plot_item.getViewBox()
         view_range = view_box.viewRange()
-        y_min, y_max = view_range[1]
+        y_min = view_range[1][0]
 
         patch_color = _plot_color_with_alpha(self._leg2_plot_color, self._leg2_plot_alpha)
         qbrush = pg.mkBrush(patch_color)
@@ -714,7 +715,7 @@ class SignalPlotWidget(pg.PlotWidget):
         plot_item = self.getPlotItem()
         view_box = plot_item.getViewBox()
         view_range = view_box.viewRange()
-        y_min, y_max = view_range[1]
+        y_min = view_range[1][0]
 
         stance_intervals = self._leg2_series.stance_intervals
         for patch_item, start_s, end_s in zip(

@@ -30,6 +30,7 @@ from heatmap_alignment_core import (  # noqa: E402
     TimelineState,
     ViewportGeometry,
     ViewportVisibilitySettings,
+    _compute_leg2_stance_intervals,
     apply_viewport_visibility,
     build_alignment_resource_summaries,
     build_leg2_ultrasonic_signal_series,
@@ -1075,6 +1076,62 @@ def test_build_leg2_ultrasonic_signal_series_preserves_true_missing_value_gaps(
 
     assert np.isnan(series.primary_time_s[-1])
     assert np.isnan(series.faded_time_s[-1])
+
+
+def test_compute_leg2_stance_intervals_single_stance_sample() -> None:
+    """Stance mask [1, 0] should produce interval from time 0 to time 0 (single sample period)."""
+    time_s = np.array([0.0, 1.0], dtype=np.float64)
+    stance_phase_mask = np.array([1.0, 0.0], dtype=np.float64)
+
+    intervals = _compute_leg2_stance_intervals(time_s, stance_phase_mask, offset_s=0.0)
+
+    assert intervals.start_times_s.tolist() == [0.0]
+    assert intervals.end_times_s.tolist() == [0.0]
+
+
+def test_compute_leg2_stance_intervals_multiple_stance_samples() -> None:
+    """Stance mask [1, 1, 0] should produce interval from time 0 to time 1."""
+    time_s = np.array([0.0, 1.0, 2.0], dtype=np.float64)
+    stance_phase_mask = np.array([1.0, 1.0, 0.0], dtype=np.float64)
+
+    intervals = _compute_leg2_stance_intervals(time_s, stance_phase_mask, offset_s=0.0)
+
+    assert intervals.start_times_s.tolist() == [0.0]
+    assert intervals.end_times_s.tolist() == [1.0]
+
+
+def test_compute_leg2_stance_intervals_swing_to_stance_to_swing() -> None:
+    """Stance mask [0, 1, 0] should produce interval from time 1 to time 1."""
+    time_s = np.array([0.0, 1.0, 2.0], dtype=np.float64)
+    stance_phase_mask = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+
+    intervals = _compute_leg2_stance_intervals(time_s, stance_phase_mask, offset_s=0.0)
+
+    assert intervals.start_times_s.tolist() == [1.0]
+    assert intervals.end_times_s.tolist() == [1.0]
+
+
+def test_compute_leg2_stance_intervals_ends_in_stance() -> None:
+    """Stance mask [0, 1, 1] should produce interval from time 1 to time 2 (implicit end at last sample)."""
+    time_s = np.array([0.0, 1.0, 2.0], dtype=np.float64)
+    stance_phase_mask = np.array([0.0, 1.0, 1.0], dtype=np.float64)
+
+    intervals = _compute_leg2_stance_intervals(time_s, stance_phase_mask, offset_s=0.0)
+
+    assert intervals.start_times_s.tolist() == [1.0]
+    assert intervals.end_times_s.tolist() == [2.0]
+
+
+def test_compute_leg2_stance_intervals_with_track_offset() -> None:
+    """Verify track offset is applied to all interval times."""
+    time_s = np.array([0.0, 1.0, 2.0], dtype=np.float64)
+    stance_phase_mask = np.array([1.0, 1.0, 0.0], dtype=np.float64)
+
+    intervals = _compute_leg2_stance_intervals(time_s, stance_phase_mask, offset_s=0.5)
+
+    # Offset -0.5 applied to times
+    assert intervals.start_times_s.tolist() == pytest.approx([-0.5])
+    assert intervals.end_times_s.tolist() == pytest.approx([0.5])
 
 
 def test_build_peak_distance_signal_series_bridges_detected_transitions() -> None:
