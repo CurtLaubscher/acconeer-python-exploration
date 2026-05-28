@@ -1,19 +1,19 @@
 ## 1. Extract robustFC from `.mat` files
 
-- [ ] 1.1 Add `stance_phase_mask: np.ndarray` field to `LoadedLeg2UltrasonicDatasource` dataclass
-- [ ] 1.2 Update `load_leg2_mat_ultrasonic()` to read `DataRecordCommon.robustFC` alongside existing fields
-- [ ] 1.3 Add `DataRecordCommon.robustFC` to required paths check and length validation
-- [ ] 1.4 Use `_read_mat_1d_bool_array()` to convert robustFC to boolean mask (consistent with ReliableFlag pattern)
-- [ ] 1.5 Add unit tests for successful `.mat` loading with robustFC
-- [ ] 1.6 Add unit tests for `.mat` loading failure when robustFC is missing
+- [x] 1.1 Add `stance_phase_mask: np.ndarray` field to `LoadedLeg2UltrasonicDatasource` dataclass
+- [x] 1.2 Update `load_leg2_mat_ultrasonic()` to read `DataRecordCommon.robustFC` alongside existing fields
+- [x] 1.3 Add `DataRecordCommon.robustFC` to required paths check and length validation
+- [x] 1.4 Use `_read_mat_1d_bool_array()` to convert robustFC to boolean mask (consistent with ReliableFlag pattern)
+- [x] 1.5 Add unit tests for successful `.mat` loading with robustFC
+- [x] 1.6 Add unit tests for `.mat` loading failure when robustFC is missing
 
 ## 2. Build stance intervals in signal series
 
-- [ ] 2.1 Create `Leg2StanceIntervals` or similar data structure to hold stance interval boundaries (start_time_s, end_time_s)
-- [ ] 2.2 Add logic to `build_leg2_ultrasonic_signal_series()` to detect rising/falling edges in stance_phase_mask
-- [ ] 2.3 Compute stance intervals during edge detection; treat first time step as implicit rising edge if recording starts in stance (robustFC[0]==1), and last time step as implicit falling edge if recording ends in stance (robustFC[-1]==1)
-- [ ] 2.4 Add stance intervals to `Leg2UltrasonicSignalSeries` as a new field
-- [ ] 2.5 Apply track offset to stance intervals so they move with the signal
+- [x] 2.1 Create `Leg2StanceIntervals` or similar data structure to hold stance interval boundaries (start_time_s, end_time_s)
+- [x] 2.2 Add logic to `build_leg2_ultrasonic_signal_series()` to detect rising/falling edges in stance_phase_mask
+- [x] 2.3 Compute stance intervals during edge detection; treat first time step as implicit rising edge if recording starts in stance (robustFC[0]==1), and last time step as implicit falling edge if recording ends in stance (robustFC[-1]==1)
+- [x] 2.4 Add stance intervals to `Leg2UltrasonicSignalSeries` as a new field
+- [x] 2.5 Apply track offset to stance intervals so they move with the signal
 
 ## 3. Render stance patches on Signals plot
 
