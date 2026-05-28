@@ -54,6 +54,7 @@ from heatmap_alignment_core import (
     LoadedPeakDistanceDatasource,
     PeakDistanceSignalSeries,
     ResourceAction,
+    ResourceJobPresentation,
     ResourceKind,
     ResourceSummary,
     SignalPlotViewSettings,
@@ -66,7 +67,6 @@ from heatmap_alignment_core import (
     import_leg2_mat_for_heatmap,
     import_peak_distance_json_for_heatmap,
     load_alignment_session,
-    prepare_proxy_video,
     rectify_viewport,
     save_alignment_session,
     scale_viewport_corners,
@@ -75,6 +75,26 @@ from heatmap_alignment_core import (
     visible_signal_y_range,
 )
 from sparse_iq_heatmap_common import heatmap_axes, select_subsweep
+from heatmap_alignment_resource_jobs import (
+    CameraResourceJobResult,
+    LoadedH5ResourcePayload,
+    ResourceJobBoard,
+    ResourceJobError,
+    ResourceJobKind,
+    ResourceJobSnapshot,
+    begin_resource_job,
+    build_h5_truth_source_from_payload,
+    clear_resource_job,
+    complete_resource_job,
+    load_h5_resource_payload,
+    mark_resource_job_phase,
+    request_cancel_resource_job,
+    resolve_replacement_viewport_corners,
+    resource_job_blocks_export,
+    resource_job_target_filename,
+    run_camera_resource_job,
+    should_apply_job_result,
+)
 from sparse_iq_peak_distance_core import (
     STATUS_DETECTED,
     PeakDistanceJsonImportError,
@@ -107,6 +127,18 @@ RESOURCE_ACTION_LABELS: dict[ResourceAction, str] = {
     "reload": "&Reload",
     "reveal": "Show in &File Manager",
     "inspect": "Inspect &Warnings",
+    "cancel": "&Cancel Load",
+}
+
+RESOURCE_JOB_STATUS_LABELS = {
+    "idle": "Unloaded",
+    "pending": "Loading",
+    "loading": "Loading",
+    "building": "Building",
+    "waiting": "Waiting",
+    "cancelling": "Cancelling",
+    "failed": "Failed",
+    "superseded": "Superseded",
 }
 
 
@@ -141,6 +173,21 @@ class ImagePreview(QtWidgets.QLabel):
         self.setText(title)
         self._title = title
         self._pixmap: QtGui.QPixmap | None = None
+        self._loading_overlay_active = False
+        self._loading_overlay_message = ""
+        self._dim_content = False
+
+    def set_loading_overlay(
+        self,
+        active: bool,
+        message: str = "",
+        *,
+        dim_content: bool = True,
+    ) -> None:
+        self._loading_overlay_active = active
+        self._loading_overlay_message = message
+        self._dim_content = dim_content
+        self.update()
 
     def set_frame(self, frame_rgb: np.ndarray | None) -> None:
         if frame_rgb is None:
@@ -159,17 +206,32 @@ class ImagePreview(QtWidgets.QLabel):
 
     def paintEvent(self, event: QtGui.QPaintEvent) -> None:
         super().paintEvent(event)
-        if self._pixmap is None:
+        if self._pixmap is None and not self._loading_overlay_active:
             return
         painter = QtGui.QPainter(self)
         try:
             contents_rect = self.contentsRect()
-            scaled = self._pixmap.scaled(
-                contents_rect.size(),
-                QtCore.Qt.AspectRatioMode.IgnoreAspectRatio,
-                QtCore.Qt.TransformationMode.FastTransformation,
-            )
-            painter.drawPixmap(contents_rect.topLeft(), scaled)
+            if self._pixmap is not None:
+                scaled = self._pixmap.scaled(
+                    contents_rect.size(),
+                    QtCore.Qt.AspectRatioMode.IgnoreAspectRatio,
+                    QtCore.Qt.TransformationMode.FastTransformation,
+                )
+                if self._loading_overlay_active and self._dim_content:
+                    painter.setOpacity(0.35)
+                painter.drawPixmap(contents_rect.topLeft(), scaled)
+                painter.setOpacity(1.0)
+            if self._loading_overlay_active:
+                painter.fillRect(
+                    contents_rect,
+                    QtGui.QColor(15, 23, 32, 180),
+                )
+                painter.setPen(QtGui.QColor("#d7dde6"))
+                painter.drawText(
+                    contents_rect,
+                    int(QtCore.Qt.AlignmentFlag.AlignCenter),
+                    self._loading_overlay_message or "Loading...",
+                )
         finally:
             painter.end()
 
@@ -2084,6 +2146,269 @@ class ResourceColorSwatchDelegate(QtWidgets.QStyledItemDelegate):
             painter.restore()
 
 
+class _ResourceJobRunnable(QtCore.QRunnable):
+    def __init__(
+        self,
+        manager: ResourceJobManager,
+        kind: ResourceJobKind,
+        generation: int,
+        worker: object,
+    ) -> None:
+        super().__init__()
+        self._manager = manager
+        self._kind = kind
+        self._generation = generation
+        self._worker = worker
+        self.setAutoDelete(True)
+
+    def run(self) -> None:
+        try:
+            result = self._worker()
+            self._manager._dispatch_job_success(self._kind, self._generation, result)
+        except Exception as exc:
+            self._manager._dispatch_job_failure(self._kind, self._generation, exc)
+
+
+class ResourceJobManager(QtCore.QObject):
+    """Schedules camera and H5 resource jobs off the GUI thread."""
+
+    job_state_changed = QtCore.Signal()
+    job_succeeded = QtCore.Signal(str, int, object)
+    job_failed = QtCore.Signal(str, int, str)
+
+    def __init__(self, parent: QtCore.QObject | None = None) -> None:
+        super().__init__(parent)
+        self._board = ResourceJobBoard()
+        self._thread_pool = QtCore.QThreadPool.globalInstance()
+        self._proxy_active = False
+        self._h5_active = False
+        self._proxy_processes: dict[int, object] = {}
+        self._pending_results: dict[tuple[ResourceJobKind, int], object] = {}
+        self.job_succeeded.connect(self._handle_job_success)
+        self.job_failed.connect(self._handle_job_failure)
+
+    def board(self) -> ResourceJobBoard:
+        return self._board
+
+    def snapshots(self) -> tuple[ResourceJobSnapshot, ...]:
+        return (
+            self._board.camera.snapshot("camera"),
+            self._board.radar_h5.snapshot("radar_h5"),
+        )
+
+    def blocks_export(self) -> bool:
+        return resource_job_blocks_export(self._board)
+
+    def start_camera_job(
+        self,
+        camera_path: Path,
+        *,
+        replaces_active: bool,
+        cache_root: Path | None = None,
+    ) -> int:
+        generation = begin_resource_job(
+            self._board,
+            "camera",
+            target_path=camera_path,
+            replaces_active=replaces_active,
+            initial_phase="pending",
+            message=f"Loading {camera_path.name}...",
+        )
+        self._schedule_camera_job(generation, camera_path, cache_root=cache_root)
+        self.job_state_changed.emit()
+        return generation
+
+    def start_h5_job(
+        self,
+        h5_path: Path,
+        *,
+        replaces_active: bool,
+        session_idx: int | None,
+        group_idx: int | None,
+        entry_idx: int | None,
+        subsweep_idx: int | None,
+        color_min: float,
+        color_max: float | None,
+        fixed_levels: bool,
+    ) -> int:
+        generation = begin_resource_job(
+            self._board,
+            "radar_h5",
+            target_path=h5_path,
+            replaces_active=replaces_active,
+            initial_phase="loading",
+            message=f"Loading {h5_path.name}...",
+        )
+        self._schedule_h5_job(
+            generation,
+            h5_path,
+            session_idx=session_idx,
+            group_idx=group_idx,
+            entry_idx=entry_idx,
+            subsweep_idx=subsweep_idx,
+            color_min=color_min,
+            color_max=color_max,
+            fixed_levels=fixed_levels,
+        )
+        self.job_state_changed.emit()
+        return generation
+
+    def cancel_job(self, kind: ResourceJobKind) -> bool:
+        if not request_cancel_resource_job(self._board, kind):
+            return False
+        slot = self._board.slot(kind)
+        process = self._proxy_processes.pop(slot.generation, None)
+        if process is not None:
+            try:
+                process.terminate()
+            except OSError:
+                pass
+        self.job_state_changed.emit()
+        return True
+
+    def _schedule_camera_job(
+        self,
+        generation: int,
+        camera_path: Path,
+        *,
+        cache_root: Path | None,
+    ) -> None:
+        def _wait_for_proxy_slot() -> None:
+            while self._proxy_active:
+                if self._board.camera.cancel_requested:
+                    raise ResourceJobError("Camera load cancelled.")
+                QtCore.QThread.msleep(25)
+
+        def _worker() -> CameraResourceJobResult:
+            _wait_for_proxy_slot()
+            if self._board.camera.cancel_requested:
+                raise ResourceJobError("Camera load cancelled.")
+            self._proxy_active = True
+            mark_resource_job_phase(
+                self._board,
+                "camera",
+                generation,
+                "building",
+                message=f"Building preview proxy for {camera_path.name}...",
+            )
+            QtCore.QMetaObject.invokeMethod(
+                self,
+                "_emit_job_state_changed",
+                QtCore.Qt.ConnectionType.QueuedConnection,
+            )
+
+            def _process_hook(process: object) -> None:
+                self._proxy_processes[generation] = process
+
+            try:
+                return run_camera_resource_job(
+                    camera_path,
+                    cache_root=cache_root,
+                    cancel_check=lambda: self._board.camera.cancel_requested,
+                    process_hook=_process_hook,
+                )
+            finally:
+                self._proxy_active = False
+                self._proxy_processes.pop(generation, None)
+
+        runnable = _ResourceJobRunnable(self, "camera", generation, _worker)
+        self._thread_pool.start(runnable, priority=0)
+
+    def _schedule_h5_job(
+        self,
+        generation: int,
+        h5_path: Path,
+        *,
+        session_idx: int | None,
+        group_idx: int | None,
+        entry_idx: int | None,
+        subsweep_idx: int | None,
+        color_min: float,
+        color_max: float | None,
+        fixed_levels: bool,
+    ) -> None:
+        def _wait_for_h5_slot() -> None:
+            while self._h5_active:
+                if self._board.radar_h5.cancel_requested:
+                    raise ResourceJobError("H5 load cancelled.")
+                QtCore.QThread.msleep(25)
+
+        def _worker() -> LoadedH5ResourcePayload:
+            _wait_for_h5_slot()
+            if self._board.radar_h5.cancel_requested:
+                raise ResourceJobError("H5 load cancelled.")
+            self._h5_active = True
+            try:
+                return load_h5_resource_payload(
+                    h5_path,
+                    session_idx=session_idx,
+                    group_idx=group_idx,
+                    entry_idx=entry_idx,
+                    subsweep_idx=subsweep_idx,
+                    color_min=color_min,
+                    color_max=color_max,
+                    fixed_levels=fixed_levels,
+                    cancel_check=lambda: self._board.radar_h5.cancel_requested,
+                )
+            finally:
+                self._h5_active = False
+
+        runnable = _ResourceJobRunnable(self, "radar_h5", generation, _worker)
+        self._thread_pool.start(runnable, priority=0)
+
+    @QtCore.Slot()
+    def _emit_job_state_changed(self) -> None:
+        self.job_state_changed.emit()
+
+    def _dispatch_job_success(
+        self,
+        kind: ResourceJobKind,
+        generation: int,
+        result: object,
+    ) -> None:
+        self.job_succeeded.emit(kind, generation, result)
+
+    def _dispatch_job_failure(
+        self,
+        kind: ResourceJobKind,
+        generation: int,
+        error: Exception,
+    ) -> None:
+        self.job_failed.emit(kind, generation, str(error))
+
+    def _handle_job_success(
+        self,
+        kind: ResourceJobKind,
+        generation: int,
+        result: object,
+    ) -> None:
+        slot = self._board.slot(kind)
+        if not should_apply_job_result(slot, generation):
+            return
+        complete_resource_job(self._board, kind, generation, phase="idle")
+        self._pending_results[(kind, generation)] = result
+        self.job_state_changed.emit()
+
+    def _handle_job_failure(self, kind: ResourceJobKind, generation: int, message: str) -> None:
+        slot = self._board.slot(kind)
+        if not should_apply_job_result(slot, generation):
+            return
+        if slot.cancel_requested:
+            complete_resource_job(self._board, kind, generation, phase="idle")
+        else:
+            complete_resource_job(
+                self._board,
+                kind,
+                generation,
+                phase="failed",
+                message=message,
+            )
+        self.job_state_changed.emit()
+
+    def take_pending_result(self, kind: ResourceJobKind, generation: int) -> object | None:
+        return self._pending_results.pop((kind, generation), None)
+
+
 class ElidedPathItemDelegate(QtWidgets.QStyledItemDelegate):
     def initStyleOption(
         self,
@@ -2181,6 +2506,7 @@ class ResourcesWindow(QtWidgets.QDialog):
         self.reload_button = QtWidgets.QPushButton(RESOURCE_ACTION_LABELS["reload"])
         self.reveal_button = QtWidgets.QPushButton(RESOURCE_ACTION_LABELS["reveal"])
         self.inspect_button = QtWidgets.QPushButton(RESOURCE_ACTION_LABELS["inspect"])
+        self.cancel_button = QtWidgets.QPushButton(RESOURCE_ACTION_LABELS["cancel"])
         for button in (
             self.load_button,
             self.replace_button,
@@ -2188,6 +2514,7 @@ class ResourcesWindow(QtWidgets.QDialog):
             self.reload_button,
             self.reveal_button,
             self.inspect_button,
+            self.cancel_button,
         ):
             action_row.addWidget(button)
         action_row.addStretch(1)
@@ -2200,6 +2527,7 @@ class ResourcesWindow(QtWidgets.QDialog):
         self.reload_button.clicked.connect(lambda: self._invoke_action("reload"))
         self.reveal_button.clicked.connect(lambda: self._invoke_action("reveal"))
         self.inspect_button.clicked.connect(lambda: self._invoke_action("inspect"))
+        self.cancel_button.clicked.connect(lambda: self._invoke_action("cancel"))
 
         bottom_row = QtWidgets.QHBoxLayout()
         self.clear_all_button = QtWidgets.QPushButton("Clear All Resources...")
@@ -2271,9 +2599,10 @@ class ResourcesWindow(QtWidgets.QDialog):
                 self._configure_table_item(role_item)
                 self.table.setItem(row_index, 2, role_item)
 
-                status_item = QtWidgets.QTableWidgetItem(
-                    RESOURCE_STATUS_LABELS[summary.status]
-                )
+                status_text = RESOURCE_STATUS_LABELS[summary.status]
+                if summary.job_phase not in ("idle", "superseded"):
+                    status_text = RESOURCE_JOB_STATUS_LABELS[summary.job_phase]
+                status_item = QtWidgets.QTableWidgetItem(status_text)
                 self._configure_table_item(status_item)
                 self.table.setItem(row_index, 3, status_item)
 
@@ -2321,6 +2650,7 @@ class ResourcesWindow(QtWidgets.QDialog):
                 self.reload_button,
                 self.reveal_button,
                 self.inspect_button,
+                self.cancel_button,
             ):
                 button.setEnabled(False)
             return
@@ -2352,6 +2682,7 @@ class ResourcesWindow(QtWidgets.QDialog):
         self.reload_button.setEnabled("reload" in action_set)
         self.reveal_button.setEnabled("reveal" in action_set)
         self.inspect_button.setEnabled("inspect" in action_set)
+        self.cancel_button.setEnabled("cancel" in action_set)
 
     def _invoke_action(self, action: ResourceAction) -> None:
         summary = self._selected_summary()
@@ -2376,6 +2707,25 @@ class ResourcesWindow(QtWidgets.QDialog):
                 )
             )
         menu.exec(self.table.viewport().mapToGlobal(position))
+
+
+@dataclass
+class _CameraResourceBackup:
+    camera_source: CameraVideoSource
+    reference_width: int
+    reference_height: int
+    camera_track: CameraTrack
+    current_camera_frame: np.ndarray | None
+    viewport_corners: list[list[float]]
+    export_overlay: ExportOverlaySettings
+
+
+@dataclass
+class _H5ResourceBackup:
+    heatmap_source: HeatmapTruthSource
+    heatmap_track: HeatmapTrack
+    viewport_output_width: int
+    viewport_output_height: int
 
 
 class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
@@ -2411,6 +2761,12 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._source_resolution_request_token = 0
         self._source_resolution_worker_busy = False
         self._pending_source_resolution_request: dict[str, object] | None = None
+        self._resource_job_manager = ResourceJobManager(self)
+        self._resource_job_manager.job_state_changed.connect(
+            self._handle_resource_job_state_changed
+        )
+        self._camera_replacement_backup: _CameraResourceBackup | None = None
+        self._h5_replacement_backup: _H5ResourceBackup | None = None
 
         self.viewport_source_resolution_timer = QtCore.QTimer(self)
         self.viewport_source_resolution_timer.setSingleShot(True)
@@ -2810,21 +3166,21 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             self.load_camera_from_path(Path(filename))
 
     def load_camera_from_path(self, camera_path: Path) -> None:
-        display_message = self._open_camera_source(camera_path)
-        self.session.timeline.current_time_s = 0.0
-        self._initialize_default_export_overlay_if_needed()
-        self._load_current_camera_frame(access_hint="random")
-        if self._native_viewport_corners() is None:
-            self._initialize_default_viewport_corners_native()
-        else:
-            self._refresh_camera_view_corners()
-        self.camera_view.set_export_overlay(self.session.export_overlay)
-        self._update_controls_enabled_state()
-        self._sync_previews(camera_access_hint="auto")
-        self.settings.setValue("last_camera_path", str(camera_path))
+        if not camera_path.exists():
+            self._set_resource_reload_error("camera", f"File not found: {camera_path}")
+            self._refresh_resources_ui()
+            return
+        replaces_active = self.camera_source is not None
+        if replaces_active:
+            self._camera_replacement_backup = self._snapshot_active_camera()
         self._set_resource_reload_error("camera", None)
+        self._resource_job_manager.start_camera_job(
+            camera_path,
+            replaces_active=replaces_active,
+        )
+        self._update_resource_loading_overlays()
         self._refresh_resources_ui()
-        self.statusBar().showMessage(display_message)
+        self.statusBar().showMessage(f"Loading camera video: {camera_path.name}")
 
     def _load_h5_recording(self) -> None:
         start_path = self._dialog_start_path("last_h5_path")
@@ -2838,26 +3194,28 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             self.load_h5_from_path(Path(filename))
 
     def load_h5_from_path(self, h5_path: Path) -> None:
-        if self.heatmap_source is not None:
-            self.heatmap_source.close()
-        self.heatmap_source = HeatmapTruthSource(
+        if not h5_path.exists():
+            self._set_resource_reload_error("radar_h5", f"File not found: {h5_path}")
+            self._refresh_resources_ui()
+            return
+        replaces_active = self.heatmap_source is not None
+        if replaces_active:
+            self._h5_replacement_backup = self._snapshot_active_h5()
+        self._set_resource_reload_error("radar_h5", None)
+        self._resource_job_manager.start_h5_job(
             h5_path,
+            replaces_active=replaces_active,
+            session_idx=self.session.heatmap_track.session_idx,
+            group_idx=self.session.heatmap_track.group_idx,
+            entry_idx=self.session.heatmap_track.entry_idx,
+            subsweep_idx=self.session.heatmap_track.subsweep_idx,
             color_min=self.color_min_spin.value(),
             color_max=self.color_max_spin.value(),
             fixed_levels=True,
         )
-        self.session.heatmap_track = self.heatmap_source.metadata
-        truth_frame = self.heatmap_source.frame_at_index(0)
-        self.session.viewport.output_width = truth_frame.shape[1]
-        self.session.viewport.output_height = truth_frame.shape[0]
-        self._rebuild_overlay_plot_renderer()
-        self._update_controls_enabled_state()
-        self._sync_previews(camera_access_hint="auto")
-        self.settings.setValue("last_h5_path", str(h5_path))
-        self._reload_peak_distance_datasource_from_session()
-        self._set_resource_reload_error("radar_h5", None)
+        self._update_resource_loading_overlays()
         self._refresh_resources_ui()
-        self.statusBar().showMessage(f"Loaded H5 recording: {h5_path}")
+        self.statusBar().showMessage(f"Loading H5 recording: {h5_path.name}")
 
     def _peak_csv_rejection_message(self) -> str:
         return (
@@ -3217,40 +3575,29 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._resource_reload_errors.clear()
         self._resource_load_warnings.clear()
 
+        self._populate_controls_from_session()
         if session.camera_track.path:
             camera_path = Path(session.camera_track.path)
             if camera_path.exists():
-                self._open_camera_source(camera_path, update_session_track=False)
-                self._initialize_default_export_overlay_if_needed()
+                self.load_camera_from_path(camera_path)
             else:
                 self._set_resource_reload_error("camera", f"File not found: {camera_path}")
         if session.heatmap_track.path:
             h5_path = Path(session.heatmap_track.path)
             if h5_path.exists():
-                self.heatmap_source = HeatmapTruthSource(
-                    h5_path,
-                    session_idx=session.heatmap_track.session_idx,
-                    group_idx=session.heatmap_track.group_idx,
-                    entry_idx=session.heatmap_track.entry_idx,
-                    subsweep_idx=session.heatmap_track.subsweep_idx,
-                    color_min=session.render.color_min,
-                    color_max=session.render.color_max,
-                    fixed_levels=session.render.fixed_levels,
-                )
-                self._rebuild_overlay_plot_renderer()
-                self._reload_peak_distance_datasource_from_session()
+                self.load_h5_from_path(h5_path)
             else:
                 self._set_resource_reload_error("radar_h5", f"File not found: {h5_path}")
         else:
             self._reload_peak_distance_datasource_from_session()
         self._reload_leg2_ultrasonic_datasource_from_session()
-
-        self._populate_controls_from_session()
-        self._load_current_camera_frame(access_hint="random")
-        self._refresh_camera_view_corners()
-        self.camera_view.set_export_overlay(self.session.export_overlay)
+        if self.camera_source is not None:
+            self._load_current_camera_frame(access_hint="random")
+            self._refresh_camera_view_corners()
+            self.camera_view.set_export_overlay(self.session.export_overlay)
         self._update_controls_enabled_state()
-        self._sync_previews(camera_access_hint="auto")
+        if self.camera_source is not None or self.heatmap_source is not None:
+            self._sync_previews(camera_access_hint="auto")
         self.settings.setValue("last_session_path", str(session_path))
         if self.session.camera_track.path:
             self.settings.setValue("last_camera_path", self.session.camera_track.path)
@@ -3260,36 +3607,234 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._refresh_resources_ui()
         self.statusBar().showMessage(f"Loaded session: {session_path}")
 
-    def _open_camera_source(
-        self,
-        camera_path: Path,
-        *,
-        update_session_track: bool = True,
-    ) -> str:
-        if self.camera_source is not None:
+    def _snapshot_active_camera(self) -> _CameraResourceBackup:
+        if self.camera_source is None:
+            raise RuntimeError("Cannot snapshot camera resource when no camera is loaded.")
+        return _CameraResourceBackup(
+            camera_source=self.camera_source,
+            reference_width=self._camera_reference_width,
+            reference_height=self._camera_reference_height,
+            camera_track=CameraTrack(
+                path=self.session.camera_track.path,
+                fps=self.session.camera_track.fps,
+                duration_s=self.session.camera_track.duration_s,
+                frame_count=self.session.camera_track.frame_count,
+            ),
+            current_camera_frame=(
+                None
+                if self.current_camera_frame is None
+                else self.current_camera_frame.copy()
+            ),
+            viewport_corners=[list(point) for point in self.session.viewport.corners],
+            export_overlay=ExportOverlaySettings(
+                visible=self.session.export_overlay.visible,
+                preview_enabled=self.session.export_overlay.preview_enabled,
+                x=self.session.export_overlay.x,
+                y=self.session.export_overlay.y,
+                width=self.session.export_overlay.width,
+                height=self.session.export_overlay.height,
+            ),
+        )
+
+    def _snapshot_active_h5(self) -> _H5ResourceBackup:
+        if self.heatmap_source is None:
+            raise RuntimeError("Cannot snapshot H5 resource when no recording is loaded.")
+        return _H5ResourceBackup(
+            heatmap_source=self.heatmap_source,
+            heatmap_track=HeatmapTrack(
+                path=self.session.heatmap_track.path,
+                session_idx=self.session.heatmap_track.session_idx,
+                group_idx=self.session.heatmap_track.group_idx,
+                entry_idx=self.session.heatmap_track.entry_idx,
+                subsweep_idx=self.session.heatmap_track.subsweep_idx,
+                duration_s=self.session.heatmap_track.duration_s,
+                fps=self.session.heatmap_track.fps,
+            ),
+            viewport_output_width=self.session.viewport.output_width,
+            viewport_output_height=self.session.viewport.output_height,
+        )
+
+    def _apply_camera_job_result(self, result: CameraResourceJobResult) -> None:
+        if self._camera_replacement_backup is not None:
+            self._camera_replacement_backup.camera_source.close()
+        elif self.camera_source is not None:
             self.camera_source.close()
-            self.camera_source = None
-
-        proxy_result = prepare_proxy_video(camera_path)
-        self.camera_source = CameraVideoSource(proxy_result.display_path)
-        self._camera_reference_width = proxy_result.source_probe.width
-        self._camera_reference_height = proxy_result.source_probe.height
-
-        if update_session_track:
-            self.session.camera_track = CameraTrack(
-                path=str(camera_path),
-                fps=proxy_result.source_probe.fps,
-                duration_s=proxy_result.source_probe.duration_s,
-                frame_count=proxy_result.source_probe.frame_count,
+        self.camera_source = CameraVideoSource(result.proxy_result.display_path)
+        self._camera_reference_width = result.proxy_result.source_probe.width
+        self._camera_reference_height = result.proxy_result.source_probe.height
+        previous_size = (0, 0)
+        previous_corners: list[list[float]] | None = None
+        if self._camera_replacement_backup is not None:
+            previous_size = (
+                self._camera_replacement_backup.reference_width,
+                self._camera_replacement_backup.reference_height,
             )
+            previous_corners = self._camera_replacement_backup.viewport_corners
+        self.session.camera_track = result.camera_track
+        self.session.timeline.current_time_s = 0.0
+        resolved_corners = resolve_replacement_viewport_corners(
+            existing_corners=previous_corners,
+            previous_native_size=previous_size,
+            replacement_native_size=(
+                self._camera_reference_width,
+                self._camera_reference_height,
+            ),
+        )
+        if resolved_corners is not None:
+            self.session.viewport.corners = resolved_corners
+        elif not self.session.viewport.corners:
+            self._initialize_default_viewport_corners_native()
+        self._initialize_default_export_overlay_if_needed()
+        self._load_current_camera_frame(access_hint="random")
+        if self._native_viewport_corners() is None:
+            self._initialize_default_viewport_corners_native()
+        else:
+            self._refresh_camera_view_corners()
+        self.camera_view.set_export_overlay(self.session.export_overlay)
+        self.settings.setValue("last_camera_path", str(result.source_path))
+        self._camera_replacement_backup = None
+        if result.proxy_result.state == "proxy_built":
+            message = (
+                f"Loaded camera video with cached preview proxy: {result.source_path.name}"
+            )
+        elif result.proxy_result.state == "proxy_reused":
+            message = f"Loaded camera video via cached preview proxy: {result.source_path.name}"
+        else:
+            message = f"Loaded camera video: {result.source_path.name}"
+        self.statusBar().showMessage(message)
 
-        if proxy_result.state == "proxy_built":
-            return f"Loaded camera video with cached preview proxy: {camera_path}"
-        if proxy_result.state == "proxy_reused":
-            return f"Loaded camera video via cached preview proxy: {camera_path}"
-        if proxy_result.state == "proxy_unavailable":
-            return f"Loaded camera video directly (preview proxy unavailable): {camera_path}"
-        return f"Loaded camera video: {camera_path}"
+    def _apply_h5_job_result(self, payload: LoadedH5ResourcePayload) -> None:
+        previous_path = ""
+        if self._h5_replacement_backup is not None:
+            previous_path = self._h5_replacement_backup.heatmap_track.path
+            self._h5_replacement_backup.heatmap_source.close()
+        elif self.heatmap_source is not None:
+            self.heatmap_source.close()
+        self.heatmap_source = build_h5_truth_source_from_payload(
+            payload,
+            color_min=self.color_min_spin.value(),
+            color_max=self.color_max_spin.value(),
+            fixed_levels=True,
+        )
+        self.session.heatmap_track = payload.metadata
+        self.session.viewport.output_width = payload.first_frame_shape[1]
+        self.session.viewport.output_height = payload.first_frame_shape[0]
+        self._rebuild_overlay_plot_renderer()
+        self.settings.setValue("last_h5_path", str(payload.path))
+        if previous_path and previous_path != str(payload.path):
+            self._clear_peak_distance_datasource()
+        else:
+            self._reload_peak_distance_datasource_from_session()
+        self._h5_replacement_backup = None
+        self.statusBar().showMessage(f"Loaded H5 recording: {payload.path.name}")
+
+    def _restore_camera_replacement_backup(self) -> None:
+        backup = self._camera_replacement_backup
+        if backup is None:
+            return
+        if self.camera_source is not None and self.camera_source is not backup.camera_source:
+            self.camera_source.close()
+        self.camera_source = backup.camera_source
+        self._camera_reference_width = backup.reference_width
+        self._camera_reference_height = backup.reference_height
+        self.session.camera_track = backup.camera_track
+        self.session.viewport.corners = [list(point) for point in backup.viewport_corners]
+        self.session.export_overlay = ExportOverlaySettings(
+            visible=backup.export_overlay.visible,
+            preview_enabled=backup.export_overlay.preview_enabled,
+            x=backup.export_overlay.x,
+            y=backup.export_overlay.y,
+            width=backup.export_overlay.width,
+            height=backup.export_overlay.height,
+        )
+        self.current_camera_frame = (
+            None if backup.current_camera_frame is None else backup.current_camera_frame.copy()
+        )
+        if self.current_camera_frame is not None:
+            self.camera_view.set_frame(self.current_camera_frame)
+        else:
+            self._load_current_camera_frame(access_hint="random")
+        self._refresh_camera_view_corners()
+        self.camera_view.set_export_overlay(self.session.export_overlay)
+        self._camera_replacement_backup = None
+
+    def _restore_h5_replacement_backup(self) -> None:
+        backup = self._h5_replacement_backup
+        if backup is None:
+            return
+        if self.heatmap_source is not None and self.heatmap_source is not backup.heatmap_source:
+            self.heatmap_source.close()
+        self.heatmap_source = backup.heatmap_source
+        self.session.heatmap_track = backup.heatmap_track
+        self.session.viewport.output_width = backup.viewport_output_width
+        self.session.viewport.output_height = backup.viewport_output_height
+        self._rebuild_overlay_plot_renderer()
+        self._h5_replacement_backup = None
+
+    def _handle_resource_job_state_changed(self) -> None:
+        for kind in ("camera", "radar_h5"):
+            slot = self._resource_job_manager.board().slot(kind)
+            result = self._resource_job_manager.take_pending_result(kind, slot.generation)
+            if result is not None:
+                if kind == "camera":
+                    self._apply_camera_job_result(result)
+                else:
+                    self._apply_h5_job_result(result)
+                self._set_resource_reload_error(kind, None)
+                self._update_controls_enabled_state()
+                self._sync_previews(camera_access_hint="auto")
+            elif slot.phase == "failed":
+                if kind == "camera":
+                    self._restore_camera_replacement_backup()
+                else:
+                    self._restore_h5_replacement_backup()
+                self._set_resource_reload_error(kind, slot.message)
+            elif slot.phase == "idle":
+                if kind == "camera" and self._camera_replacement_backup is not None:
+                    self._restore_camera_replacement_backup()
+                elif kind == "radar_h5" and self._h5_replacement_backup is not None:
+                    self._restore_h5_replacement_backup()
+        self._update_resource_loading_overlays()
+        self._refresh_resources_ui()
+
+    def _update_resource_loading_overlays(self) -> None:
+        camera_slot = self._resource_job_manager.board().camera
+        if camera_slot.phase in ("pending", "loading", "building", "waiting", "cancelling"):
+            target = resource_job_target_filename(camera_slot.target_path)
+            self.camera_view.set_loading_overlay(
+                True,
+                f"Loading {target}...",
+                dim_content=self.camera_source is not None,
+            )
+        else:
+            self.camera_view.set_loading_overlay(False)
+
+        h5_slot = self._resource_job_manager.board().radar_h5
+        if h5_slot.phase in ("pending", "loading", "building", "waiting", "cancelling"):
+            target = resource_job_target_filename(h5_slot.target_path)
+            self.truth_view.set_loading_overlay(
+                True,
+                f"Loading {target}...",
+                dim_content=self.heatmap_source is not None,
+            )
+        else:
+            self.truth_view.set_loading_overlay(False)
+
+    def _resource_job_presentations(self) -> tuple[ResourceJobPresentation, ...]:
+        presentations: list[ResourceJobPresentation] = []
+        for snapshot in self._resource_job_manager.snapshots():
+            if snapshot.phase == "idle":
+                continue
+            presentations.append(
+                ResourceJobPresentation(
+                    kind=snapshot.kind,
+                    phase=snapshot.phase,
+                    target_filename=resource_job_target_filename(snapshot.target_path),
+                    detail=snapshot.message,
+                    cancellable=snapshot.cancellable,
+                )
+            )
+        return tuple(presentations)
 
     def _populate_controls_from_session(self) -> None:
         self.offset_spin.blockSignals(True)
@@ -4098,8 +4643,16 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.signal_plot.set_current_time_s(self.session.timeline.current_time_s)
 
     def _update_controls_enabled_state(self) -> None:
-        has_camera = self.camera_source is not None
-        has_heatmap = self.heatmap_source is not None
+        camera_job_busy = self._resource_job_manager.board().camera.phase not in (
+            "idle",
+            "failed",
+        )
+        has_camera = self.camera_source is not None and not camera_job_busy
+        h5_job_busy = self._resource_job_manager.board().radar_h5.phase not in (
+            "idle",
+            "failed",
+        )
+        has_heatmap = self.heatmap_source is not None and not h5_job_busy
         has_optional_signal = (
             self.peak_distance_datasource is not None
             or self.leg2_ultrasonic_datasource is not None
@@ -4157,6 +4710,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             leg2_sample_count=leg2_samples,
             reload_errors=tuple(self._resource_reload_errors.items()),
             load_warnings=tuple(self._resource_load_warnings.items()),
+            resource_jobs=self._resource_job_presentations(),
         )
 
     def resource_summaries(self) -> tuple[ResourceSummary, ...]:
@@ -4200,6 +4754,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             self.camera_source is not None
             and self.heatmap_source is not None
             and not self._export_in_progress
+            and not self._resource_job_manager.blocks_export()
         )
 
     def _show_resources_window(self) -> None:
@@ -4232,6 +4787,10 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             self._resource_load_warnings.pop(kind, None)
 
     def invoke_resource_action(self, kind: ResourceKind, action: ResourceAction) -> None:
+        if action == "cancel":
+            if kind in ("camera", "radar_h5"):
+                self._resource_job_manager.cancel_job(kind)
+            return
         if action == "load":
             if kind == "camera":
                 self._load_camera_video()
@@ -4321,6 +4880,10 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         )
 
     def unload_camera_video(self) -> None:
+        self._resource_job_manager.cancel_job("camera")
+        clear_resource_job(self._resource_job_manager.board(), "camera")
+        self._camera_replacement_backup = None
+        self.camera_view.set_loading_overlay(False)
         if self.camera_source is not None:
             self.camera_source.close()
             self.camera_source = None
@@ -4342,6 +4905,10 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage("Unloaded camera video.")
 
     def unload_h5_recording(self) -> None:
+        self._resource_job_manager.cancel_job("radar_h5")
+        clear_resource_job(self._resource_job_manager.board(), "radar_h5")
+        self._h5_replacement_backup = None
+        self.truth_view.set_loading_overlay(False)
         if self.heatmap_source is not None:
             self.heatmap_source.close()
             self.heatmap_source = None

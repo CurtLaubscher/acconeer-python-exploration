@@ -36,9 +36,8 @@ from heatmap_alignment_core import (  # noqa: E402
     Leg2StanceIntervals,
     Leg2UltrasonicDatasourceSettings,
     Leg2UltrasonicSignalSeries,
-    PeakDistanceSignalSeries,
+    ResourceJobPresentation,
     build_alignment_resource_summaries,
-    load_alignment_session,
     save_alignment_session,
 )
 from scipy.io import savemat
@@ -484,6 +483,55 @@ def test_resource_menu_enablement_tracks_loaded_state(qapplication: QApplication
     window._refresh_resources_ui()
 
     assert window.reload_camera_action.isEnabled() is True
+
+
+def test_resource_summaries_expose_pending_job_state() -> None:
+    session = AlignmentSession(
+        camera_track=CameraTrack(path="/tmp/example.mp4"),
+        heatmap_track=HeatmapTrack(path="/tmp/example.h5"),
+    )
+    runtime = AlignmentResourceRuntime(
+        camera_loaded=True,
+        radar_h5_loaded=True,
+        resource_jobs=(
+            ResourceJobPresentation(
+                kind="camera",
+                phase="building",
+                target_filename="replacement.mp4",
+                detail="Building preview proxy for replacement.mp4...",
+                cancellable=True,
+            ),
+        ),
+    )
+
+    summaries = build_alignment_resource_summaries(session, runtime)
+    camera_summary = next(entry for entry in summaries if entry.kind == "camera")
+
+    assert camera_summary.job_phase == "building"
+    assert camera_summary.job_target_filename == "replacement.mp4"
+    assert "replacement.mp4" in camera_summary.details
+    assert "cancel" in camera_summary.actions
+
+
+def test_export_disabled_while_resource_jobs_block(qapplication: QApplication) -> None:
+    window = HeatmapAlignmentWindow()
+    window.session.camera_track = CameraTrack(path="/tmp/example.mp4", duration_s=1.0, fps=1.0)
+    window.session.heatmap_track = HeatmapTrack(path="/tmp/example.h5", duration_s=1.0, fps=1.0)
+    window.camera_source = object()
+    window.heatmap_source = object()
+    window._refresh_resources_ui()
+    assert window.export_synced_action.isEnabled() is True
+
+    from heatmap_alignment_resource_jobs import begin_resource_job
+
+    begin_resource_job(
+        window._resource_job_manager.board(),
+        "camera",
+        target_path=Path("/tmp/other.mp4"),
+        replaces_active=True,
+    )
+    window._refresh_resources_ui()
+    assert window.export_synced_action.isEnabled() is False
 
 
 def test_timeline_time_axis_tracks_signal_plot_viewbox(

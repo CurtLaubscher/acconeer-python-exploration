@@ -1,0 +1,233 @@
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+USER_TOOLS_PATH = REPO_ROOT / "user_tools"
+if str(USER_TOOLS_PATH) not in sys.path:
+    sys.path.insert(0, str(USER_TOOLS_PATH))
+
+from heatmap_alignment_resource_jobs import (  # noqa: E402
+    ProxyBuildError,
+    ResourceJobBoard,
+    begin_resource_job,
+    build_preview_proxy_video,
+    complete_resource_job,
+    request_cancel_resource_job,
+    resolve_replacement_viewport_corners,
+    resource_job_blocks_export,
+    should_apply_job_result,
+)
+from heatmap_alignment_core import (  # noqa: E402
+    VideoProbe,
+    _proxy_cache_path,
+)
+
+
+def test_begin_resource_job_supersedes_pending_generation() -> None:
+    board = ResourceJobBoard()
+    first = begin_resource_job(
+        board,
+        "camera",
+        target_path=Path("first.mp4"),
+        replaces_active=False,
+    )
+    second = begin_resource_job(
+        board,
+        "camera",
+        target_path=Path("second.mp4"),
+        replaces_active=False,
+    )
+
+    assert first == 1
+    assert second == 2
+    assert board.camera.phase == "pending"
+    assert board.camera.target_path == Path("second.mp4")
+
+
+def test_should_apply_job_result_ignores_stale_generation() -> None:
+    board = ResourceJobBoard()
+    generation = begin_resource_job(
+        board,
+        "radar_h5",
+        target_path=Path("trial.h5"),
+        replaces_active=True,
+    )
+    board.radar_h5.generation = generation + 1
+    board.radar_h5.phase = "pending"
+
+    assert should_apply_job_result(board.radar_h5, generation) is False
+
+
+def test_resource_job_blocks_export_while_pending() -> None:
+    board = ResourceJobBoard()
+    begin_resource_job(
+        board,
+        "camera",
+        target_path=Path("trial.mp4"),
+        replaces_active=False,
+    )
+
+    assert resource_job_blocks_export(board) is True
+
+    complete_resource_job(board, "camera", board.camera.generation, phase="idle")
+    assert resource_job_blocks_export(board) is False
+
+
+def test_resolve_replacement_viewport_corners_preserves_same_size() -> None:
+    corners = [[10.0, 20.0], [100.0, 20.0], [100.0, 80.0], [10.0, 80.0]]
+
+    resolved = resolve_replacement_viewport_corners(
+        existing_corners=corners,
+        previous_native_size=(200, 120),
+        replacement_native_size=(200, 120),
+    )
+
+    assert resolved == corners
+
+
+def test_resolve_replacement_viewport_corners_scales_compatible_aspect_ratio() -> None:
+    corners = [[100.0, 50.0], [900.0, 50.0], [900.0, 550.0], [100.0, 550.0]]
+
+    resolved = resolve_replacement_viewport_corners(
+        existing_corners=corners,
+        previous_native_size=(1000, 600),
+        replacement_native_size=(2000, 1200),
+    )
+
+    assert resolved is not None
+    scaled = np.asarray(resolved, dtype=np.float32)
+    assert scaled[0, 0] == pytest.approx(200.0)
+    assert scaled[2, 0] == pytest.approx(1800.0)
+
+
+def test_resolve_replacement_viewport_corners_resets_incompatible_aspect_ratio() -> None:
+    corners = [[100.0, 50.0], [900.0, 50.0], [900.0, 550.0], [100.0, 550.0]]
+
+    assert (
+        resolve_replacement_viewport_corners(
+            existing_corners=corners,
+            previous_native_size=(1000, 600),
+            replacement_native_size=(1600, 900),
+        )
+        is None
+    )
+
+
+def test_build_preview_proxy_promotes_only_after_success(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import heatmap_alignment_resource_jobs as jobs
+
+    source_path = tmp_path / "large.mp4"
+    source_path.write_bytes(b"source")
+    probe = VideoProbe(
+        path=source_path,
+        fps=30.0,
+        frame_count=300,
+        duration_s=10.0,
+        width=3840,
+        height=2160,
+    )
+    proxy_path = _proxy_cache_path(
+        source_path,
+        source_probe=probe,
+        max_dimension=1280,
+        cache_root=tmp_path,
+    )
+
+    monkeypatch.setattr(jobs, "probe_video", lambda path: probe)
+    monkeypatch.setattr(jobs, "_find_ffmpeg", lambda: "ffmpeg")
+    monkeypatch.setattr(
+        jobs,
+        "_proxy_cache_path",
+        lambda source_path, source_probe, max_dimension, cache_root: proxy_path,
+    )
+
+    class _FakeProcess:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            self.returncode = 0
+
+        def communicate(self) -> tuple[str, str]:
+            temp_path = jobs._proxy_temp_path(proxy_path)
+            temp_path.parent.mkdir(parents=True, exist_ok=True)
+            temp_path.write_bytes(b"partial")
+            return "", ""
+
+    monkeypatch.setattr(jobs.subprocess, "Popen", _FakeProcess)
+
+    result = build_preview_proxy_video(source_path, cache_root=tmp_path)
+
+    assert result.display_path == proxy_path
+    assert proxy_path.exists()
+    assert not jobs._proxy_temp_path(proxy_path).exists()
+
+
+def test_build_preview_proxy_does_not_leave_final_cache_on_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import heatmap_alignment_resource_jobs as jobs
+
+    source_path = tmp_path / "large.mp4"
+    source_path.write_bytes(b"source")
+    probe = VideoProbe(
+        path=source_path,
+        fps=30.0,
+        frame_count=300,
+        duration_s=10.0,
+        width=3840,
+        height=2160,
+    )
+    proxy_path = _proxy_cache_path(
+        source_path,
+        source_probe=probe,
+        max_dimension=1280,
+        cache_root=tmp_path,
+    )
+
+    monkeypatch.setattr(jobs, "probe_video", lambda path: probe)
+    monkeypatch.setattr(jobs, "_find_ffmpeg", lambda: "ffmpeg")
+    monkeypatch.setattr(
+        jobs,
+        "_proxy_cache_path",
+        lambda source_path, source_probe, max_dimension, cache_root: proxy_path,
+    )
+
+    class _FailingProcess:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            self.returncode = 1
+
+        def communicate(self) -> tuple[str, str]:
+            temp_path = jobs._proxy_temp_path(proxy_path)
+            temp_path.parent.mkdir(parents=True, exist_ok=True)
+            temp_path.write_bytes(b"partial")
+            return "", "ffmpeg failed"
+
+    monkeypatch.setattr(jobs.subprocess, "Popen", _FailingProcess)
+
+    with pytest.raises(ProxyBuildError):
+        build_preview_proxy_video(source_path, cache_root=tmp_path)
+
+    assert not proxy_path.exists()
+    assert not jobs._proxy_temp_path(proxy_path).exists()
+
+
+def test_cancel_request_marks_job_cancelling() -> None:
+    board = ResourceJobBoard()
+    begin_resource_job(
+        board,
+        "camera",
+        target_path=Path("trial.mp4"),
+        replaces_active=False,
+    )
+
+    assert request_cancel_resource_job(board, "camera") is True
+    assert board.camera.phase == "cancelling"
+    assert board.camera.cancel_requested is True
