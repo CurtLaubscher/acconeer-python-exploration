@@ -667,8 +667,9 @@ class SignalPlotWidget(pg.PlotWidget):
     def _clear_stance_patches(self) -> None:
         """Remove all stance phase patch items from the plot."""
         plot_item = self.getPlotItem()
+        view_box = plot_item.getViewBox()
         for item in self._stance_patch_items:
-            plot_item.removeItem(item)
+            view_box.removeItem(item)
         self._stance_patch_items.clear()
 
     def _render_stance_patches(self) -> None:
