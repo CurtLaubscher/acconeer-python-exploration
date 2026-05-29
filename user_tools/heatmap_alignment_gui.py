@@ -70,6 +70,9 @@ from heatmap_alignment_core import (
     rectify_viewport,
     save_alignment_session,
     scale_viewport_corners,
+    TimelineH5DragSnapshot,
+    apply_timeline_h5_alignment_drag,
+    timeline_h5_drag_affects_alignment,
     timeline_view_bounds_s,
     validate_alignment_session,
     visible_signal_y_range,
@@ -1012,6 +1015,7 @@ class AlignmentTimelineWidget(QtWidgets.QWidget):
     playhead_changed = QtCore.Signal(float)
     camera_offset_changed = QtCore.Signal(float)
     leg2_offset_changed = QtCore.Signal(float)
+    h5_alignment_drag_changed = QtCore.Signal(float, float, float, float, float)
 
     def __init__(
         self,
@@ -1026,11 +1030,15 @@ class AlignmentTimelineWidget(QtWidgets.QWidget):
         self._current_time_s = 0.0
         self._dragging_camera = False
         self._dragging_leg2 = False
+        self._dragging_h5 = False
         self._dragging_playhead = False
         self._camera_drag_anchor_s = 0.0
         self._leg2_drag_anchor_s = 0.0
+        self._h5_drag_anchor_s = 0.0
+        self._h5_drag_snapshot: TimelineH5DragSnapshot | None = None
         self._hover_on_camera_bar = False
         self._hover_on_leg2_bar = False
+        self._hover_on_h5_bar = False
         self._hover_on_playhead = False
         self._playhead_hit_half_width_px = 8.0
         self._time_axis_left_px: float | None = None
@@ -1153,27 +1161,38 @@ class AlignmentTimelineWidget(QtWidgets.QWidget):
         if event.button() != QtCore.Qt.MouseButton.LeftButton:
             return
         press_time_s = self._time_at_x(event.position().x(), clamp=True)
-        camera_rect = self._track_rect(
-            self._camera_track_start_s(),
-            self._range_model.camera_duration_s,
-            row=0,
-        )
-        if camera_rect.contains(event.position()) and self._range_model.camera_duration_s > 0:
+        if self._playhead_hit_test(event.position()):
+            self._dragging_playhead = True
+            self.setCursor(QtCore.Qt.CursorShape.SizeHorCursor)
+            self.playhead_changed.emit(press_time_s)
+            return
+
+        if self._camera_track_hit_test(event.position()):
             self._dragging_camera = True
             self._range_model.begin_visible_range_freeze()
             self._camera_drag_anchor_s = press_time_s - self._camera_track_start_s()
             self.setCursor(QtCore.Qt.CursorShape.ClosedHandCursor)
             return
 
-        leg2_rect = self._track_rect(
-            self._leg2_track_start_s(),
-            self._range_model.leg2_duration_s,
-            row=2,
-        )
-        if leg2_rect.contains(event.position()) and self._range_model.leg2_duration_s > 0:
+        if self._leg2_track_hit_test(event.position()):
             self._dragging_leg2 = True
             self._range_model.begin_visible_range_freeze()
             self._leg2_drag_anchor_s = press_time_s - self._leg2_track_start_s()
+            self.setCursor(QtCore.Qt.CursorShape.ClosedHandCursor)
+            return
+
+        if self._h5_track_hit_test(event.position()) and self._h5_alignment_drag_enabled():
+            self._dragging_h5 = True
+            self._range_model.begin_visible_range_freeze()
+            self._h5_drag_anchor_s = press_time_s
+            range_start_s, range_end_s = self._range_model.visible_range_s()
+            self._h5_drag_snapshot = TimelineH5DragSnapshot(
+                range_start_s=range_start_s,
+                range_end_s=range_end_s,
+                current_time_s=self._current_time_s,
+                camera_offset_s=self._range_model.camera_offset_s,
+                leg2_offset_s=self._range_model.leg2_offset_s,
+            )
             self.setCursor(QtCore.Qt.CursorShape.ClosedHandCursor)
             return
 
@@ -1192,25 +1211,32 @@ class AlignmentTimelineWidget(QtWidgets.QWidget):
             leg2_track_start_s = position_time_s - self._leg2_drag_anchor_s
             self.leg2_offset_changed.emit(-leg2_track_start_s)
             return
+        if self._dragging_h5:
+            if self._h5_drag_snapshot is None:
+                return
+            position_time_s = self._time_at_x(event.position().x(), clamp=False)
+            h5_desired_start_s = position_time_s - self._h5_drag_anchor_s
+            dragged = apply_timeline_h5_alignment_drag(
+                self._h5_drag_snapshot,
+                h5_desired_start_s=h5_desired_start_s,
+            )
+            self.h5_alignment_drag_changed.emit(
+                dragged.range_start_s,
+                dragged.range_end_s,
+                dragged.current_time_s,
+                dragged.camera_offset_s,
+                dragged.leg2_offset_s,
+            )
+            return
         if self._dragging_playhead:
             position_time_s = self._time_at_x(event.position().x(), clamp=True)
             self.playhead_changed.emit(position_time_s)
             return
 
-        playhead_x = self._time_to_x(self._current_time_s)
-        hover_on_playhead = (
-            abs(event.position().x() - playhead_x) <= self._playhead_hit_half_width_px
-        )
-        hover_on_camera_bar = self._track_rect(
-            self._camera_track_start_s(),
-            self._range_model.camera_duration_s,
-            row=0,
-        ).contains(event.position())
-        hover_on_leg2_bar = self._track_rect(
-            self._leg2_track_start_s(),
-            self._range_model.leg2_duration_s,
-            row=2,
-        ).contains(event.position())
+        hover_on_playhead = self._playhead_hit_test(event.position())
+        hover_on_camera_bar = self._camera_track_hit_test(event.position())
+        hover_on_leg2_bar = self._leg2_track_hit_test(event.position())
+        hover_on_h5_bar = self._h5_track_hit_test(event.position()) and self._h5_alignment_drag_enabled()
         if hover_on_playhead != self._hover_on_playhead:
             self._hover_on_playhead = hover_on_playhead
             self._update_hover_cursor()
@@ -1220,12 +1246,17 @@ class AlignmentTimelineWidget(QtWidgets.QWidget):
         if hover_on_leg2_bar != self._hover_on_leg2_bar:
             self._hover_on_leg2_bar = hover_on_leg2_bar
             self._update_hover_cursor()
+        if hover_on_h5_bar != self._hover_on_h5_bar:
+            self._hover_on_h5_bar = hover_on_h5_bar
+            self._update_hover_cursor()
 
     def mouseReleaseEvent(self, event: QtGui.QMouseEvent) -> None:
         del event
-        was_dragging_track = self._dragging_camera or self._dragging_leg2
+        was_dragging_track = self._dragging_camera or self._dragging_leg2 or self._dragging_h5
         self._dragging_camera = False
         self._dragging_leg2 = False
+        self._dragging_h5 = False
+        self._h5_drag_snapshot = None
         self._dragging_playhead = False
         if was_dragging_track:
             self._range_model.end_visible_range_freeze(recompute=True)
@@ -1233,22 +1264,61 @@ class AlignmentTimelineWidget(QtWidgets.QWidget):
         self._update_hover_cursor()
 
     def leaveEvent(self, event: QtCore.QEvent) -> None:
-        if not self._dragging_camera and not self._dragging_leg2 and not self._dragging_playhead:
+        if (
+            not self._dragging_camera
+            and not self._dragging_leg2
+            and not self._dragging_h5
+            and not self._dragging_playhead
+        ):
             self.unsetCursor()
             self._hover_on_camera_bar = False
             self._hover_on_leg2_bar = False
+            self._hover_on_h5_bar = False
         super().leaveEvent(event)
 
     def _update_hover_cursor(self) -> None:
         if self._hover_on_playhead:
             self.setCursor(QtCore.Qt.CursorShape.SizeHorCursor)
-        elif self._hover_on_camera_bar or self._hover_on_leg2_bar:
+        elif self._hover_on_camera_bar or self._hover_on_leg2_bar or self._hover_on_h5_bar:
             self.setCursor(QtCore.Qt.CursorShape.OpenHandCursor)
         else:
             self.unsetCursor()
 
     def visible_time_bounds_s(self) -> tuple[float, float]:
         return self._range_model.visible_range_s()
+
+    def _h5_alignment_drag_enabled(self) -> bool:
+        return timeline_h5_drag_affects_alignment(
+            camera_duration_s=self._range_model.camera_duration_s,
+            leg2_duration_s=self._range_model.leg2_duration_s,
+        )
+
+    def _playhead_hit_test(self, widget_pos: QtCore.QPointF) -> bool:
+        playhead_x = self._time_to_x(self._current_time_s)
+        return abs(widget_pos.x() - playhead_x) <= self._playhead_hit_half_width_px
+
+    def _camera_track_hit_test(self, widget_pos: QtCore.QPointF) -> bool:
+        if self._range_model.camera_duration_s <= 0.0:
+            return False
+        return self._track_rect(
+            self._camera_track_start_s(),
+            self._range_model.camera_duration_s,
+            row=0,
+        ).contains(widget_pos)
+
+    def _h5_track_hit_test(self, widget_pos: QtCore.QPointF) -> bool:
+        if self._range_model.heatmap_duration_s <= 0.0:
+            return False
+        return self._track_rect(0.0, self._range_model.heatmap_duration_s, row=1).contains(widget_pos)
+
+    def _leg2_track_hit_test(self, widget_pos: QtCore.QPointF) -> bool:
+        if self._range_model.leg2_duration_s <= 0.0:
+            return False
+        return self._track_rect(
+            self._leg2_track_start_s(),
+            self._range_model.leg2_duration_s,
+            row=2,
+        ).contains(widget_pos)
 
     def _camera_track_start_s(self) -> float:
         return -self._range_model.camera_offset_s
@@ -3212,6 +3282,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.timeline_view.playhead_changed.connect(self._timeline_playhead_changed)
         self.timeline_view.camera_offset_changed.connect(self._timeline_camera_offset_changed)
         self.timeline_view.leg2_offset_changed.connect(self._timeline_leg2_offset_changed)
+        self.timeline_view.h5_alignment_drag_changed.connect(self._timeline_h5_alignment_drag_changed)
         self.current_time_slider.valueChanged.connect(self._slider_to_time)
         self.offset_spin.valueChanged.connect(self._offset_changed)
         self.nudge_left_small.clicked.connect(lambda: self._nudge_offset(-0.010))
@@ -4162,6 +4233,34 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
 
     def _timeline_leg2_offset_changed(self, offset_s: float) -> None:
         self.session.leg2_ultrasonic_datasource.offset_s = offset_s
+        self._sync_previews(camera_access_hint="auto")
+
+    def _timeline_h5_alignment_drag_changed(
+        self,
+        range_start_s: float,
+        range_end_s: float,
+        current_time_s: float,
+        camera_offset_s: float,
+        leg2_offset_s: float,
+    ) -> None:
+        self.session.timeline.current_time_s = current_time_s
+        self.session.timeline.offset_s = camera_offset_s
+        self.offset_spin.blockSignals(True)
+        self.offset_spin.setValue(camera_offset_s)
+        self.offset_spin.blockSignals(False)
+        self.session.leg2_ultrasonic_datasource.offset_s = leg2_offset_s
+        self.timeline_range_model.set_track_state(
+            camera_duration_s=self.session.camera_track.duration_s,
+            heatmap_duration_s=self.session.heatmap_track.duration_s,
+            camera_offset_s=camera_offset_s,
+            leg2_duration_s=(
+                self.leg2_ultrasonic_datasource.duration_s
+                if self.leg2_ultrasonic_datasource is not None
+                else 0.0
+            ),
+            leg2_offset_s=leg2_offset_s,
+        )
+        self.timeline_range_model.set_visible_range(range_start_s, range_end_s)
         self._sync_previews(camera_access_hint="auto")
 
     def _toggle_playback(self) -> None:
