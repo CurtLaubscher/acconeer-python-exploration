@@ -190,12 +190,19 @@ class ImagePreview(QtWidgets.QLabel):
         self._loading_overlay_active = active
         self._loading_overlay_message = message
         self._dim_content = dim_content
+        if active and self._pixmap is None:
+            self.clear()
+        elif not active and self._pixmap is None:
+            self.setText(self._title)
         self.update()
 
     def set_frame(self, frame_rgb: np.ndarray | None) -> None:
         if frame_rgb is None:
             self._pixmap = None
-            self.setText(self._title)
+            if not self._loading_overlay_active:
+                self.setText(self._title)
+            else:
+                self.clear()
             self.update()
             return
         self.clear()
@@ -208,12 +215,29 @@ class ImagePreview(QtWidgets.QLabel):
         self.update()
 
     def paintEvent(self, event: QtGui.QPaintEvent) -> None:
+        contents_rect = self.contentsRect()
+        if self._pixmap is None and self._loading_overlay_active:
+            painter = QtGui.QPainter(self)
+            try:
+                painter.fillRect(contents_rect, QtGui.QColor("#0f1720"))
+                painter.fillRect(
+                    contents_rect,
+                    QtGui.QColor(15, 23, 32, 180),
+                )
+                painter.setPen(QtGui.QColor("#d7dde6"))
+                painter.drawText(
+                    contents_rect,
+                    int(QtCore.Qt.AlignmentFlag.AlignCenter),
+                    self._loading_overlay_message or "Loading...",
+                )
+            finally:
+                painter.end()
+            return
         super().paintEvent(event)
         if self._pixmap is None and not self._loading_overlay_active:
             return
         painter = QtGui.QPainter(self)
         try:
-            contents_rect = self.contentsRect()
             if self._pixmap is not None:
                 scaled = self._pixmap.scaled(
                     contents_rect.size(),
@@ -1590,12 +1614,13 @@ class CornerEditorWidget(QtWidgets.QWidget):
             painter.fillRect(self.rect(), QtGui.QColor("#0f1720"))
 
             if self._pixmap is None:
-                painter.setPen(QtGui.QColor("#d7dde6"))
-                painter.drawText(
-                    self.rect(),
-                    QtCore.Qt.AlignmentFlag.AlignCenter,
-                    "Camera Video",
-                )
+                if not self._loading_overlay_active:
+                    painter.setPen(QtGui.QColor("#d7dde6"))
+                    painter.drawText(
+                        self.rect(),
+                        QtCore.Qt.AlignmentFlag.AlignCenter,
+                        "Camera Video",
+                    )
                 self._paint_loading_overlay(painter)
                 return
 
@@ -2336,7 +2361,12 @@ class ResourceJobManager(QtCore.QObject):
         if not request_cancel_resource_job(self._board, kind):
             return False
         slot = self._board.slot(kind)
-        self._cancel_generation(kind, slot.generation)
+        generation = slot.generation
+        self._cancel_generation(kind, generation)
+        pending = self._pending_results.pop((kind, generation), None)
+        if pending is not None:
+            self._release_job_result(kind, generation, pending)
+        complete_resource_job(self._board, kind, generation, phase="idle")
         self.job_state_changed.emit()
         return True
 
@@ -2468,7 +2498,12 @@ class ResourceJobManager(QtCore.QObject):
         generation: int,
         result: object,
     ) -> None:
-        self.job_succeeded.emit(kind, generation, result)
+        try:
+            self.job_succeeded.emit(kind, generation, result)
+        except RuntimeError as exc:
+            if "Internal C++ object" not in str(exc):
+                raise
+            self._release_job_result(kind, generation, result)
 
     def _dispatch_job_failure(
         self,
@@ -2476,7 +2511,12 @@ class ResourceJobManager(QtCore.QObject):
         generation: int,
         error: Exception,
     ) -> None:
-        self.job_failed.emit(kind, generation, str(error))
+        try:
+            self.job_failed.emit(kind, generation, str(error))
+        except RuntimeError as exc:
+            if "Internal C++ object" not in str(exc):
+                raise
+            return
 
     def _handle_job_success(
         self,
@@ -2485,6 +2525,9 @@ class ResourceJobManager(QtCore.QObject):
         result: object,
     ) -> None:
         slot = self._board.slot(kind)
+        if slot.cancel_requested or self._generation_cancelled(kind, generation):
+            self._release_job_result(kind, generation, result)
+            return
         if not should_apply_job_result(slot, generation):
             self._release_job_result(kind, generation, result)
             return
@@ -3916,9 +3959,14 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             return f"Building preview proxy for {target}..."
         return f"Loading {target}..."
 
+    _ACTIVE_RESOURCE_JOB_PHASES = ("pending", "loading", "building", "waiting", "cancelling")
+
+    def _resource_job_slot_is_active(self, slot: ResourceJobSlotState) -> bool:
+        return slot.phase in self._ACTIVE_RESOURCE_JOB_PHASES
+
     def _update_resource_loading_overlays(self) -> None:
         camera_slot = self._resource_job_manager.board().camera
-        if camera_slot.phase in ("pending", "loading", "building", "waiting", "cancelling"):
+        if self._resource_job_slot_is_active(camera_slot):
             self.camera_view.set_loading_overlay(
                 True,
                 self._resource_loading_overlay_message(camera_slot),
@@ -3928,7 +3976,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             self.camera_view.set_loading_overlay(False)
 
         h5_slot = self._resource_job_manager.board().radar_h5
-        if h5_slot.phase in ("pending", "loading", "building", "waiting", "cancelling"):
+        if self._resource_job_slot_is_active(h5_slot):
             self.truth_view.set_loading_overlay(
                 True,
                 self._resource_loading_overlay_message(h5_slot),
@@ -3936,6 +3984,22 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             )
         else:
             self.truth_view.set_loading_overlay(False)
+
+        camera_active = self._resource_job_slot_is_active(camera_slot)
+        h5_active = self._resource_job_slot_is_active(h5_slot)
+        if camera_active or h5_active:
+            overlay_slot = camera_slot if camera_active else h5_slot
+            self.viewport_view.set_loading_overlay(
+                True,
+                self._resource_loading_overlay_message(overlay_slot),
+                dim_content=(
+                    self.viewport_view._pixmap is not None
+                    or self.camera_source is not None
+                    or self.heatmap_source is not None
+                ),
+            )
+        else:
+            self.viewport_view.set_loading_overlay(False)
 
     def _resource_job_presentations(self) -> tuple[ResourceJobPresentation, ...]:
         presentations: list[ResourceJobPresentation] = []
@@ -4906,7 +4970,8 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
     def invoke_resource_action(self, kind: ResourceKind, action: ResourceAction) -> None:
         if action == "cancel":
             if kind in ("camera", "radar_h5"):
-                self._resource_job_manager.cancel_job(kind)
+                if self._resource_job_manager.cancel_job(kind):
+                    self._handle_resource_job_state_changed()
             return
         if action == "load":
             if kind == "camera":

@@ -650,6 +650,130 @@ def test_resource_loading_overlays_support_empty_camera_view(
 
     assert window.camera_view._loading_overlay_active is False
     assert window.truth_view._loading_overlay_active is False
+    assert window.viewport_view._loading_overlay_active is False
+
+
+def test_image_preview_loading_overlay_suppresses_placeholder_title(
+    qapplication: QApplication,
+) -> None:
+    from heatmap_alignment_gui import ImagePreview
+
+    preview = ImagePreview("Rendered Heatmap")
+    assert preview.text() == "Rendered Heatmap"
+
+    preview.set_loading_overlay(True, "Loading trial01.h5...")
+    assert preview.text() == ""
+
+    preview.set_loading_overlay(False)
+    assert preview.text() == "Rendered Heatmap"
+
+
+def test_resource_loading_overlays_include_viewport_for_active_jobs(
+    qapplication: QApplication,
+) -> None:
+    from heatmap_alignment_resource_jobs import begin_resource_job
+
+    window = HeatmapAlignmentWindow()
+    begin_resource_job(
+        window._resource_job_manager.board(),
+        "camera",
+        target_path=Path("/tmp/replacement.mp4"),
+        replaces_active=True,
+        message="Loading replacement.mp4...",
+    )
+
+    window._update_resource_loading_overlays()
+
+    assert window.viewport_view._loading_overlay_active is True
+    assert "replacement.mp4" in window.viewport_view._loading_overlay_message
+
+
+def test_resource_job_manager_cancel_completes_to_idle(
+    qapplication: QApplication,
+) -> None:
+    from heatmap_alignment_gui import ResourceJobManager
+    from heatmap_alignment_resource_jobs import begin_resource_job
+
+    manager = ResourceJobManager()
+    begin_resource_job(
+        manager.board(),
+        "radar_h5",
+        target_path=Path("/tmp/trial.h5"),
+        replaces_active=True,
+    )
+
+    assert manager.cancel_job("radar_h5") is True
+    assert manager.board().radar_h5.phase == "idle"
+    assert manager.board().radar_h5.cancel_requested is False
+
+
+def test_resource_job_manager_cancel_before_success_discards_payload(
+    qapplication: QApplication,
+) -> None:
+    from heatmap_alignment_gui import ResourceJobManager
+    from heatmap_alignment_resource_jobs import LoadedH5ResourcePayload, begin_resource_job
+
+    manager = ResourceJobManager()
+    generation = begin_resource_job(
+        manager.board(),
+        "radar_h5",
+        target_path=Path("/tmp/new.h5"),
+        replaces_active=True,
+    )
+    manager.cancel_job("radar_h5")
+
+    class _FakeRecord:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    record = _FakeRecord()
+    payload = LoadedH5ResourcePayload(
+        path=Path("/tmp/new.h5"),
+        record=record,
+        subsweep_idx=0,
+        metadata=HeatmapTrack(path="/tmp/new.h5"),
+        first_frame_shape=(10, 10),
+    )
+
+    manager._handle_job_success("radar_h5", generation, payload)
+
+    assert record.closed is True
+    assert manager.take_pending_result("radar_h5", generation) is None
+    assert manager.board().radar_h5.phase == "idle"
+
+
+def test_resource_job_manager_abandon_rejects_late_dispatch(
+    qapplication: QApplication,
+) -> None:
+    from heatmap_alignment_gui import ResourceJobManager
+    from heatmap_alignment_resource_jobs import LoadedH5ResourcePayload
+
+    manager = ResourceJobManager()
+
+    class _FakeRecord:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    record = _FakeRecord()
+    payload = LoadedH5ResourcePayload(
+        path=Path("/tmp/trial.h5"),
+        record=record,
+        subsweep_idx=0,
+        metadata=HeatmapTrack(path="/tmp/trial.h5"),
+        first_frame_shape=(10, 10),
+    )
+
+    manager.abandon_all_jobs()
+    manager._dispatch_job_success("radar_h5", 1, payload)
+
+    assert record.closed is True
+    assert manager.take_pending_result("radar_h5", 1) is None
 
 
 def test_resource_job_manager_supersede_cancels_prior_generation(

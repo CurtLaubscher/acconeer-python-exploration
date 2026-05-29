@@ -108,7 +108,11 @@ def next_generation(current: int) -> int:
 
 
 def should_apply_job_result(slot: ResourceJobSlotState, result_generation: int) -> bool:
-    return result_generation == slot.generation and slot.phase not in ("superseded", "idle")
+    return (
+        result_generation == slot.generation
+        and slot.phase not in ("superseded", "idle", "cancelling")
+        and not slot.cancel_requested
+    )
 
 
 def begin_resource_job(

@@ -57,6 +57,19 @@ def test_begin_resource_job_supersedes_pending_generation() -> None:
     assert board.camera.target_path == Path("second.mp4")
 
 
+def test_should_apply_job_result_ignores_cancelled_generation() -> None:
+    board = ResourceJobBoard()
+    generation = begin_resource_job(
+        board,
+        "radar_h5",
+        target_path=Path("trial.h5"),
+        replaces_active=True,
+    )
+    request_cancel_resource_job(board, "radar_h5")
+
+    assert should_apply_job_result(board.radar_h5, generation) is False
+
+
 def test_should_apply_job_result_ignores_stale_generation() -> None:
     board = ResourceJobBoard()
     generation = begin_resource_job(

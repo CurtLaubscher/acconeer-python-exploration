@@ -1,9 +1,9 @@
 ## Status
 
 Initial implementation landed in commit `51fc67ce`. Review follow-up corrections from section 7 are implemented on branch `claub/async-resource-loading-jobs`.
-Acceptance testing found additional cancel, shutdown, and loading-overlay issues; this change is **not** complete until section 8 is finished.
+Acceptance testing found additional cancel, shutdown, and loading-overlay issues; section 8 acceptance-test fixes are implemented on branch `claub/async-resource-loading-jobs-clean`.
 
-**Task counts (sections 1–8):** 47 total, 41 complete, 6 remaining.
+**Task counts (sections 1–8):** 47 total, 47 complete, 0 remaining.
 
 ## 1. Job State Foundation
 
@@ -69,9 +69,9 @@ Acceptance testing found additional cancel, shutdown, and loading-overlay issues
 
 ## 8. Acceptance Test Fixes
 
-- [ ] 8.1 Ensure loading overlays suppress or replace underlying placeholder text so panels never show stacked labels such as `Rendered Heatmap` underneath `Loading <file>...`.
-- [ ] 8.2 Apply loading overlay state consistently to all affected preview panels, including the viewport preview when either camera or H5 resource dependencies are pending, replacing, waiting, or cancelling.
-- [ ] 8.3 Make resource-job cancellation visibly immediate in the UI: after the user cancels, the pending target should enter cancelling/restored state promptly even if the underlying H5/file operation cannot stop immediately.
-- [ ] 8.4 Ensure cancel-before-apply wins over late worker success: if cancellation is requested before a worker result is accepted on the GUI thread, release the result payload and keep or restore the previous active resource instead of applying the cancelled target.
-- [ ] 8.5 Make worker success/failure dispatch safe during app shutdown or workbench teardown so late QRunnable completion cannot emit through a deleted `ResourceJobManager` Qt object or print a traceback.
-- [ ] 8.6 Add focused regression tests for loading-overlay text, viewport loading presentation, cancel-before-late-success handling, and worker completion after abandon/shutdown where practical.
+- [x] 8.1 Ensure loading overlays suppress or replace underlying placeholder text so panels never show stacked labels such as `Rendered Heatmap` underneath `Loading <file>...`.
+- [x] 8.2 Apply loading overlay state consistently to all affected preview panels, including the viewport preview when either camera or H5 resource dependencies are pending, replacing, waiting, or cancelling.
+- [x] 8.3 Make resource-job cancellation visibly immediate in the UI: after the user cancels, the pending target should enter cancelling/restored state promptly even if the underlying H5/file operation cannot stop immediately.
+- [x] 8.4 Ensure cancel-before-apply wins over late worker success: if cancellation is requested before a worker result is accepted on the GUI thread, release the result payload and keep or restore the previous active resource instead of applying the cancelled target.
+- [x] 8.5 Make worker success/failure dispatch safe during app shutdown or workbench teardown so late QRunnable completion cannot emit through a deleted `ResourceJobManager` Qt object or print a traceback.
+- [x] 8.6 Add focused regression tests for loading-overlay text, viewport loading presentation, cancel-before-late-success handling, and worker completion after abandon/shutdown where practical.
