@@ -138,12 +138,32 @@ The system SHALL present pending, failed, and cancelled resource work in the Res
 - **WHEN** the user cancels a pending replacement for a resource that already has an active loaded value
 - **THEN** the system leaves the active loaded resource in effect and restores its usable preview state
 
+#### Scenario: Cancel wins before late success is applied
+- **WHEN** the user cancels a pending resource job before that job's completion is accepted on the GUI thread
+- **THEN** the system treats the job as cancelled, releases any late success payload, and does not apply the cancelled target as the active resource
+
+#### Scenario: Show cancellation promptly
+- **WHEN** the user cancels a pending resource job whose underlying file operation cannot stop immediately
+- **THEN** the Resources window and affected previews show cancelling or restored state promptly without waiting for the underlying operation to return
+
+#### Scenario: Do not stack placeholder and loading text
+- **WHEN** a preview panel is showing a loading overlay and does not yet have target content to display
+- **THEN** the panel shows a single coherent loading message rather than drawing placeholder panel text underneath the loading message
+
+#### Scenario: Show viewport loading state for pending dependencies
+- **WHEN** the viewport preview depends on a camera or H5 resource that is pending, replacing, waiting, or cancelling
+- **THEN** the viewport preview shows the same resource-loading state as an affected panel instead of presenting stale viewport content as if it belonged to the pending target
+
 ### Requirement: Workbench lifecycle during resource jobs
 The system SHALL cancel or abandon active camera and H5 resource jobs safely when the workbench is closed or reset so late completions cannot mutate a closed session.
 
 #### Scenario: Abandon jobs on window close
 - **WHEN** the main workbench window closes while a camera or H5 resource job is pending
 - **THEN** the system cancels or abandons those jobs, clears pending job state and replacement backups, and does not apply their completions to a later workbench instance
+
+#### Scenario: Ignore worker completion after manager deletion
+- **WHEN** a background resource worker completes after the workbench has been closed and its job manager QObject is no longer alive
+- **THEN** the worker completion path exits without raising a traceback and without attempting to update deleted GUI objects
 
 #### Scenario: Abandon jobs on session close
 - **WHEN** the user closes the current session and returns to an empty workbench while a camera or H5 resource job is pending

@@ -302,6 +302,7 @@ Possible directions:
 - Cache recently requested source-resolution viewport frames.
 - Render nearby paused frames after the user stops scrubbing or dragging.
 - Keep low-quality frames available immediately as the fallback interaction path.
+- Consider consolidating source-resolution viewport rendering with the same job/request lifecycle used for resource loading, or a shared lightweight async request framework, so cancellation, stale-result discard, bounded execution, and shutdown handling are not maintained in separate systems.
 
 This is related to async processing, but specifically targets viewport visual quality and not just responsiveness.
 
