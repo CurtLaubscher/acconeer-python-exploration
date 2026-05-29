@@ -1016,6 +1016,7 @@ class AlignmentTimelineWidget(QtWidgets.QWidget):
     camera_offset_changed = QtCore.Signal(float)
     leg2_offset_changed = QtCore.Signal(float)
     h5_alignment_drag_changed = QtCore.Signal(float, float, float, float, float)
+    h5_alignment_drag_finished = QtCore.Signal()
 
     def __init__(
         self,
@@ -1215,7 +1216,12 @@ class AlignmentTimelineWidget(QtWidgets.QWidget):
         if self._dragging_h5:
             if self._h5_drag_snapshot is None:
                 return
-            position_time_s = self._time_at_x(event.position().x(), clamp=False)
+            position_time_s = self._time_at_x(
+                event.position().x(),
+                clamp=False,
+                range_start_s=self._h5_drag_snapshot.range_start_s,
+                range_end_s=self._h5_drag_snapshot.range_end_s,
+            )
             h5_desired_start_s = position_time_s - self._h5_drag_anchor_s
             dragged = apply_timeline_h5_alignment_drag(
                 self._h5_drag_snapshot,
@@ -1256,6 +1262,7 @@ class AlignmentTimelineWidget(QtWidgets.QWidget):
     def mouseReleaseEvent(self, event: QtGui.QMouseEvent) -> None:
         del event
         was_dragging_offset_track = self._dragging_camera or self._dragging_leg2
+        was_dragging_h5 = self._dragging_h5
         self._dragging_camera = False
         self._dragging_leg2 = False
         self._dragging_h5 = False
@@ -1263,6 +1270,8 @@ class AlignmentTimelineWidget(QtWidgets.QWidget):
         self._dragging_playhead = False
         if was_dragging_offset_track:
             self._range_model.end_visible_range_freeze(recompute=True)
+        if was_dragging_h5:
+            self.h5_alignment_drag_finished.emit()
         self.update()
         self._update_hover_cursor()
 
@@ -1390,9 +1399,17 @@ class AlignmentTimelineWidget(QtWidgets.QWidget):
         frac = min(1.0, max(0.0, frac))
         return plot_rect.left() + frac * plot_rect.width()
 
-    def _time_at_x(self, x: float, *, clamp: bool) -> float:
+    def _time_at_x(
+        self,
+        x: float,
+        *,
+        clamp: bool,
+        range_start_s: float | None = None,
+        range_end_s: float | None = None,
+    ) -> float:
         plot_rect = self._plot_rect()
-        range_start_s, range_end_s = self._range_model.visible_range_s()
+        if range_start_s is None or range_end_s is None:
+            range_start_s, range_end_s = self._range_model.visible_range_s()
         if plot_rect.width() <= 1:
             return range_start_s
         resolved_x = min(plot_rect.right(), max(plot_rect.left(), x)) if clamp else x
@@ -3309,6 +3326,9 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.timeline_view.camera_offset_changed.connect(self._timeline_camera_offset_changed)
         self.timeline_view.leg2_offset_changed.connect(self._timeline_leg2_offset_changed)
         self.timeline_view.h5_alignment_drag_changed.connect(self._timeline_h5_alignment_drag_changed)
+        self.timeline_view.h5_alignment_drag_finished.connect(
+            self._timeline_h5_alignment_drag_finished
+        )
         self.current_time_slider.valueChanged.connect(self._slider_to_time)
         self.offset_spin.valueChanged.connect(self._offset_changed)
         self.nudge_left_small.clicked.connect(lambda: self._nudge_offset(-0.010))
@@ -4275,9 +4295,42 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.offset_spin.setValue(camera_offset_s)
         self.offset_spin.blockSignals(False)
         self.session.leg2_ultrasonic_datasource.offset_s = leg2_offset_s
+        self._sync_timeline_h5_drag_preview(
+            range_start_s=range_start_s,
+            range_end_s=range_end_s,
+        )
+
+    def _timeline_h5_alignment_drag_finished(self) -> None:
+        range_start_s, range_end_s = self.timeline_range_model.visible_range_s()
         self._sync_previews(
             camera_access_hint="auto",
             timeline_visible_range_s=(range_start_s, range_end_s),
+        )
+
+    def _sync_timeline_h5_drag_preview(
+        self,
+        *,
+        range_start_s: float,
+        range_end_s: float,
+    ) -> None:
+        leg2_duration_s = (
+            self.leg2_ultrasonic_datasource.duration_s
+            if self.leg2_ultrasonic_datasource is not None
+            else 0.0
+        )
+        self.timeline_range_model.set_track_state(
+            camera_duration_s=self.session.camera_track.duration_s,
+            heatmap_duration_s=self.session.heatmap_track.duration_s,
+            camera_offset_s=self.session.timeline.offset_s,
+            leg2_duration_s=leg2_duration_s,
+            leg2_offset_s=self.session.leg2_ultrasonic_datasource.offset_s,
+        )
+        self.timeline_range_model.set_visible_range(range_start_s, range_end_s)
+        self._set_slider_from_current_time()
+        self._set_timeline_view_state()
+        self._refresh_signal_plot()
+        self.current_time_label.setText(
+            f"t = {self.session.timeline.current_time_s:.3f} s | offset = {self.session.timeline.offset_s:.3f} s"
         )
 
     def _toggle_playback(self) -> None:
