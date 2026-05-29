@@ -101,6 +101,40 @@ class TimelineState:
     offset_s: float = 0.0
 
 
+@dataclass(frozen=True)
+class TimelineH5DragSnapshot:
+    range_start_s: float
+    range_end_s: float
+    current_time_s: float
+    camera_offset_s: float
+    leg2_offset_s: float
+
+
+def timeline_h5_drag_affects_alignment(
+    *,
+    camera_duration_s: float,
+    leg2_duration_s: float,
+) -> bool:
+    """Return whether dragging H5 can shift non-H5 offset-bearing tracks."""
+    return camera_duration_s > 0.0 or leg2_duration_s > 0.0
+
+
+def apply_timeline_h5_alignment_drag(
+    snapshot: TimelineH5DragSnapshot,
+    *,
+    h5_desired_start_s: float,
+) -> TimelineH5DragSnapshot:
+    """Apply a coordinate-frame shift so the H5 bar appears at ``h5_desired_start_s``."""
+    delta_s = h5_desired_start_s
+    return TimelineH5DragSnapshot(
+        range_start_s=snapshot.range_start_s - delta_s,
+        range_end_s=snapshot.range_end_s - delta_s,
+        current_time_s=snapshot.current_time_s - delta_s,
+        camera_offset_s=snapshot.camera_offset_s + delta_s,
+        leg2_offset_s=snapshot.leg2_offset_s + delta_s,
+    )
+
+
 @dataclass
 class ExportOverlaySettings:
     visible: bool = True

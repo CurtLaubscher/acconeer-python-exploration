@@ -46,6 +46,9 @@ from heatmap_alignment_core import (  # noqa: E402
     rectify_viewport,
     save_alignment_session,
     scale_viewport_corners,
+    TimelineH5DragSnapshot,
+    apply_timeline_h5_alignment_drag,
+    timeline_h5_drag_affects_alignment,
     timeline_view_bounds_s,
     validate_alignment_session,
     visible_signal_y_range,
@@ -320,6 +323,95 @@ def test_visible_signal_y_range_uses_active_x_window_and_includes_zero() -> None
 
 def test_derive_h5_signal_plot_color_lightens_on_dark_background() -> None:
     assert derive_h5_signal_plot_color() != "#22c55e"
+
+
+def test_timeline_h5_drag_affects_alignment_when_non_h5_tracks_loaded() -> None:
+    assert timeline_h5_drag_affects_alignment(camera_duration_s=1.0, leg2_duration_s=0.0)
+    assert timeline_h5_drag_affects_alignment(camera_duration_s=0.0, leg2_duration_s=1.0)
+    assert not timeline_h5_drag_affects_alignment(camera_duration_s=0.0, leg2_duration_s=0.0)
+
+
+def test_apply_timeline_h5_alignment_drag_shifts_non_h5_offsets_together() -> None:
+    snapshot = TimelineH5DragSnapshot(
+        range_start_s=0.0,
+        range_end_s=10.0,
+        current_time_s=3.0,
+        camera_offset_s=1.0,
+        leg2_offset_s=2.0,
+    )
+    dragged = apply_timeline_h5_alignment_drag(snapshot, h5_desired_start_s=0.5)
+
+    assert dragged.camera_offset_s == pytest.approx(1.5)
+    assert dragged.leg2_offset_s == pytest.approx(2.5)
+    assert dragged.current_time_s == pytest.approx(2.5)
+    assert dragged.range_start_s == pytest.approx(-0.5)
+    assert dragged.range_end_s == pytest.approx(9.5)
+
+
+def test_apply_timeline_h5_alignment_drag_preserves_playhead_screen_fraction() -> None:
+    snapshot = TimelineH5DragSnapshot(
+        range_start_s=0.0,
+        range_end_s=10.0,
+        current_time_s=3.0,
+        camera_offset_s=1.0,
+        leg2_offset_s=2.0,
+    )
+    dragged = apply_timeline_h5_alignment_drag(snapshot, h5_desired_start_s=0.5)
+    span_s = snapshot.range_end_s - snapshot.range_start_s
+    frac_before = (snapshot.current_time_s - snapshot.range_start_s) / span_s
+    dragged_span_s = dragged.range_end_s - dragged.range_start_s
+    frac_after = (dragged.current_time_s - dragged.range_start_s) / dragged_span_s
+
+    assert frac_after == pytest.approx(frac_before)
+
+
+def test_apply_timeline_h5_alignment_drag_preserves_camera_bar_screen_fraction() -> None:
+    snapshot = TimelineH5DragSnapshot(
+        range_start_s=0.0,
+        range_end_s=10.0,
+        current_time_s=3.0,
+        camera_offset_s=1.0,
+        leg2_offset_s=0.0,
+    )
+    dragged = apply_timeline_h5_alignment_drag(snapshot, h5_desired_start_s=0.5)
+    span_s = snapshot.range_end_s - snapshot.range_start_s
+    camera_start_before = -snapshot.camera_offset_s
+    camera_frac_before = (camera_start_before - snapshot.range_start_s) / span_s
+    camera_start_after = -dragged.camera_offset_s
+    dragged_span_s = dragged.range_end_s - dragged.range_start_s
+    camera_frac_after = (camera_start_after - dragged.range_start_s) / dragged_span_s
+
+    assert camera_frac_after == pytest.approx(camera_frac_before)
+
+
+def test_h5_alignment_drag_leaves_peak_distance_signal_times_unchanged() -> None:
+    measurements = (
+        FramePeakMeasurement(
+            frame_index=0,
+            source_tick=0,
+            time_s=0.5,
+            absolute_time=None,
+            status=STATUS_DETECTED,
+            peak_distance_m=1.0,
+            candidate_peak_distance_m=1.0,
+            peak_strength=1.0,
+        ),
+    )
+    series = build_peak_distance_signal_series(measurements)
+    original_detected_times = series.detected_time_s.copy()
+
+    apply_timeline_h5_alignment_drag(
+        TimelineH5DragSnapshot(
+            range_start_s=0.0,
+            range_end_s=5.0,
+            current_time_s=1.0,
+            camera_offset_s=0.25,
+            leg2_offset_s=0.5,
+        ),
+        h5_desired_start_s=0.75,
+    )
+
+    assert np.array_equal(series.detected_time_s, original_detected_times)
 
 
 def test_timeline_view_bounds_s_adds_padding() -> None:
