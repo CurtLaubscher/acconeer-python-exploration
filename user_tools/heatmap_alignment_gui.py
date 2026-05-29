@@ -1181,9 +1181,10 @@ class AlignmentTimelineWidget(QtWidgets.QWidget):
             self.setCursor(QtCore.Qt.CursorShape.ClosedHandCursor)
             return
 
-        if self._h5_track_hit_test(event.position()) and self._h5_alignment_drag_enabled():
+        if self._h5_track_hit_test(event.position()):
+            if not self._h5_alignment_drag_enabled():
+                return
             self._dragging_h5 = True
-            self._range_model.begin_visible_range_freeze()
             self._h5_drag_anchor_s = press_time_s
             range_start_s, range_end_s = self._range_model.visible_range_s()
             self._h5_drag_snapshot = TimelineH5DragSnapshot(
@@ -1236,7 +1237,9 @@ class AlignmentTimelineWidget(QtWidgets.QWidget):
         hover_on_playhead = self._playhead_hit_test(event.position())
         hover_on_camera_bar = self._camera_track_hit_test(event.position())
         hover_on_leg2_bar = self._leg2_track_hit_test(event.position())
-        hover_on_h5_bar = self._h5_track_hit_test(event.position()) and self._h5_alignment_drag_enabled()
+        hover_on_h5_bar = (
+            self._h5_track_hit_test(event.position()) and self._h5_alignment_drag_enabled()
+        )
         if hover_on_playhead != self._hover_on_playhead:
             self._hover_on_playhead = hover_on_playhead
             self._update_hover_cursor()
@@ -1252,13 +1255,13 @@ class AlignmentTimelineWidget(QtWidgets.QWidget):
 
     def mouseReleaseEvent(self, event: QtGui.QMouseEvent) -> None:
         del event
-        was_dragging_track = self._dragging_camera or self._dragging_leg2 or self._dragging_h5
+        was_dragging_offset_track = self._dragging_camera or self._dragging_leg2
         self._dragging_camera = False
         self._dragging_leg2 = False
         self._dragging_h5 = False
         self._h5_drag_snapshot = None
         self._dragging_playhead = False
-        if was_dragging_track:
+        if was_dragging_offset_track:
             self._range_model.end_visible_range_freeze(recompute=True)
         self.update()
         self._update_hover_cursor()
@@ -1309,7 +1312,9 @@ class AlignmentTimelineWidget(QtWidgets.QWidget):
     def _h5_track_hit_test(self, widget_pos: QtCore.QPointF) -> bool:
         if self._range_model.heatmap_duration_s <= 0.0:
             return False
-        return self._track_rect(0.0, self._range_model.heatmap_duration_s, row=1).contains(widget_pos)
+        return self._track_rect(0.0, self._range_model.heatmap_duration_s, row=1).contains(
+            widget_pos
+        )
 
     def _leg2_track_hit_test(self, widget_pos: QtCore.QPointF) -> bool:
         if self._range_model.leg2_duration_s <= 0.0:
@@ -4270,19 +4275,10 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.offset_spin.setValue(camera_offset_s)
         self.offset_spin.blockSignals(False)
         self.session.leg2_ultrasonic_datasource.offset_s = leg2_offset_s
-        self.timeline_range_model.set_track_state(
-            camera_duration_s=self.session.camera_track.duration_s,
-            heatmap_duration_s=self.session.heatmap_track.duration_s,
-            camera_offset_s=camera_offset_s,
-            leg2_duration_s=(
-                self.leg2_ultrasonic_datasource.duration_s
-                if self.leg2_ultrasonic_datasource is not None
-                else 0.0
-            ),
-            leg2_offset_s=leg2_offset_s,
+        self._sync_previews(
+            camera_access_hint="auto",
+            timeline_visible_range_s=(range_start_s, range_end_s),
         )
-        self.timeline_range_model.set_visible_range(range_start_s, range_end_s)
-        self._sync_previews(camera_access_hint="auto")
 
     def _toggle_playback(self) -> None:
         self._set_playback_active(not self.play_timer.isActive())
@@ -4817,12 +4813,15 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         *,
         camera_access_hint: str = "auto",
         invalidate_source_resolution: bool = True,
+        timeline_visible_range_s: tuple[float, float] | None = None,
     ) -> None:
         if invalidate_source_resolution:
             self._invalidate_source_resolution_viewport()
         self._load_current_camera_frame(access_hint=camera_access_hint)
         self._refresh_camera_view_corners()
         self._update_timeline_range_from_session()
+        if timeline_visible_range_s is not None:
+            self.timeline_range_model.set_visible_range(*timeline_visible_range_s)
         self._set_slider_from_current_time()
         self._set_timeline_view_state()
         self._refresh_signal_plot()
