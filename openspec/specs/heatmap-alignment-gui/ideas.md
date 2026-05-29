@@ -98,6 +98,8 @@ Possible directions:
 - Add frame-by-frame navigation for the H5 track, camera track, or current aligned preview.
 - Add simple keyboard shortcuts for navigating time, such as stepping frames, nudging by small time increments, jumping to start/end, and toggling playback.
 - Preserve the simple H5-fixed, camera-draggable model unless a broader timeline model is explicitly needed.
+- Move toward a neutral/global timeline reference where H5 has its own offset instead of being the implicit zero-time ground truth. H5 probably should become an offset-bearing track like the other sources so the timeline model does not privilege one loaded resource as the permanent coordinate origin.
+- Treat short-term H5 dragging that shifts the view, current time, and all non-H5 offsets as a bridge, not the final model. In that bridge model, dragging H5 while H5 is the only loaded timeline resource is necessarily a no-op because there are no other offsets to shift; that behavior should change once H5 has its own offset against a global reference.
 - Add a broader track interaction model where tracks can be selected, multi-selected with modifier clicks, and acted on through a context menu.
 - Add a way to link tracks so their offsets stay locked together and dragging one linked track drags the linked group. Clicking a linked track could select the whole linked group so the relationship is visible before dragging.
 - Add a way to fix or pin a track so it cannot be dragged accidentally. This would allow future workflows where H5 is not implicitly the only fixed reference track.
