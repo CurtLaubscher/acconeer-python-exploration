@@ -260,6 +260,45 @@ def test_timeline_h5_drag_shifts_camera_and_leg2_offsets_via_signal(
     assert range_end_s == pytest.approx(5.5)
 
 
+def test_timeline_h5_drag_repeat_move_at_same_pixel_is_stable(
+    qapplication: QApplication,
+) -> None:
+    range_model = TimelineRangeModel()
+    range_model.set_track_state(
+        camera_duration_s=4.0,
+        heatmap_duration_s=5.0,
+        camera_offset_s=1.0,
+        leg2_duration_s=3.0,
+        leg2_offset_s=2.0,
+    )
+    range_model.set_visible_range(-1.0, 6.0)
+    widget = AlignmentTimelineWidget(range_model)
+    widget.resize(900, 124)
+    widget.show()
+    qapplication.processEvents()
+    widget.set_timeline_state(current_time_s=1.5)
+
+    received: list[tuple[float, float, float, float, float]] = []
+
+    def _on_h5_drag(*values: float) -> None:
+        received.append(values)
+        range_model.set_visible_range(values[0], values[1])
+
+    widget.h5_alignment_drag_changed.connect(_on_h5_drag)
+
+    press_pos = widget._track_rect(0.0, 5.0, row=1).center()
+    move_pos = QtCore.QPointF(widget._time_to_x(3.0), press_pos.y())
+
+    _timeline_mouse_press(widget, press_pos)
+    _timeline_mouse_move(widget, move_pos)
+    _timeline_mouse_move(widget, move_pos)
+
+    assert len(received) == 2
+    assert received[0] == pytest.approx(received[1])
+    widget.close()
+    qapplication.processEvents()
+
+
 def test_timeline_h5_drag_visible_range_follows_pointer_and_survives_release(
     qapplication: QApplication,
 ) -> None:
