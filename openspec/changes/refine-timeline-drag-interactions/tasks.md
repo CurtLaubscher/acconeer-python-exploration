@@ -23,5 +23,5 @@
 ## 4. Verification
 
 - [x] 4.1 Run the focused heatmap alignment GUI tests through the repo-managed Hatch environment.
-- [ ] 4.2 Launch the GUI with `hatch run app:heatmap-align` and manually verify playhead priority, camera drag, Leg2 drag, H5 drag with non-H5 tracks, and H5-only no-op behavior.
-- [ ] 4.3 Verify Signals and Timeline current-time indicators remain horizontally aligned after H5 dragging and normal scrubbing.
+- [x] 4.2 Launch the GUI with `hatch run app:heatmap-align` and manually verify playhead priority, camera drag, Leg2 drag, H5 drag with non-H5 tracks, and H5-only no-op behavior.
+- [x] 4.3 Verify Signals and Timeline current-time indicators remain horizontally aligned after H5 dragging and normal scrubbing.
