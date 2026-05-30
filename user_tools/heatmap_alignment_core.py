@@ -11,14 +11,16 @@ import json
 import math
 import os
 import shutil
-import subprocess
 import tempfile
 from collections import OrderedDict
 from dataclasses import asdict, dataclass, field
 from functools import lru_cache
 from hashlib import sha256
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
+
+if TYPE_CHECKING:
+    from heatmap_alignment_resource_jobs import ResourceJobPhase
 
 import cv2
 import numpy as np
@@ -929,6 +931,12 @@ def prepare_proxy_video(
     max_dimension: int = 1280,
     cache_root: Path | None = None,
 ) -> ProxyVideoResult:
+    """Prepare a preview proxy for large camera videos.
+
+    Small sources at or below ``max_dimension`` are returned unchanged. Larger
+    sources require ffmpeg; when ffmpeg is unavailable the call raises instead
+    of falling back to full-resolution interactive preview.
+    """
     source_probe = probe_video(source_path)
     if max(source_probe.width, source_probe.height) <= max_dimension:
         return ProxyVideoResult(
@@ -941,13 +949,7 @@ def prepare_proxy_video(
 
     ffmpeg_path = _find_ffmpeg()
     if ffmpeg_path is None:
-        return ProxyVideoResult(
-            source_path=source_path,
-            display_path=source_path,
-            source_probe=source_probe,
-            proxy_path=None,
-            state="proxy_unavailable",
-        )
+        raise RuntimeError("ffmpeg was not found; preview proxy generation is required.")
 
     proxy_path = _proxy_cache_path(
         source_path,
@@ -964,53 +966,12 @@ def prepare_proxy_video(
             state="proxy_reused",
         )
 
-    proxy_path.parent.mkdir(parents=True, exist_ok=True)
-    scaled_width, scaled_height = _scaled_video_dimensions(
-        source_probe.width,
-        source_probe.height,
-        max_dimension,
-    )
-    try:
-        subprocess.run(
-            [
-                ffmpeg_path,
-                "-y",
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-i",
-                str(source_path),
-                "-vf",
-                f"scale={scaled_width}:{scaled_height}",
-                "-an",
-                "-c:v",
-                "libx264",
-                "-preset",
-                "veryfast",
-                "-crf",
-                "18",
-                "-pix_fmt",
-                "yuv420p",
-                str(proxy_path),
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-    except subprocess.CalledProcessError:
-        return ProxyVideoResult(
-            source_path=source_path,
-            display_path=source_path,
-            source_probe=source_probe,
-            proxy_path=None,
-            state="proxy_unavailable",
-        )
-    return ProxyVideoResult(
-        source_path=source_path,
-        display_path=proxy_path,
-        source_probe=source_probe,
-        proxy_path=proxy_path,
-        state="proxy_built",
+    from heatmap_alignment_resource_jobs import build_preview_proxy_video
+
+    return build_preview_proxy_video(
+        source_path,
+        max_dimension=max_dimension,
+        cache_root=cache_root,
     )
 
 
@@ -1282,6 +1243,35 @@ class HeatmapTruthSource:
         self.color_max = color_max
         self.fixed_levels = fixed_levels
         self._fixed_color_level = self._resolve_fixed_color_level()
+
+    @classmethod
+    def from_loaded_record(
+        cls,
+        heatmap_record: object,
+        *,
+        path: Path,
+        subsweep_idx: int,
+        color_min: float = 0.0,
+        color_max: float | None = 3000.0,
+        fixed_levels: bool = True,
+        resolved_fixed_color_level: float | None = None,
+    ) -> HeatmapTruthSource:
+        """Construct a truth source from a worker-loaded ``HeatmapRecord``."""
+
+        instance = cls.__new__(cls)
+        instance.path = path
+        instance.record = heatmap_record
+        instance.subsweep_idx = subsweep_idx
+        instance.color_min = color_min
+        instance.color_max = color_max
+        instance.fixed_levels = fixed_levels
+        if fixed_levels and resolved_fixed_color_level is not None:
+            instance._fixed_color_level = resolved_fixed_color_level
+        elif fixed_levels:
+            instance._fixed_color_level = instance._resolve_fixed_color_level()
+        else:
+            instance._fixed_color_level = None
+        return instance
 
     def close(self) -> None:
         self.record.close()
@@ -1826,6 +1816,7 @@ ResourceAction = Literal[
     "reload",
     "reveal",
     "inspect",
+    "cancel",
 ]
 
 
@@ -1843,6 +1834,19 @@ class ResourceSummary:
     details: str
     messages: tuple[str, ...]
     actions: tuple[ResourceAction, ...]
+    job_phase: ResourceJobPhase = "idle"
+    job_target_filename: str = ""
+    job_detail: str = ""
+    job_cancellable: bool = False
+
+
+@dataclass(frozen=True)
+class ResourceJobPresentation:
+    kind: ResourceKind
+    phase: ResourceJobPhase = "idle"
+    target_filename: str = ""
+    detail: str = ""
+    cancellable: bool = False
 
 
 @dataclass(frozen=True)
@@ -1859,6 +1863,7 @@ class AlignmentResourceRuntime:
     leg2_sample_count: int | None = None
     reload_errors: tuple[tuple[ResourceKind, str], ...] = ()
     load_warnings: tuple[tuple[ResourceKind, str], ...] = ()
+    resource_jobs: tuple[ResourceJobPresentation, ...] = ()
 
 
 def elide_path_middle(path_text: str, max_chars: int) -> str:
@@ -1893,12 +1898,25 @@ def elide_path_middle(path_text: str, max_chars: int) -> str:
     return f"{prefix}{ellipsis}{suffix}"
 
 
+def _resource_job_presentation(
+    kind: ResourceKind,
+    runtime: AlignmentResourceRuntime,
+) -> ResourceJobPresentation | None:
+    for entry in runtime.resource_jobs:
+        if entry.kind == kind:
+            return entry
+    return None
+
+
 def _resource_messages(
     kind: ResourceKind,
     runtime: AlignmentResourceRuntime,
 ) -> tuple[str, ...]:
     messages = [text for key, text in runtime.reload_errors if key == kind]
     messages.extend(text for key, text in runtime.load_warnings if key == kind)
+    job = _resource_job_presentation(kind, runtime)
+    if job is not None and job.phase == "failed" and job.detail:
+        messages = [job.detail, *messages]
     return tuple(messages)
 
 
@@ -1907,7 +1925,13 @@ def _resource_status(
     path_text: str,
     loaded: bool,
     messages: tuple[str, ...],
+    job: ResourceJobPresentation | None = None,
 ) -> ResourceStatus:
+    if job is not None and job.phase not in ("idle", "superseded"):
+        if job.phase == "failed":
+            return "invalid"
+        if job.phase in ("pending", "loading", "building", "waiting", "cancelling"):
+            return "warning" if loaded else "unloaded"
     if loaded:
         if messages:
             return "warning"
@@ -1928,8 +1952,26 @@ def _resource_actions(
     path_text: str,
     can_unload: bool,
     messages: tuple[str, ...],
+    job: ResourceJobPresentation | None = None,
 ) -> tuple[ResourceAction, ...]:
     actions: list[ResourceAction] = []
+    if job is not None and job.phase in ("pending", "loading", "building", "waiting", "cancelling"):
+        if job.cancellable:
+            actions.append("cancel")
+        if status in ("loaded", "warning"):
+            actions.extend(("replace", "unload"))
+        elif path_text:
+            actions.append("reload")
+        if path_text:
+            actions.append("reveal")
+        if messages:
+            actions.append("inspect")
+        deduped: list[ResourceAction] = []
+        for action in actions:
+            if action not in deduped:
+                deduped.append(action)
+        return tuple(deduped)
+
     if status in ("unloaded", "missing", "invalid"):
         actions.append("load")
     elif status in ("loaded", "warning"):
@@ -1946,7 +1988,7 @@ def _resource_actions(
     if can_unload and "unload" not in actions and status in ("loaded", "warning"):
         actions.append("unload")
 
-    deduped: list[ResourceAction] = []
+    deduped = []
     for action in actions:
         if action not in deduped:
             deduped.append(action)
@@ -1962,14 +2004,28 @@ def build_alignment_resource_summaries(
     summaries: list[ResourceSummary] = []
 
     camera_path = session.camera_track.path
+    camera_job = _resource_job_presentation("camera", runtime)
     camera_messages = _resource_messages("camera", runtime)
     camera_status = _resource_status(
         path_text=camera_path,
         loaded=runtime.camera_loaded,
         messages=camera_messages,
+        job=camera_job,
     )
     camera_details = "No camera video loaded."
-    if runtime.camera_loaded:
+    if camera_job is not None and camera_job.phase not in ("idle", "superseded"):
+        target = camera_job.target_filename or Path(camera_path).name
+        if camera_job.phase == "building":
+            camera_details = f"Building preview proxy for {target}..."
+        elif camera_job.phase == "waiting":
+            camera_details = camera_job.detail or f"Waiting for {target}..."
+        elif camera_job.phase == "cancelling":
+            camera_details = f"Cancelling load for {target}..."
+        elif camera_job.phase == "failed":
+            camera_details = camera_job.detail or f"Failed to load {target}."
+        else:
+            camera_details = camera_job.detail or f"Loading {target}..."
+    elif runtime.camera_loaded:
         camera_details = (
             f"{session.camera_track.frame_count} frames, "
             f"{session.camera_track.fps:.3f} fps, "
@@ -1993,19 +2049,36 @@ def build_alignment_resource_summaries(
                 path_text=camera_path,
                 can_unload=runtime.camera_loaded,
                 messages=camera_messages,
+                job=camera_job,
             ),
+            job_phase=camera_job.phase if camera_job is not None else "idle",
+            job_target_filename=camera_job.target_filename if camera_job is not None else "",
+            job_detail=camera_job.detail if camera_job is not None else "",
+            job_cancellable=camera_job.cancellable if camera_job is not None else False,
         )
     )
 
     h5_path = session.heatmap_track.path
+    h5_job = _resource_job_presentation("radar_h5", runtime)
     h5_messages = _resource_messages("radar_h5", runtime)
     h5_status = _resource_status(
         path_text=h5_path,
         loaded=runtime.radar_h5_loaded,
         messages=h5_messages,
+        job=h5_job,
     )
     h5_details = "No radar raw H5 recording loaded."
-    if runtime.radar_h5_loaded:
+    if h5_job is not None and h5_job.phase not in ("idle", "superseded"):
+        target = h5_job.target_filename or Path(h5_path).name
+        if h5_job.phase == "cancelling":
+            h5_details = f"Cancelling load for {target}..."
+        elif h5_job.phase == "waiting":
+            h5_details = h5_job.detail or f"Waiting for {target}..."
+        elif h5_job.phase == "failed":
+            h5_details = h5_job.detail or f"Failed to load {target}."
+        else:
+            h5_details = h5_job.detail or f"Loading {target}..."
+    elif runtime.radar_h5_loaded:
         frame_count = max(
             1,
             int(round(session.heatmap_track.duration_s * max(session.heatmap_track.fps, 0.0))),
@@ -2035,7 +2108,12 @@ def build_alignment_resource_summaries(
                 path_text=h5_path,
                 can_unload=runtime.radar_h5_loaded,
                 messages=h5_messages,
+                job=h5_job,
             ),
+            job_phase=h5_job.phase if h5_job is not None else "idle",
+            job_target_filename=h5_job.target_filename if h5_job is not None else "",
+            job_detail=h5_job.detail if h5_job is not None else "",
+            job_cancellable=h5_job.cancellable if h5_job is not None else False,
         )
     )
 

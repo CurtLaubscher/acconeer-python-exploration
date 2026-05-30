@@ -23,6 +23,8 @@ from heatmap_alignment_gui import (  # noqa: E402
     ResourcesWindow,
     SignalPlotWidget,
     TimelineRangeModel,
+    _H5ResourceBackup,
+    _CameraResourceBackup,
     build_argument_parser,
     format_track_offset_label,
     track_offset_label_rect,
@@ -32,13 +34,13 @@ from heatmap_alignment_core import (  # noqa: E402
     AlignmentResourceRuntime,
     AlignmentSession,
     CameraTrack,
+    ExportOverlaySettings,
     HeatmapTrack,
     Leg2StanceIntervals,
     Leg2UltrasonicDatasourceSettings,
     Leg2UltrasonicSignalSeries,
-    PeakDistanceSignalSeries,
+    ResourceJobPresentation,
     build_alignment_resource_summaries,
-    load_alignment_session,
     save_alignment_session,
 )
 from scipy.io import savemat
@@ -486,6 +488,55 @@ def test_resource_menu_enablement_tracks_loaded_state(qapplication: QApplication
     assert window.reload_camera_action.isEnabled() is True
 
 
+def test_resource_summaries_expose_pending_job_state() -> None:
+    session = AlignmentSession(
+        camera_track=CameraTrack(path="/tmp/example.mp4"),
+        heatmap_track=HeatmapTrack(path="/tmp/example.h5"),
+    )
+    runtime = AlignmentResourceRuntime(
+        camera_loaded=True,
+        radar_h5_loaded=True,
+        resource_jobs=(
+            ResourceJobPresentation(
+                kind="camera",
+                phase="building",
+                target_filename="replacement.mp4",
+                detail="Building preview proxy for replacement.mp4...",
+                cancellable=True,
+            ),
+        ),
+    )
+
+    summaries = build_alignment_resource_summaries(session, runtime)
+    camera_summary = next(entry for entry in summaries if entry.kind == "camera")
+
+    assert camera_summary.job_phase == "building"
+    assert camera_summary.job_target_filename == "replacement.mp4"
+    assert "replacement.mp4" in camera_summary.details
+    assert "cancel" in camera_summary.actions
+
+
+def test_export_disabled_while_resource_jobs_block(qapplication: QApplication) -> None:
+    window = HeatmapAlignmentWindow()
+    window.session.camera_track = CameraTrack(path="/tmp/example.mp4", duration_s=1.0, fps=1.0)
+    window.session.heatmap_track = HeatmapTrack(path="/tmp/example.h5", duration_s=1.0, fps=1.0)
+    window.camera_source = object()
+    window.heatmap_source = object()
+    window._refresh_resources_ui()
+    assert window.export_synced_action.isEnabled() is True
+
+    from heatmap_alignment_resource_jobs import begin_resource_job
+
+    begin_resource_job(
+        window._resource_job_manager.board(),
+        "camera",
+        target_path=Path("/tmp/other.mp4"),
+        replaces_active=True,
+    )
+    window._refresh_resources_ui()
+    assert window.export_synced_action.isEnabled() is False
+
+
 def test_timeline_time_axis_tracks_signal_plot_viewbox(
     qapplication: QApplication,
 ) -> None:
@@ -561,3 +612,487 @@ def test_corner_editor_center_drag_uses_bounded_drag_start_delta() -> None:
             dtype=np.float32,
         ),
     )
+
+
+def test_resource_summaries_expose_waiting_job_state() -> None:
+    session = AlignmentSession(
+        camera_track=CameraTrack(path="/tmp/example.mp4"),
+        heatmap_track=HeatmapTrack(path="/tmp/example.h5"),
+    )
+    runtime = AlignmentResourceRuntime(
+        camera_loaded=True,
+        radar_h5_loaded=True,
+        resource_jobs=(
+            ResourceJobPresentation(
+                kind="camera",
+                phase="waiting",
+                target_filename="replacement.mp4",
+                detail="Waiting to build preview proxy for replacement.mp4...",
+                cancellable=True,
+            ),
+        ),
+    )
+
+    summaries = build_alignment_resource_summaries(session, runtime)
+    camera_summary = next(entry for entry in summaries if entry.kind == "camera")
+
+    assert camera_summary.job_phase == "waiting"
+    assert "Waiting" in camera_summary.details
+    assert "replacement.mp4" in camera_summary.details
+
+
+def test_resource_loading_overlays_support_empty_camera_view(
+    qapplication: QApplication,
+) -> None:
+    window = HeatmapAlignmentWindow()
+
+    window._update_resource_loading_overlays()
+
+    assert window.camera_view._loading_overlay_active is False
+    assert window.truth_view._loading_overlay_active is False
+    assert window.viewport_view._loading_overlay_active is False
+
+
+def test_image_preview_loading_overlay_suppresses_placeholder_title(
+    qapplication: QApplication,
+) -> None:
+    from heatmap_alignment_gui import ImagePreview
+
+    preview = ImagePreview("Rendered Heatmap")
+    assert preview.text() == "Rendered Heatmap"
+
+    preview.set_loading_overlay(True, "Loading trial01.h5...")
+    assert preview.text() == ""
+
+    preview.set_loading_overlay(False)
+    assert preview.text() == "Rendered Heatmap"
+
+
+def test_resource_loading_overlays_include_viewport_for_active_jobs(
+    qapplication: QApplication,
+) -> None:
+    from heatmap_alignment_resource_jobs import begin_resource_job
+
+    window = HeatmapAlignmentWindow()
+    begin_resource_job(
+        window._resource_job_manager.board(),
+        "camera",
+        target_path=Path("/tmp/replacement.mp4"),
+        replaces_active=True,
+        message="Loading replacement.mp4...",
+    )
+
+    window._update_resource_loading_overlays()
+
+    assert window.viewport_view._loading_overlay_active is True
+    assert "replacement.mp4" in window.viewport_view._loading_overlay_message
+
+
+def test_resource_job_manager_cancel_completes_to_idle(
+    qapplication: QApplication,
+) -> None:
+    from heatmap_alignment_gui import ResourceJobManager
+    from heatmap_alignment_resource_jobs import begin_resource_job
+
+    manager = ResourceJobManager()
+    begin_resource_job(
+        manager.board(),
+        "radar_h5",
+        target_path=Path("/tmp/trial.h5"),
+        replaces_active=True,
+    )
+
+    assert manager.cancel_job("radar_h5") is True
+    assert manager.board().radar_h5.phase == "idle"
+    assert manager.board().radar_h5.cancel_requested is False
+
+
+def test_resource_job_manager_cancel_before_success_discards_payload(
+    qapplication: QApplication,
+) -> None:
+    from heatmap_alignment_gui import ResourceJobManager
+    from heatmap_alignment_resource_jobs import LoadedH5ResourcePayload, begin_resource_job
+
+    manager = ResourceJobManager()
+    generation = begin_resource_job(
+        manager.board(),
+        "radar_h5",
+        target_path=Path("/tmp/new.h5"),
+        replaces_active=True,
+    )
+    manager.cancel_job("radar_h5")
+
+    class _FakeRecord:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    record = _FakeRecord()
+    payload = LoadedH5ResourcePayload(
+        path=Path("/tmp/new.h5"),
+        record=record,
+        subsweep_idx=0,
+        metadata=HeatmapTrack(path="/tmp/new.h5"),
+        first_frame_shape=(10, 10),
+    )
+
+    manager._handle_job_success("radar_h5", generation, payload)
+
+    assert record.closed is True
+    assert manager.take_pending_result("radar_h5", generation) is None
+    assert manager.board().radar_h5.phase == "idle"
+
+
+def test_resource_job_manager_abandon_rejects_late_dispatch(
+    qapplication: QApplication,
+) -> None:
+    from heatmap_alignment_gui import ResourceJobManager
+    from heatmap_alignment_resource_jobs import LoadedH5ResourcePayload
+
+    manager = ResourceJobManager()
+
+    class _FakeRecord:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    record = _FakeRecord()
+    payload = LoadedH5ResourcePayload(
+        path=Path("/tmp/trial.h5"),
+        record=record,
+        subsweep_idx=0,
+        metadata=HeatmapTrack(path="/tmp/trial.h5"),
+        first_frame_shape=(10, 10),
+    )
+
+    manager.abandon_all_jobs()
+    manager._dispatch_job_success("radar_h5", 1, payload)
+
+    assert record.closed is True
+    assert manager.take_pending_result("radar_h5", 1) is None
+
+
+def test_start_resource_jobs_clear_abandoned_flag(
+    qapplication: QApplication,
+) -> None:
+    from heatmap_alignment_gui import ResourceJobManager
+
+    manager = ResourceJobManager()
+    manager.abandon_all_jobs()
+    assert manager._abandoned is True
+
+    manager.start_camera_job(Path("/tmp/trial.mp4"), replaces_active=False)
+    assert manager._abandoned is False
+
+    manager.abandon_all_jobs()
+    manager.start_h5_job(
+        Path("/tmp/trial.h5"),
+        replaces_active=False,
+        session_idx=None,
+        group_idx=None,
+        entry_idx=None,
+        subsweep_idx=None,
+        color_min=0.0,
+        color_max=3000.0,
+        fixed_levels=True,
+    )
+    assert manager._abandoned is False
+
+
+def test_resource_job_runnable_skips_dispatch_when_abandoned(
+    qapplication: QApplication,
+) -> None:
+    from heatmap_alignment_gui import ResourceJobManager, _ResourceJobRunnable
+    from heatmap_alignment_resource_jobs import LoadedH5ResourcePayload
+
+    manager = ResourceJobManager()
+
+    class _FakeRecord:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    record = _FakeRecord()
+    payload = LoadedH5ResourcePayload(
+        path=Path("/tmp/trial.h5"),
+        record=record,
+        subsweep_idx=0,
+        metadata=HeatmapTrack(path="/tmp/trial.h5"),
+        first_frame_shape=(10, 10),
+    )
+
+    manager.abandon_all_jobs()
+    runnable = _ResourceJobRunnable(manager, "radar_h5", 1, lambda: payload)
+    runnable.run()
+
+    assert record.closed is True
+    assert manager.take_pending_result("radar_h5", 1) is None
+
+
+def test_resource_job_manager_supersede_cancels_prior_generation(
+    qapplication: QApplication,
+) -> None:
+    from heatmap_alignment_gui import ResourceJobManager
+
+    manager = ResourceJobManager()
+    first_generation = manager.start_camera_job(
+        Path("/tmp/first.mp4"),
+        replaces_active=False,
+    )
+    second_generation = manager.start_camera_job(
+        Path("/tmp/second.mp4"),
+        replaces_active=False,
+    )
+
+    assert first_generation == 1
+    assert second_generation == 2
+    assert ("camera", first_generation) in manager._cancelled_generations
+
+
+def test_resource_job_manager_abandon_releases_pending_h5_payload(
+    qapplication: QApplication,
+) -> None:
+    from heatmap_alignment_gui import ResourceJobManager
+    from heatmap_alignment_resource_jobs import LoadedH5ResourcePayload
+
+    manager = ResourceJobManager()
+
+    class _FakeRecord:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    record = _FakeRecord()
+    payload = LoadedH5ResourcePayload(
+        path=Path("/tmp/trial.h5"),
+        record=record,
+        subsweep_idx=0,
+        metadata=HeatmapTrack(path="/tmp/trial.h5"),
+        first_frame_shape=(10, 10),
+    )
+    manager._pending_results[("radar_h5", 1)] = payload
+
+    manager.abandon_all_jobs()
+
+    assert record.closed is True
+    assert manager.board().radar_h5.phase == "idle"
+
+
+def test_resource_job_manager_stale_success_releases_h5_payload(
+    qapplication: QApplication,
+) -> None:
+    from heatmap_alignment_gui import ResourceJobManager
+    from heatmap_alignment_resource_jobs import LoadedH5ResourcePayload, begin_resource_job
+
+    manager = ResourceJobManager()
+    old_generation = begin_resource_job(
+        manager.board(),
+        "radar_h5",
+        target_path=Path("/tmp/old.h5"),
+        replaces_active=False,
+    )
+    begin_resource_job(
+        manager.board(),
+        "radar_h5",
+        target_path=Path("/tmp/new.h5"),
+        replaces_active=False,
+    )
+
+    class _FakeRecord:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    record = _FakeRecord()
+    payload = LoadedH5ResourcePayload(
+        path=Path("/tmp/old.h5"),
+        record=record,
+        subsweep_idx=0,
+        metadata=HeatmapTrack(path="/tmp/old.h5"),
+        first_frame_shape=(10, 10),
+    )
+
+    manager._handle_job_success("radar_h5", old_generation, payload)
+
+    assert record.closed is True
+    assert manager.take_pending_result("radar_h5", old_generation) is None
+
+
+def test_apply_h5_job_result_clears_peak_datasource_for_different_replacement(
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from heatmap_alignment_resource_jobs import LoadedH5ResourcePayload
+
+    window = HeatmapAlignmentWindow()
+    window.peak_distance_datasource = object()
+    cleared: list[str] = []
+
+    def _clear() -> None:
+        cleared.append("cleared")
+        window.peak_distance_datasource = None
+
+    monkeypatch.setattr(window, "_clear_peak_distance_datasource", _clear)
+    monkeypatch.setattr(window, "_rebuild_overlay_plot_renderer", lambda: None)
+    monkeypatch.setattr(window, "_reload_peak_distance_datasource_from_session", lambda: None)
+
+    class _FakeHeatmapSource:
+        def close(self) -> None:
+            return None
+
+    class _FakeRecord:
+        session_idx = 0
+        group_idx = 0
+        entry_idx = 0
+        duration_s = 1.0
+        fps = 1.0
+        results: list[object] = []
+
+        def close(self) -> None:
+            return None
+
+    window._h5_replacement_backup = _H5ResourceBackup(
+        heatmap_source=_FakeHeatmapSource(),
+        heatmap_track=HeatmapTrack(path="/tmp/old.h5"),
+        viewport_output_width=10,
+        viewport_output_height=10,
+    )
+    payload = LoadedH5ResourcePayload(
+        path=Path("/tmp/new.h5"),
+        record=_FakeRecord(),
+        subsweep_idx=0,
+        metadata=HeatmapTrack(path="/tmp/new.h5"),
+        first_frame_shape=(10, 10),
+        resolved_fixed_color_level=100.0,
+    )
+    monkeypatch.setattr(
+        "heatmap_alignment_gui.build_h5_truth_source_from_payload",
+        lambda payload: _FakeHeatmapSource(),
+    )
+
+    window._apply_h5_job_result(payload)
+
+    assert cleared == ["cleared"]
+    assert window.session.heatmap_track.path == "/tmp/new.h5"
+
+
+def test_restore_h5_replacement_backup_preserves_peak_datasource(
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = HeatmapAlignmentWindow()
+    peak_marker = object()
+    window.peak_distance_datasource = peak_marker
+
+    class _FakeHeatmapSource:
+        def close(self) -> None:
+            return None
+
+    backup_source = _FakeHeatmapSource()
+    window._h5_replacement_backup = _H5ResourceBackup(
+        heatmap_source=backup_source,
+        heatmap_track=HeatmapTrack(path="/tmp/old.h5"),
+        viewport_output_width=10,
+        viewport_output_height=10,
+    )
+    window.heatmap_source = _FakeHeatmapSource()
+    monkeypatch.setattr(window, "_rebuild_overlay_plot_renderer", lambda: None)
+
+    window._restore_h5_replacement_backup()
+
+    assert window.heatmap_source is backup_source
+    assert window.peak_distance_datasource is peak_marker
+
+
+def test_abandon_resource_jobs_clears_replacement_backups(
+    qapplication: QApplication,
+) -> None:
+    window = HeatmapAlignmentWindow()
+    window._camera_replacement_backup = object()
+    window._h5_replacement_backup = object()
+
+    window._abandon_resource_jobs()
+
+    assert window._camera_replacement_backup is None
+    assert window._h5_replacement_backup is None
+
+
+def test_apply_camera_job_result_resets_incompatible_viewport(
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from heatmap_alignment_core import ProxyVideoResult, VideoProbe
+    from heatmap_alignment_resource_jobs import CameraResourceJobResult
+
+    window = HeatmapAlignmentWindow()
+    incompatible_corners = [[100.0, 50.0], [900.0, 50.0], [900.0, 550.0], [100.0, 550.0]]
+    window.session.viewport.corners = [list(point) for point in incompatible_corners]
+    initialized: list[str] = []
+
+    def _initialize_default_viewport_corners_native() -> None:
+        initialized.append("default")
+        window.session.viewport.corners = [[1.0, 1.0], [2.0, 1.0], [2.0, 2.0], [1.0, 2.0]]
+
+    monkeypatch.setattr(
+        window,
+        "_initialize_default_viewport_corners_native",
+        _initialize_default_viewport_corners_native,
+    )
+    monkeypatch.setattr(window, "_load_current_camera_frame", lambda access_hint="auto": None)
+    monkeypatch.setattr(window, "_refresh_camera_view_corners", lambda: None)
+    monkeypatch.setattr(window, "_initialize_default_export_overlay_if_needed", lambda: None)
+    monkeypatch.setattr(window, "_native_viewport_corners", lambda: np.asarray(window.session.viewport.corners))
+
+    class _FakeCameraSource:
+        def close(self) -> None:
+            return None
+
+    window._camera_replacement_backup = _CameraResourceBackup(
+        camera_source=_FakeCameraSource(),
+        reference_width=1000,
+        reference_height=600,
+        camera_track=CameraTrack(path="/tmp/old.mp4"),
+        current_camera_frame=None,
+        viewport_corners=[list(point) for point in incompatible_corners],
+        export_overlay=ExportOverlaySettings(),
+    )
+
+    monkeypatch.setattr(
+        "heatmap_alignment_gui.CameraVideoSource",
+        lambda path: _FakeCameraSource(),
+    )
+
+    probe = VideoProbe(
+        path=Path("/tmp/new.mp4"),
+        fps=30.0,
+        frame_count=100,
+        duration_s=3.0,
+        width=1600,
+        height=900,
+    )
+    result = CameraResourceJobResult(
+        source_path=Path("/tmp/new.mp4"),
+        proxy_result=ProxyVideoResult(
+            source_path=Path("/tmp/new.mp4"),
+            display_path=Path("/tmp/new.mp4"),
+            source_probe=probe,
+            proxy_path=None,
+            state="original",
+        ),
+        camera_track=CameraTrack(path="/tmp/new.mp4", fps=30.0, duration_s=3.0, frame_count=100),
+    )
+
+    window._apply_camera_job_result(result)
+
+    assert initialized == ["default"]
+    assert window.session.viewport.corners == [[1.0, 1.0], [2.0, 1.0], [2.0, 2.0], [1.0, 2.0]]
