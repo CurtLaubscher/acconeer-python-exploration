@@ -47,7 +47,9 @@ Ignored or superseded successful completions must also discard their pending res
 
 Window close, session close, and other workbench reset paths that call `_close_sources()` must cancel or abandon active camera/H5 resource jobs before teardown completes. These paths must clear job board state and replacement backups so late worker completions cannot apply camera/H5 results to a closed or freshly reset session, and so replacement backups do not reference sources closed during reset.
 
-Rationale: generation tokens alone are insufficient if the workbench lifetime ends while jobs are still running.
+`abandon_all_jobs()` must set an abandoned/shutdown flag that `_ResourceJobRunnable.run()` checks before dispatching results. Late runnables that finish after abandon must release completed payloads without calling into a logically dead manager. Signal dispatch must still catch deleted-`QObject` `RuntimeError` on `emit` as a backstop for runnables already mid-dispatch when abandon runs.
+
+Rationale: generation tokens alone are insufficient if the workbench lifetime ends while jobs are still running. A shutdown flag makes teardown intent explicit; emit guards handle the race where abandon and worker completion overlap.
 
 Alternative considered: wait synchronously for all jobs to finish on close. This is simpler to reason about but can hang shutdown on long proxy builds; cancel/abandon with ignored late results is the preferred trade-off.
 
@@ -101,9 +103,17 @@ Rationale: ffmpeg proxy builds can consume substantial CPU/disk bandwidth. Bound
 
 ### Keep export synchronous/modal for this change
 
-Synced video export remains out of the resource job system. The export action should be unavailable while camera or H5 resources required by export are loading, replacing, or otherwise not in a stable loaded state.
+Synced video export remains out of the resource job system. The export action should be unavailable while camera or H5 resources required by export are in an in-flight job phase (`pending`, `loading`, `building`, `waiting`, or `cancelling`) or when required sources are not loaded.
 
-Rationale: background export requires a complete snapshot of all export-relevant state. That is valuable future work, but adding it here increases risk and scope.
+A resource job slot in `failed` phase records that the last load attempt failed; it must not by itself disable export when the workbench still has stable loaded camera and H5 sources (for example after a failed replacement restores the previous active resources). Export enablement follows loaded runtime sources and in-flight phases, not the informational failed job status alone.
+
+Rationale: background export requires a complete snapshot of all export-relevant state. That is valuable future work, but adding it here increases risk and scope. Conflating `failed` job status with export instability incorrectly blocks export after a restored failed replacement.
+
+### Release H5 records on worker load failure
+
+`load_h5_resource_payload()` must close or otherwise release the `HeatmapRecord` if an exception occurs after `load_heatmap_record()` succeeds but before returning an immutable `LoadedH5ResourcePayload`.
+
+Rationale: rare worker exceptions should not leak HDF5-backed handles until process exit.
 
 ### Clear peak JSON on successful H5 replacement
 
@@ -120,7 +130,7 @@ Rationale: peak JSON is derived from a specific H5 source and is overwhelmingly 
 - [Risk] Cancelled proxy generation leaves a partial cache file. -> Write to a temporary path and atomically promote only successful proxy output.
 - [Risk] Proxy failure leaves camera unusable. -> Report the proxy failure in the Resources window and affected camera panel; allow replacement/retry rather than silently falling back to full-resolution interaction.
 - [Risk] Resource panel becomes too busy if many future jobs exist. -> Scope this change to current resource rows; defer a separate jobs drawer/table until there are enough job types to justify it.
-- [Risk] Export becomes confusing while resources are pending. -> Keep export unchanged and disable it unless required camera and H5 resources are stable and loaded.
+- [Risk] Export becomes confusing while resources are pending. -> Disable export during in-flight resource job phases; allow export when required camera and H5 sources are loaded and stable, including after a failed replacement that restored the previous active resources.
 - [Risk] Tests involving Qt threads are flaky on Windows. -> Favor focused unit tests for job state/reducer behavior and minimal GUI tests for user-visible resource states.
 
 ## Migration Plan

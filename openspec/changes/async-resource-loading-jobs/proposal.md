@@ -4,7 +4,7 @@ Loading camera videos currently blocks the heatmap alignment GUI while preview p
 
 ## Status
 
-Initial async resource loading landed on branch `claub/async-resource-loading-jobs` in commit `51fc67ce`, followed by review-correction work for lifecycle, viewport, H5-handoff, waiting-state, and test coverage gaps. The implementation tasks are now complete; see `tasks.md` for the final task status.
+Initial async resource loading landed on branch `claub/async-resource-loading-jobs` in commit `51fc67ce`, followed by review-correction work for lifecycle, viewport, H5-handoff, waiting-state, and test coverage gaps. Sections 1–8 on branch `claub/async-resource-loading-jobs-clean` are complete. Section 9 documents pre-archive corrections from branch review (export semantics after failed replacement restore, worker shutdown hardening, H5 worker cleanup, and resource-job type cleanup).
 
 ## What Changes
 
@@ -16,7 +16,7 @@ Initial async resource loading landed on branch `claub/async-resource-loading-jo
 - Keep the previously active resource in effect until a replacement resource successfully loads; restore the previous preview/state if replacement fails.
 - Update the Resources window and affected preview panels to show loading, waiting, failure, and cancellation state with target filenames.
 - Automatically unload Radar Peak (JSON) when a different Radar Raw (H5) resource successfully replaces the current H5.
-- Keep synced video export modal/synchronous behavior out of scope for this change; export remains unchanged except that starting export is disabled while required camera or H5 resources are loading or replacing.
+- Keep synced video export modal/synchronous behavior out of scope for this change; starting export is disabled while required camera or H5 resources are in an in-flight load/replace/cancel phase, but not solely because the last load attempt failed after the previous active resources were restored.
 - Cancel or abandon active camera/H5 resource jobs safely on window close and session close so late completions cannot repopulate a reset workbench.
 - Defer batch preparation, export job conversion, unsaved-session prompts, in-app peak calculation, and background MAT/peak JSON loading to future changes; peak JSON and Leg2 MAT remain synchronous imports for this change except where H5 replacement clearing requires peak unload.
 

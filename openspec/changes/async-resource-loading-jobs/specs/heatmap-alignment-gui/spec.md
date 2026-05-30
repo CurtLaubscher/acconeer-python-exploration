@@ -111,6 +111,10 @@ The system SHALL complete background H5 loading without transferring unsafe work
 - **WHEN** a background H5 load job computed resolved fixed color levels or other expensive render settings off the GUI thread
 - **THEN** the main thread adopts those worker-computed settings from the load payload instead of repeating the same expensive computation during resource application
 
+#### Scenario: Release H5 record on worker preparation failure
+- **WHEN** background H5 loading fails after opening the heatmap record but before producing an immutable load payload
+- **THEN** the system releases the HDF5-backed record handle
+
 ### Requirement: Resource loading presentation
 The system SHALL present pending, failed, and cancelled resource work in the Resources window and affected preview panels.
 
@@ -165,6 +169,10 @@ The system SHALL cancel or abandon active camera and H5 resource jobs safely whe
 - **WHEN** a background resource worker completes after the workbench has been closed and its job manager QObject is no longer alive
 - **THEN** the worker completion path exits without raising a traceback and without attempting to update deleted GUI objects
 
+#### Scenario: Abandoned manager skips worker dispatch
+- **WHEN** resource jobs are abandoned during window close, session close, or workbench reset
+- **THEN** late worker runnables observe the abandoned state before dispatch, release any completed payload without applying it, and do not raise a traceback
+
 #### Scenario: Abandon jobs on session close
 - **WHEN** the user closes the current session and returns to an empty workbench while a camera or H5 resource job is pending
 - **THEN** the system cancels or abandons those jobs, clears pending job state and replacement backups, and does not apply their completions to the reset session
@@ -196,8 +204,16 @@ The system SHALL keep synced video export outside the background resource job sy
 - **THEN** the system disables starting synced video export
 
 #### Scenario: Allow export when required resources are stable
-- **WHEN** camera video and Radar Raw (H5) resources are loaded and no required export resource is pending replacement
+- **WHEN** camera video and Radar Raw (H5) resources are loaded and no required export resource is in an in-flight load, replace, or cancel phase
 - **THEN** the system allows synced video export according to the existing export requirements
+
+#### Scenario: Allow export after failed replacement with restore
+- **WHEN** a camera or H5 replacement fails and the system restores the previously active required resources
+- **THEN** the system allows synced video export when camera and H5 are loaded and no required export resource is in an in-flight job phase
+
+#### Scenario: Failed job status does not alone block export
+- **WHEN** a resource job slot is in `failed` phase because the last load attempt failed but required export resources remain loaded and stable
+- **THEN** starting synced video export is not disabled solely because of the failed job phase
 
 #### Scenario: Preserve existing export progress behavior
 - **WHEN** synced video export is running

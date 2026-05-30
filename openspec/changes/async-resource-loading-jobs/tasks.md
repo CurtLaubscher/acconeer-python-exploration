@@ -1,9 +1,11 @@
 ## Status
 
 Initial implementation landed in commit `51fc67ce`. Review follow-up corrections from section 7 are implemented on branch `claub/async-resource-loading-jobs`.
-Acceptance testing found additional cancel, shutdown, and loading-overlay issues; section 8 acceptance-test fixes are implemented on branch `claub/async-resource-loading-jobs-clean`.
+Acceptance testing found additional cancel, shutdown, and loading-overlay issues; section 8 acceptance-test fixes are implemented on branch `claub/async-resource-loading-jobs-clean`. Section 9 captures pre-archive corrections identified during branch review.
 
 **Task counts (sections 1–8):** 47 total, 47 complete, 0 remaining.
+
+**Task counts (section 9, pre-archive):** 5 total, 0 complete, 5 remaining.
 
 ## 1. Job State Foundation
 
@@ -43,7 +45,7 @@ Acceptance testing found additional cancel, shutdown, and loading-overlay issues
 ## 5. Resource Actions And Export Availability
 
 - [x] 5.1 Update load/reload/replace actions so same-resource requests automatically supersede pending jobs without requiring a prompt.
-- [x] 5.2 Disable synced video export while camera or H5 resources required by export are loading, replacing, cancelling, or failed.
+- [x] 5.2 Disable synced video export while camera or H5 resources required by export are in an in-flight load/replace/cancel phase. *(Original wording also listed `failed`; section 9.1 corrects export blocking so `failed` job status alone does not disable export after a restored replacement.)*
 - [x] 5.3 Preserve existing modal/synchronous synced video export behavior and progress UI.
 - [x] 5.4 Keep session resource paths and metadata unchanged until a pending resource replacement succeeds.
 
@@ -75,3 +77,11 @@ Acceptance testing found additional cancel, shutdown, and loading-overlay issues
 - [x] 8.4 Ensure cancel-before-apply wins over late worker success: if cancellation is requested before a worker result is accepted on the GUI thread, release the result payload and keep or restore the previous active resource instead of applying the cancelled target.
 - [x] 8.5 Make worker success/failure dispatch safe during app shutdown or workbench teardown so late QRunnable completion cannot emit through a deleted `ResourceJobManager` Qt object or print a traceback.
 - [x] 8.6 Add focused regression tests for loading-overlay text, viewport loading presentation, cancel-before-late-success handling, and worker completion after abandon/shutdown where practical.
+
+## 9. Pre-Archive Corrections
+
+- [ ] 9.1 Allow synced video export when required camera and H5 sources are loaded and stable even if the corresponding resource job slot is in `failed` phase after a replacement failure that restored the previous active resources; keep export disabled during in-flight phases (`pending`, `loading`, `building`, `waiting`, `cancelling`).
+- [ ] 9.2 Set an abandoned/shutdown flag in `abandon_all_jobs()` and have `_ResourceJobRunnable.run()` return without dispatch when abandoned; keep emit-time `RuntimeError` guards as backstop; add focused regression coverage.
+- [ ] 9.3 Release the `HeatmapRecord` in `load_h5_resource_payload()` when worker preparation fails after `load_heatmap_record()` succeeds but before returning `LoadedH5ResourcePayload`.
+- [ ] 9.4 Consolidate `ResourceJobPhase` to a single module and remove the duplicate literal in `heatmap_alignment_core.py`.
+- [ ] 9.5 Remove unused `resource_job_row_status()` or wire a single status path; keep Resources row labels consistent with `RESOURCE_JOB_STATUS_LABELS`.
