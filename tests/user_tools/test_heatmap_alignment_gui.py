@@ -776,6 +776,65 @@ def test_resource_job_manager_abandon_rejects_late_dispatch(
     assert manager.take_pending_result("radar_h5", 1) is None
 
 
+def test_start_resource_jobs_clear_abandoned_flag(
+    qapplication: QApplication,
+) -> None:
+    from heatmap_alignment_gui import ResourceJobManager
+
+    manager = ResourceJobManager()
+    manager.abandon_all_jobs()
+    assert manager._abandoned is True
+
+    manager.start_camera_job(Path("/tmp/trial.mp4"), replaces_active=False)
+    assert manager._abandoned is False
+
+    manager.abandon_all_jobs()
+    manager.start_h5_job(
+        Path("/tmp/trial.h5"),
+        replaces_active=False,
+        session_idx=None,
+        group_idx=None,
+        entry_idx=None,
+        subsweep_idx=None,
+        color_min=0.0,
+        color_max=3000.0,
+        fixed_levels=True,
+    )
+    assert manager._abandoned is False
+
+
+def test_resource_job_runnable_skips_dispatch_when_abandoned(
+    qapplication: QApplication,
+) -> None:
+    from heatmap_alignment_gui import ResourceJobManager, _ResourceJobRunnable
+    from heatmap_alignment_resource_jobs import LoadedH5ResourcePayload
+
+    manager = ResourceJobManager()
+
+    class _FakeRecord:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    record = _FakeRecord()
+    payload = LoadedH5ResourcePayload(
+        path=Path("/tmp/trial.h5"),
+        record=record,
+        subsweep_idx=0,
+        metadata=HeatmapTrack(path="/tmp/trial.h5"),
+        first_frame_shape=(10, 10),
+    )
+
+    manager.abandon_all_jobs()
+    runnable = _ResourceJobRunnable(manager, "radar_h5", 1, lambda: payload)
+    runnable.run()
+
+    assert record.closed is True
+    assert manager.take_pending_result("radar_h5", 1) is None
+
+
 def test_resource_job_manager_supersede_cancels_prior_generation(
     qapplication: QApplication,
 ) -> None:

@@ -17,7 +17,10 @@ from dataclasses import asdict, dataclass, field
 from functools import lru_cache
 from hashlib import sha256
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
+
+if TYPE_CHECKING:
+    from heatmap_alignment_resource_jobs import ResourceJobPhase
 
 import cv2
 import numpy as np
@@ -1835,18 +1838,6 @@ class ResourceSummary:
     job_target_filename: str = ""
     job_detail: str = ""
     job_cancellable: bool = False
-
-
-ResourceJobPhase = Literal[
-    "idle",
-    "pending",
-    "loading",
-    "building",
-    "waiting",
-    "cancelling",
-    "failed",
-    "superseded",
-]
 
 
 @dataclass(frozen=True)

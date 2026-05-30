@@ -49,6 +49,8 @@ Window close, session close, and other workbench reset paths that call `_close_s
 
 `abandon_all_jobs()` must set an abandoned/shutdown flag that `_ResourceJobRunnable.run()` checks before dispatching results. Late runnables that finish after abandon must release completed payloads without calling into a logically dead manager. Signal dispatch must still catch deleted-`QObject` `RuntimeError` on `emit` as a backstop for runnables already mid-dispatch when abandon runs.
 
+`start_camera_job()` and `start_h5_job()` must clear the abandoned flag so session reload and other paths that abandon during `_close_sources()` can schedule new work on the same manager instance.
+
 Rationale: generation tokens alone are insufficient if the workbench lifetime ends while jobs are still running. A shutdown flag makes teardown intent explicit; emit guards handle the race where abandon and worker completion overlap.
 
 Alternative considered: wait synchronously for all jobs to finish on close. This is simpler to reason about but can hang shutdown on long proxy builds; cancel/abandon with ignored late results is the preferred trade-off.

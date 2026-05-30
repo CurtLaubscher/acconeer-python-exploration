@@ -5,7 +5,7 @@ Acceptance testing found additional cancel, shutdown, and loading-overlay issues
 
 **Task counts (sections 1–8):** 47 total, 47 complete, 0 remaining.
 
-**Task counts (section 9, pre-archive):** 5 total, 0 complete, 5 remaining.
+**Task counts (section 9, pre-archive):** 5 total, 5 complete, 0 remaining.
 
 ## 1. Job State Foundation
 
@@ -80,8 +80,8 @@ Acceptance testing found additional cancel, shutdown, and loading-overlay issues
 
 ## 9. Pre-Archive Corrections
 
-- [ ] 9.1 Allow synced video export when required camera and H5 sources are loaded and stable even if the corresponding resource job slot is in `failed` phase after a replacement failure that restored the previous active resources; keep export disabled during in-flight phases (`pending`, `loading`, `building`, `waiting`, `cancelling`).
-- [ ] 9.2 Set an abandoned/shutdown flag in `abandon_all_jobs()` and have `_ResourceJobRunnable.run()` return without dispatch when abandoned; keep emit-time `RuntimeError` guards as backstop; add focused regression coverage.
-- [ ] 9.3 Release the `HeatmapRecord` in `load_h5_resource_payload()` when worker preparation fails after `load_heatmap_record()` succeeds but before returning `LoadedH5ResourcePayload`.
-- [ ] 9.4 Consolidate `ResourceJobPhase` to a single module and remove the duplicate literal in `heatmap_alignment_core.py`.
-- [ ] 9.5 Remove unused `resource_job_row_status()` or wire a single status path; keep Resources row labels consistent with `RESOURCE_JOB_STATUS_LABELS`.
+- [x] 9.1 Allow synced video export when required camera and H5 sources are loaded and stable even if the corresponding resource job slot is in `failed` phase after a replacement failure that restored the previous active resources; keep export disabled during in-flight phases (`pending`, `loading`, `building`, `waiting`, `cancelling`).
+- [x] 9.2 Set an abandoned/shutdown flag in `abandon_all_jobs()` and have `_ResourceJobRunnable.run()` return without dispatch when abandoned; keep emit-time `RuntimeError` guards as backstop; add focused regression coverage.
+- [x] 9.3 Release the `HeatmapRecord` in `load_h5_resource_payload()` when worker preparation fails after `load_heatmap_record()` succeeds but before returning `LoadedH5ResourcePayload`.
+- [x] 9.4 Consolidate `ResourceJobPhase` to a single module and remove the duplicate literal in `heatmap_alignment_core.py`.
+- [x] 9.5 Remove unused `resource_job_row_status()` or wire a single status path; keep Resources row labels consistent with `RESOURCE_JOB_STATUS_LABELS`.

@@ -198,36 +198,9 @@ def clear_resource_job(board: ResourceJobBoard, kind: ResourceJobKind) -> None:
 def resource_job_blocks_export(board: ResourceJobBoard) -> bool:
     for kind in ("camera", "radar_h5"):
         phase = board.slot(kind).phase
-        if phase in ("pending", "loading", "building", "waiting", "cancelling", "failed"):
+        if phase in ("pending", "loading", "building", "waiting", "cancelling"):
             return True
     return False
-
-
-def resource_job_row_status(
-    *,
-    loaded: bool,
-    base_status: str,
-    job: ResourceJobSnapshot | None,
-) -> str:
-    if job is None or job.phase == "idle":
-        return base_status
-    if job.phase == "pending":
-        return "Loading"
-    if job.phase == "loading":
-        return "Loading"
-    if job.phase == "building":
-        return "Building"
-    if job.phase == "waiting":
-        return "Waiting"
-    if job.phase == "cancelling":
-        return "Cancelling"
-    if job.phase == "failed":
-        return "Failed"
-    if job.phase == "superseded":
-        return "Superseded"
-    if loaded:
-        return base_status
-    return base_status
 
 
 def resource_job_target_filename(path: Path | None) -> str:
@@ -297,48 +270,52 @@ def load_h5_resource_payload(
         record.close()
         raise ResourceJobError("H5 load cancelled.")
 
-    resolved_color_max = color_max
-    if fixed_levels:
-        from sparse_iq_heatmap_common import fixed_color_level
+    try:
+        resolved_color_max = color_max
+        if fixed_levels:
+            from sparse_iq_heatmap_common import fixed_color_level
 
-        resolved_color_max = fixed_color_level(
-            color_max=color_max,
-            results=record.results,
+            resolved_color_max = fixed_color_level(
+                color_max=color_max,
+                results=record.results,
+                subsweep_idx=resolved_subsweep_idx,
+                frame_indices=list(range(len(record.results))),
+            )
+
+        first_frame = heatmap_frame_rgb(
+            record,
             subsweep_idx=resolved_subsweep_idx,
-            frame_indices=list(range(len(record.results))),
+            frame_idx=0,
+            color_min=color_min,
+            color_max=resolved_color_max,
         )
+        metadata = HeatmapTrack(
+            path=str(h5_path),
+            session_idx=record.session_idx,
+            group_idx=record.group_idx,
+            entry_idx=record.entry_idx,
+            subsweep_idx=resolved_subsweep_idx,
+            duration_s=record.duration_s,
+            fps=record.fps,
+        )
+        resolved_level: float | None = None
+        if fixed_levels:
+            resolved_level = resolved_color_max
 
-    first_frame = heatmap_frame_rgb(
-        record,
-        subsweep_idx=resolved_subsweep_idx,
-        frame_idx=0,
-        color_min=color_min,
-        color_max=resolved_color_max,
-    )
-    metadata = HeatmapTrack(
-        path=str(h5_path),
-        session_idx=record.session_idx,
-        group_idx=record.group_idx,
-        entry_idx=record.entry_idx,
-        subsweep_idx=resolved_subsweep_idx,
-        duration_s=record.duration_s,
-        fps=record.fps,
-    )
-    resolved_level: float | None = None
-    if fixed_levels:
-        resolved_level = resolved_color_max
-
-    return LoadedH5ResourcePayload(
-        path=h5_path,
-        record=record,
-        subsweep_idx=resolved_subsweep_idx,
-        metadata=metadata,
-        first_frame_shape=(first_frame.shape[0], first_frame.shape[1]),
-        color_min=color_min,
-        color_max=color_max,
-        fixed_levels=fixed_levels,
-        resolved_fixed_color_level=resolved_level,
-    )
+        return LoadedH5ResourcePayload(
+            path=h5_path,
+            record=record,
+            subsweep_idx=resolved_subsweep_idx,
+            metadata=metadata,
+            first_frame_shape=(first_frame.shape[0], first_frame.shape[1]),
+            color_min=color_min,
+            color_max=color_max,
+            fixed_levels=fixed_levels,
+            resolved_fixed_color_level=resolved_level,
+        )
+    except Exception:
+        record.close()
+        raise
 
 
 def build_h5_truth_source_from_payload(payload: LoadedH5ResourcePayload) -> HeatmapTruthSource:

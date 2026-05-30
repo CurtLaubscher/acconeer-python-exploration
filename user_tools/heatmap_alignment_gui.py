@@ -2227,9 +2227,18 @@ class _ResourceJobRunnable(QtCore.QRunnable):
     def run(self) -> None:
         try:
             result = self._worker()
-            self._manager._dispatch_job_success(self._kind, self._generation, result)
         except Exception as exc:
-            self._manager._dispatch_job_failure(self._kind, self._generation, exc)
+            if not self._manager._abandoned:
+                self._manager._dispatch_job_failure(self._kind, self._generation, exc)
+            return
+        if self._manager._abandoned:
+            self._manager._release_abandoned_worker_result(
+                self._kind,
+                self._generation,
+                result,
+            )
+            return
+        self._manager._dispatch_job_success(self._kind, self._generation, result)
 
 
 class ResourceJobManager(QtCore.QObject):
@@ -2248,6 +2257,7 @@ class ResourceJobManager(QtCore.QObject):
         self._proxy_processes: dict[int, object] = {}
         self._pending_results: dict[tuple[ResourceJobKind, int], object] = {}
         self._cancelled_generations: set[tuple[ResourceJobKind, int]] = set()
+        self._abandoned = False
         self.job_succeeded.connect(self._handle_job_success)
         self.job_failed.connect(self._handle_job_failure)
 
@@ -2289,6 +2299,7 @@ class ResourceJobManager(QtCore.QObject):
             self._release_job_result(kind, generation, result)
 
     def abandon_all_jobs(self) -> None:
+        self._abandoned = True
         for kind in ("camera", "radar_h5"):
             slot = self._board.slot(kind)
             if slot.phase not in ("idle", "failed"):
@@ -2297,6 +2308,14 @@ class ResourceJobManager(QtCore.QObject):
         self._discard_all_pending_results()
         self.job_state_changed.emit()
 
+    def _release_abandoned_worker_result(
+        self,
+        kind: ResourceJobKind,
+        generation: int,
+        result: object,
+    ) -> None:
+        self._release_job_result(kind, generation, result)
+
     def start_camera_job(
         self,
         camera_path: Path,
@@ -2304,6 +2323,7 @@ class ResourceJobManager(QtCore.QObject):
         replaces_active: bool,
         cache_root: Path | None = None,
     ) -> int:
+        self._abandoned = False
         slot = self._board.camera
         if slot.phase not in ("idle", "failed"):
             self._cancel_generation("camera", slot.generation)
@@ -2332,6 +2352,7 @@ class ResourceJobManager(QtCore.QObject):
         color_max: float | None,
         fixed_levels: bool,
     ) -> int:
+        self._abandoned = False
         slot = self._board.radar_h5
         if slot.phase not in ("idle", "failed"):
             self._cancel_generation("radar_h5", slot.generation)

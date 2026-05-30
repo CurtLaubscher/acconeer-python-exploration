@@ -99,6 +99,83 @@ def test_resource_job_blocks_export_while_pending() -> None:
     assert resource_job_blocks_export(board) is False
 
 
+def test_resource_job_blocks_export_ignores_failed_phase() -> None:
+    board = ResourceJobBoard()
+    begin_resource_job(
+        board,
+        "camera",
+        target_path=Path("trial.mp4"),
+        replaces_active=True,
+    )
+    complete_resource_job(
+        board,
+        "camera",
+        board.camera.generation,
+        phase="failed",
+        message="Camera load failed.",
+    )
+    begin_resource_job(
+        board,
+        "radar_h5",
+        target_path=Path("trial.h5"),
+        replaces_active=True,
+    )
+    complete_resource_job(
+        board,
+        "radar_h5",
+        board.radar_h5.generation,
+        phase="failed",
+        message="H5 load failed.",
+    )
+
+    assert resource_job_blocks_export(board) is False
+
+
+def test_load_h5_resource_payload_closes_record_when_render_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from heatmap_alignment_resource_jobs import load_h5_resource_payload
+
+    class _FakeRecord:
+        def __init__(self) -> None:
+            self.closed = False
+            self.session_idx = 0
+            self.group_idx = 0
+            self.entry_idx = 0
+            self.duration_s = 1.0
+            self.fps = 10.0
+            self.results = []
+
+        def close(self) -> None:
+            self.closed = True
+
+    record = _FakeRecord()
+    h5_path = tmp_path / "trial.h5"
+    h5_path.write_bytes(b"")
+
+    monkeypatch.setattr(
+        "sparse_iq_heatmap_common.resolve_selection_indices",
+        lambda **kwargs: (0, 0, 0, 0),
+    )
+    monkeypatch.setattr(
+        "sparse_iq_heatmap_common.load_heatmap_record",
+        lambda *args: record,
+    )
+    def _heatmap_frame_rgb_failure(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("render failed")
+
+    monkeypatch.setattr(
+        "sparse_iq_heatmap_common.heatmap_frame_rgb",
+        _heatmap_frame_rgb_failure,
+    )
+
+    with pytest.raises(RuntimeError, match="render failed"):
+        load_h5_resource_payload(h5_path, fixed_levels=False)
+
+    assert record.closed is True
+
+
 def test_resolve_replacement_viewport_corners_preserves_same_size() -> None:
     corners = [[10.0, 20.0], [100.0, 20.0], [100.0, 80.0], [10.0, 80.0]]
 
