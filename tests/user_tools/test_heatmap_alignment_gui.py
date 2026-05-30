@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from PySide6 import QtCore
+from PySide6 import QtCore, QtGui
 from PySide6.QtWidgets import QApplication
 
 
@@ -31,6 +31,7 @@ from heatmap_alignment_gui import (  # noqa: E402
     track_offset_label_should_show,
 )
 from heatmap_alignment_core import (  # noqa: E402
+    TimelineH5DragSnapshot,
     AlignmentResourceRuntime,
     AlignmentSession,
     CameraTrack,
@@ -143,6 +144,231 @@ def test_alignment_timeline_widget_leg2_track_start_uses_offset_sign_convention(
     widget = AlignmentTimelineWidget(range_model)
 
     assert widget._leg2_track_start_s() == pytest.approx(-1.25)
+
+
+def _timeline_mouse_press(widget: AlignmentTimelineWidget, local_pos: QtCore.QPointF) -> None:
+    global_pos = widget.mapToGlobal(local_pos.toPoint())
+    event = QtGui.QMouseEvent(
+        QtCore.QEvent.Type.MouseButtonPress,
+        local_pos,
+        global_pos,
+        QtCore.Qt.MouseButton.LeftButton,
+        QtCore.Qt.MouseButton.LeftButton,
+        QtCore.Qt.KeyboardModifier.NoModifier,
+    )
+    widget.mousePressEvent(event)
+
+
+def _timeline_mouse_move(widget: AlignmentTimelineWidget, local_pos: QtCore.QPointF) -> None:
+    global_pos = widget.mapToGlobal(local_pos.toPoint())
+    event = QtGui.QMouseEvent(
+        QtCore.QEvent.Type.MouseMove,
+        local_pos,
+        global_pos,
+        QtCore.Qt.MouseButton.NoButton,
+        QtCore.Qt.MouseButton.LeftButton,
+        QtCore.Qt.KeyboardModifier.NoModifier,
+    )
+    widget.mouseMoveEvent(event)
+
+
+def _timeline_mouse_release(widget: AlignmentTimelineWidget, local_pos: QtCore.QPointF) -> None:
+    global_pos = widget.mapToGlobal(local_pos.toPoint())
+    event = QtGui.QMouseEvent(
+        QtCore.QEvent.Type.MouseButtonRelease,
+        local_pos,
+        global_pos,
+        QtCore.Qt.MouseButton.LeftButton,
+        QtCore.Qt.MouseButton.NoButton,
+        QtCore.Qt.KeyboardModifier.NoModifier,
+    )
+    widget.mouseReleaseEvent(event)
+
+
+def test_timeline_playhead_press_takes_priority_over_camera_bar(
+    qapplication: QApplication,
+) -> None:
+    range_model = TimelineRangeModel()
+    range_model.set_track_state(
+        camera_duration_s=5.0,
+        heatmap_duration_s=5.0,
+        camera_offset_s=0.0,
+    )
+    range_model.set_visible_range(-1.0, 6.0)
+    widget = AlignmentTimelineWidget(range_model)
+    widget.resize(900, 124)
+    widget.show()
+    qapplication.processEvents()
+    widget.set_timeline_state(current_time_s=1.0)
+
+    playhead_x = widget._time_to_x(1.0)
+    camera_rect = widget._track_rect(0.0, 5.0, row=0)
+    press_pos = QtCore.QPointF(playhead_x, camera_rect.center().y())
+    assert widget._camera_track_hit_test(press_pos)
+    assert widget._playhead_hit_test(press_pos)
+
+    _timeline_mouse_press(widget, press_pos)
+
+    assert widget._dragging_playhead
+    assert not widget._dragging_camera
+
+
+def test_timeline_h5_drag_shifts_camera_and_leg2_offsets_via_signal(
+    qapplication: QApplication,
+) -> None:
+    range_model = TimelineRangeModel()
+    range_model.set_track_state(
+        camera_duration_s=4.0,
+        heatmap_duration_s=5.0,
+        camera_offset_s=1.0,
+        leg2_duration_s=3.0,
+        leg2_offset_s=2.0,
+    )
+    range_model.set_visible_range(-1.0, 6.0)
+    widget = AlignmentTimelineWidget(range_model)
+    widget.resize(900, 124)
+    widget.show()
+    qapplication.processEvents()
+    widget.set_timeline_state(current_time_s=1.5)
+
+    received: list[tuple[float, float, float, float, float]] = []
+
+    def _on_h5_drag(*values: float) -> None:
+        received.append(values)
+
+    widget.h5_alignment_drag_changed.connect(_on_h5_drag)
+    widget._dragging_h5 = True
+    widget._h5_drag_anchor_s = 0.0
+    widget._h5_drag_snapshot = TimelineH5DragSnapshot(
+        range_start_s=-1.0,
+        range_end_s=6.0,
+        current_time_s=1.5,
+        camera_offset_s=1.0,
+        leg2_offset_s=2.0,
+    )
+
+    target_x = widget._time_to_x(0.5)
+    move_pos = QtCore.QPointF(target_x, widget._track_rect(0.0, 5.0, row=1).center().y())
+    _timeline_mouse_move(widget, move_pos)
+
+    assert len(received) == 1
+    range_start_s, range_end_s, current_time_s, camera_offset_s, leg2_offset_s = received[0]
+    assert camera_offset_s == pytest.approx(1.5)
+    assert leg2_offset_s == pytest.approx(2.5)
+    assert current_time_s == pytest.approx(1.0)
+    assert range_start_s == pytest.approx(-1.5)
+    assert range_end_s == pytest.approx(5.5)
+
+
+def test_timeline_h5_drag_repeat_move_at_same_pixel_is_stable(
+    qapplication: QApplication,
+) -> None:
+    range_model = TimelineRangeModel()
+    range_model.set_track_state(
+        camera_duration_s=4.0,
+        heatmap_duration_s=5.0,
+        camera_offset_s=1.0,
+        leg2_duration_s=3.0,
+        leg2_offset_s=2.0,
+    )
+    range_model.set_visible_range(-1.0, 6.0)
+    widget = AlignmentTimelineWidget(range_model)
+    widget.resize(900, 124)
+    widget.show()
+    qapplication.processEvents()
+    widget.set_timeline_state(current_time_s=1.5)
+
+    received: list[tuple[float, float, float, float, float]] = []
+
+    def _on_h5_drag(*values: float) -> None:
+        received.append(values)
+        range_model.set_visible_range(values[0], values[1])
+
+    widget.h5_alignment_drag_changed.connect(_on_h5_drag)
+
+    press_pos = widget._track_rect(0.0, 5.0, row=1).center()
+    move_pos = QtCore.QPointF(widget._time_to_x(3.0), press_pos.y())
+
+    _timeline_mouse_press(widget, press_pos)
+    _timeline_mouse_move(widget, move_pos)
+    _timeline_mouse_move(widget, move_pos)
+
+    assert len(received) == 2
+    assert received[0] == pytest.approx(received[1])
+    widget.close()
+    qapplication.processEvents()
+
+
+def test_timeline_h5_drag_visible_range_follows_pointer_and_survives_release(
+    qapplication: QApplication,
+) -> None:
+    window = HeatmapAlignmentWindow()
+    window.session.camera_track = CameraTrack(duration_s=4.0)
+    window.session.heatmap_track = HeatmapTrack(duration_s=5.0)
+    window.session.timeline.current_time_s = 1.5
+    window.session.timeline.offset_s = 1.0
+    window._sync_previews(camera_access_hint="auto")
+
+    timeline = window.timeline_view
+    timeline.resize(900, 124)
+    timeline.show()
+    qapplication.processEvents()
+    window.timeline_range_model.set_visible_range(-1.0, 6.0)
+
+    press_pos = timeline._track_rect(0.0, 5.0, row=1).center()
+    move_pos = QtCore.QPointF(timeline._time_to_x(3.0), press_pos.y())
+
+    _timeline_mouse_press(timeline, press_pos)
+    _timeline_mouse_move(timeline, move_pos)
+
+    assert window.timeline_range_model.visible_range_s() == pytest.approx((-1.5, 5.5))
+    assert window.session.timeline.current_time_s == pytest.approx(1.0)
+    assert window.session.timeline.offset_s == pytest.approx(1.5)
+    assert timeline._track_rect(0.0, 5.0, row=1).center().x() == pytest.approx(
+        move_pos.x(), abs=1.0
+    )
+
+    _timeline_mouse_release(timeline, move_pos)
+
+    assert window.timeline_range_model.visible_range_s() == pytest.approx((-1.5, 5.5))
+    timeline.close()
+    window.close()
+    qapplication.processEvents()
+
+
+def test_timeline_h5_only_press_does_not_start_h5_drag(
+    qapplication: QApplication,
+) -> None:
+    range_model = TimelineRangeModel()
+    range_model.set_track_state(
+        camera_duration_s=0.0,
+        heatmap_duration_s=5.0,
+        camera_offset_s=0.0,
+        leg2_duration_s=0.0,
+        leg2_offset_s=0.0,
+    )
+    range_model.set_visible_range(-1.0, 6.0)
+    initial_range = range_model.visible_range_s()
+    widget = AlignmentTimelineWidget(range_model)
+    widget.resize(900, 124)
+    widget.show()
+    qapplication.processEvents()
+    widget.set_timeline_state(current_time_s=1.0)
+    playhead_values: list[float] = []
+    widget.playhead_changed.connect(playhead_values.append)
+
+    h5_rect = widget._track_rect(0.0, 5.0, row=1)
+    _timeline_mouse_press(widget, h5_rect.center())
+    _timeline_mouse_move(
+        widget,
+        QtCore.QPointF(h5_rect.center().x() + 40.0, h5_rect.center().y()),
+    )
+    _timeline_mouse_release(widget, h5_rect.center())
+
+    assert not widget._dragging_h5
+    assert not widget._dragging_playhead
+    assert playhead_values == []
+    assert range_model.visible_range_s() == initial_range
 
 
 def test_startup_session_takes_precedence_over_camera_and_h5(
