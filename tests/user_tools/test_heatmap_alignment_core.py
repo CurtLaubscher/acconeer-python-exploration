@@ -26,11 +26,13 @@ from heatmap_alignment_core import (  # noqa: E402
     Leg2UltrasonicDatasourceSettings,
     PreprocessSettings,
     RenderSettings,
+    ResourceJobPresentation,
     SignalPlotViewSettings,
     TimelineState,
     ViewportGeometry,
     ViewportVisibilitySettings,
     _compute_leg2_stance_intervals,
+    _resource_messages,
     apply_viewport_visibility,
     build_alignment_resource_summaries,
     build_leg2_ultrasonic_signal_series,
@@ -1470,3 +1472,38 @@ def test_build_alignment_resource_summaries_mark_loaded_warning_state() -> None:
     assert summaries[0].status == "warning"
     assert "inspect" in summaries[0].actions
     assert "Proxy preview unavailable." in summaries[0].messages
+
+
+def test_resource_messages_dedupes_job_detail_already_in_reload_errors() -> None:
+    failure_text = "Preview proxy generation failed.\n\nffmpeg error detail"
+    runtime = AlignmentResourceRuntime(
+        reload_errors=(("camera", failure_text),),
+        resource_jobs=(
+            ResourceJobPresentation(
+                kind="camera",
+                phase="failed",
+                detail=failure_text,
+            ),
+        ),
+    )
+
+    messages = _resource_messages("camera", runtime)
+
+    assert messages == (failure_text,)
+
+
+def test_resource_messages_prepends_job_detail_when_not_in_reload_errors() -> None:
+    runtime = AlignmentResourceRuntime(
+        reload_errors=(),
+        resource_jobs=(
+            ResourceJobPresentation(
+                kind="camera",
+                phase="failed",
+                detail="Proxy build failed.",
+            ),
+        ),
+    )
+
+    messages = _resource_messages("camera", runtime)
+
+    assert messages == ("Proxy build failed.",)

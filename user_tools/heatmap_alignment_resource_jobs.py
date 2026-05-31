@@ -435,6 +435,8 @@ def build_preview_proxy_video(
         "18",
         "-pix_fmt",
         "yuv420p",
+        "-f",
+        "mp4",
         str(temp_path),
     ]
     process = subprocess.Popen(

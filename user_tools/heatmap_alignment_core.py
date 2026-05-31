@@ -1946,11 +1946,13 @@ def _resource_messages(
     kind: ResourceKind,
     runtime: AlignmentResourceRuntime,
 ) -> tuple[str, ...]:
-    messages = [text for key, text in runtime.reload_errors if key == kind]
+    reload_error_texts = [text for key, text in runtime.reload_errors if key == kind]
+    messages: list[str] = list(reload_error_texts)
     messages.extend(text for key, text in runtime.load_warnings if key == kind)
     job = _resource_job_presentation(kind, runtime)
     if job is not None and job.phase == "failed" and job.detail:
-        messages = [job.detail, *messages]
+        if job.detail not in reload_error_texts:
+            messages = [job.detail, *messages]
     return tuple(messages)
 
 

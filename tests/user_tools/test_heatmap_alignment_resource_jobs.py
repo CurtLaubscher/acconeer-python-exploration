@@ -463,3 +463,56 @@ def test_prepare_proxy_video_requires_ffmpeg_for_large_sources(
 
     with pytest.raises(RuntimeError, match="ffmpeg was not found"):
         prepare_proxy_video(source_path, max_dimension=1280)
+
+
+def test_build_preview_proxy_passes_explicit_mp4_format(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """ffmpeg argv must contain -f mp4 immediately before the temp output path."""
+    import heatmap_alignment_resource_jobs as jobs
+
+    source_path = tmp_path / "large.mp4"
+    source_path.write_bytes(b"source")
+    probe = VideoProbe(
+        path=source_path,
+        fps=30.0,
+        frame_count=300,
+        duration_s=10.0,
+        width=3840,
+        height=2160,
+    )
+    proxy_path = _proxy_cache_path(
+        source_path,
+        source_probe=probe,
+        max_dimension=1280,
+        cache_root=tmp_path,
+    )
+
+    monkeypatch.setattr(jobs, "probe_video", lambda path: probe)
+    monkeypatch.setattr(jobs, "_find_ffmpeg", lambda: "ffmpeg")
+    monkeypatch.setattr(
+        jobs,
+        "_proxy_cache_path",
+        lambda source_path, source_probe, max_dimension, cache_root: proxy_path,
+    )
+
+    captured_argv: list[str] = []
+
+    class _CapturingProcess:
+        def __init__(self, argv: list[str], **kwargs: object) -> None:
+            captured_argv.extend(argv)
+            self.returncode = 0
+
+        def communicate(self) -> tuple[str, str]:
+            temp_path = jobs._proxy_temp_path(proxy_path)
+            temp_path.parent.mkdir(parents=True, exist_ok=True)
+            temp_path.write_bytes(b"partial")
+            return "", ""
+
+    monkeypatch.setattr(jobs.subprocess, "Popen", _CapturingProcess)
+
+    build_preview_proxy_video(source_path, cache_root=tmp_path)
+
+    expected_temp_path = jobs._proxy_temp_path(proxy_path)
+    assert captured_argv[-3:] == ["-f", "mp4", str(expected_temp_path)]
