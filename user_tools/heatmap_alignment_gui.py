@@ -42,9 +42,11 @@ from heatmap_alignment_core import (
     TIMELINE_PLAYHEAD_COLOR_HEX,
     AlignmentResourceRuntime,
     AlignmentSession,
+    CameraSlotIdentity,
     CameraTrack,
     CameraVideoSource,
     ExportOverlaySettings,
+    H5SlotIdentity,
     HeatmapPlotRenderer,
     HeatmapTrack,
     HeatmapTruthSource,
@@ -53,20 +55,29 @@ from heatmap_alignment_core import (
     LoadedLeg2UltrasonicDatasource,
     LoadedPeakDistanceDatasource,
     PeakDistanceSignalSeries,
+    ReconcileAction,
     ResourceAction,
     ResourceJobPresentation,
     ResourceKind,
     ResourceSummary,
     SignalPlotViewSettings,
+    SyncSlotIdentity,
     apply_viewport_visibility,
     build_alignment_resource_summaries,
     build_leg2_ultrasonic_signal_series,
     build_peak_distance_signal_series,
     derive_signal_plot_color,
+    desired_camera_identity,
+    desired_h5_identity,
+    desired_leg2_identity,
+    desired_peak_identity,
     elide_path_middle,
     import_leg2_mat_for_heatmap,
     import_peak_distance_json_for_heatmap,
     load_alignment_session,
+    reconcile_camera_action,
+    reconcile_h5_action,
+    reconcile_sync_slot_action,
     rectify_viewport,
     save_alignment_session,
     scale_viewport_corners,
@@ -3026,6 +3037,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         )
         self._camera_replacement_backup: _CameraResourceBackup | None = None
         self._h5_replacement_backup: _H5ResourceBackup | None = None
+        self._inflight_h5_identity: H5SlotIdentity | None = None
 
         self.viewport_source_resolution_timer = QtCore.QTimer(self)
         self.viewport_source_resolution_timer.setSingleShot(True)
@@ -3075,6 +3087,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._resource_job_manager.abandon_all_jobs()
         self._camera_replacement_backup = None
         self._h5_replacement_backup = None
+        self._inflight_h5_identity = None
 
     def _create_menu_bar(self) -> None:
         file_menu = self.menuBar().addMenu("&File")
@@ -3471,6 +3484,13 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         if replaces_active:
             self._h5_replacement_backup = self._snapshot_active_h5()
         self._set_resource_reload_error("radar_h5", None)
+        self._inflight_h5_identity = H5SlotIdentity(
+            path=str(h5_path),
+            session_idx=self.session.heatmap_track.session_idx,
+            group_idx=self.session.heatmap_track.group_idx,
+            entry_idx=self.session.heatmap_track.entry_idx,
+            subsweep_idx=self.session.heatmap_track.subsweep_idx,
+        )
         self._resource_job_manager.start_h5_job(
             h5_path,
             replaces_active=replaces_active,
@@ -3836,30 +3856,136 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         if filename:
             self.load_session_from_path(Path(filename))
 
-    def load_session_from_path(self, session_path: Path) -> None:
-        session = load_alignment_session(session_path)
-        self._close_sources()
-        self.session = session
-        self._current_session_path = session_path
-        self._resource_reload_errors.clear()
-        self._resource_load_warnings.clear()
+    def _loaded_h5_identity(self) -> H5SlotIdentity | None:
+        """Return identity of the currently loaded H5 source, or None."""
+        if self.heatmap_source is None:
+            return None
+        return H5SlotIdentity(
+            path=str(self.heatmap_source.path),
+            session_idx=self.heatmap_source.record.session_idx,
+            group_idx=self.heatmap_source.record.group_idx,
+            entry_idx=self.heatmap_source.record.entry_idx,
+            subsweep_idx=self.heatmap_source.subsweep_idx,
+        )
 
-        self._populate_controls_from_session()
-        if session.camera_track.path:
-            camera_path = Path(session.camera_track.path)
+    def _reconcile_session_load(
+        self,
+        desired_session: AlignmentSession,
+        prior_session: AlignmentSession,
+    ) -> None:
+        """Reconcile active workbench resources against the desired session snapshot.
+
+        Per-slot registry approach: new resource types must add an entry here.
+        See OpenSpec change: session-load-responsiveness.
+        """
+        # Camera slot
+        camera_desired = desired_camera_identity(desired_session)
+        if self.camera_source is not None:
+            source_path = getattr(self.camera_source, "path", None)
+            camera_loaded = (
+                str(source_path)
+                if source_path is not None
+                else prior_session.camera_track.path
+            )
+        else:
+            camera_loaded = None
+        camera_slot = self._resource_job_manager.board().camera
+        camera_inflight = (
+            str(camera_slot.target_path)
+            if camera_slot.target_path is not None and camera_slot.phase not in ("idle", "failed", "superseded")
+            else None
+        )
+        camera_action = reconcile_camera_action(
+            camera_desired,
+            loaded_path=camera_loaded,
+            inflight_path=camera_inflight,
+        )
+
+        # H5 slot
+        h5_desired = desired_h5_identity(desired_session)
+        h5_loaded = self._loaded_h5_identity()
+        h5_action = reconcile_h5_action(
+            h5_desired,
+            loaded_identity=h5_loaded,
+            inflight_identity=self._inflight_h5_identity,
+        )
+
+        # Peak slot — keep only when datasource object is present and path matches.
+        # Use prior_session to get the path of the currently loaded datasource.
+        peak_desired = desired_peak_identity(desired_session)
+        peak_loaded = (
+            prior_session.peak_distance_datasource.path
+            if self.peak_distance_datasource is not None and prior_session.peak_distance_datasource.path
+            else None
+        )
+        peak_action = reconcile_sync_slot_action(peak_desired, loaded_path=peak_loaded)
+
+        # Leg2 slot — keep only when datasource object is present and path matches.
+        # Use prior_session to get the path of the currently loaded datasource.
+        leg2_desired = desired_leg2_identity(desired_session)
+        leg2_loaded = (
+            prior_session.leg2_ultrasonic_datasource.path
+            if self.leg2_ultrasonic_datasource is not None and prior_session.leg2_ultrasonic_datasource.path
+            else None
+        )
+        leg2_action = reconcile_sync_slot_action(leg2_desired, loaded_path=leg2_loaded)
+
+        # Execute per-slot actions
+        if camera_action == "unload":
+            self.unload_camera_video()
+        elif camera_action == "load":
+            camera_path = Path(desired_session.camera_track.path)
             if camera_path.exists():
                 self.load_camera_from_path(camera_path)
             else:
                 self._set_resource_reload_error("camera", f"File not found: {camera_path}")
-        if session.heatmap_track.path:
-            h5_path = Path(session.heatmap_track.path)
+        # camera "keep" — nothing to do
+
+        if h5_action == "unload":
+            self.unload_h5_recording()
+        elif h5_action == "load":
+            h5_path = Path(desired_session.heatmap_track.path)
             if h5_path.exists():
                 self.load_h5_from_path(h5_path)
             else:
                 self._set_resource_reload_error("radar_h5", f"File not found: {h5_path}")
-        else:
-            self._reload_peak_distance_datasource_from_session()
-        self._reload_leg2_ultrasonic_datasource_from_session()
+        # h5 "keep" — nothing to do
+
+        if peak_action == "unload":
+            if self.peak_distance_datasource is not None:
+                self._clear_peak_distance_datasource()
+        elif peak_action == "load":
+            # H5 load will call _reload_peak_distance_datasource_from_session on completion;
+            # only load peak now when H5 is not loading.
+            if h5_action not in ("load",):
+                self._reload_peak_distance_datasource_from_session()
+        # peak "keep" — nothing to do
+
+        if leg2_action == "unload":
+            if self.leg2_ultrasonic_datasource is not None:
+                self._clear_leg2_ultrasonic_datasource()
+        elif leg2_action == "load":
+            self._reload_leg2_ultrasonic_datasource_from_session()
+        # leg2 "keep" — nothing to do
+
+    def load_session_from_path(self, session_path: Path) -> None:
+        desired_session = load_alignment_session(session_path)
+        prior_session = self.session
+
+        # Assign self.session BEFORE reconcile so load_h5_from_path reads correct indices.
+        self.session = desired_session
+        self._current_session_path = session_path
+        self._resource_reload_errors.clear()
+        self._resource_load_warnings.clear()
+
+        self._reconcile_session_load(desired_session, prior_session)
+
+        # Restore session after reconcile: unload/clear helpers may mutate non-resource fields
+        # (e.g. peak visibility). Reassign desired_session to guarantee populate reads it.
+        self.session = desired_session
+
+        # Populate controls after reconcile (jobs may still be in-flight).
+        self._populate_controls_from_session()
         if self.camera_source is not None:
             self._load_current_camera_frame(access_hint="random")
             self._refresh_camera_view_corners()
@@ -3995,6 +4121,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         else:
             self._reload_peak_distance_datasource_from_session()
         self._h5_replacement_backup = None
+        self._inflight_h5_identity = None
         self.statusBar().showMessage(f"Loaded H5 recording: {payload.path.name}")
 
     def _restore_camera_replacement_backup(self) -> None:
@@ -5262,6 +5389,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._resource_job_manager.cancel_job("radar_h5")
         clear_resource_job(self._resource_job_manager.board(), "radar_h5")
         self._h5_replacement_backup = None
+        self._inflight_h5_identity = None
         self.truth_view.set_loading_overlay(False)
         if self.heatmap_source is not None:
             self.heatmap_source.close()
@@ -5531,21 +5659,34 @@ def main() -> None:
     app = QtWidgets.QApplication(sys.argv)
     app.setApplicationName("Heatmap Alignment Workbench")
     window = HeatmapAlignmentWindow()
-    if args.session is not None:
-        window.load_session_from_path(args.session)
-    else:
-        if args.camera is not None:
-            window.load_camera_from_path(args.camera)
-        if args.h5 is not None:
-            window.load_h5_from_path(args.h5)
-
-    if args.peaks is not None:
-        window.load_peak_distance_from_path(args.peaks)
-
-    if args.mat is not None:
-        window.load_leg2_mat_from_path(args.mat)
-
     window.show()
+
+    if args.session is not None:
+        session_path = args.session
+        peaks_path = args.peaks
+        mat_path = args.mat
+
+        def _load_session_on_start() -> None:
+            window.load_session_from_path(session_path)
+            if peaks_path is not None:
+                window.load_peak_distance_from_path(peaks_path)
+            if mat_path is not None:
+                window.load_leg2_mat_from_path(mat_path)
+
+        QtCore.QTimer.singleShot(0, _load_session_on_start)
+    else:
+        def _load_resources_on_start() -> None:
+            if args.camera is not None:
+                window.load_camera_from_path(args.camera)
+            if args.h5 is not None:
+                window.load_h5_from_path(args.h5)
+            if args.peaks is not None:
+                window.load_peak_distance_from_path(args.peaks)
+            if args.mat is not None:
+                window.load_leg2_mat_from_path(args.mat)
+
+        QtCore.QTimer.singleShot(0, _load_resources_on_start)
+
     sys.exit(app.exec())
 
 

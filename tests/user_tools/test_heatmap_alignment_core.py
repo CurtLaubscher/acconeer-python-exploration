@@ -17,9 +17,11 @@ from scipy.io import savemat
 from heatmap_alignment_core import (  # noqa: E402
     AlignmentResourceRuntime,
     AlignmentSession,
+    CameraSlotIdentity,
     CameraTrack,
     CameraVideoSource,
     ExportOverlaySettings,
+    H5SlotIdentity,
     HeatmapPlotRenderer,
     HeatmapTrack,
     Leg2MatImportError,
@@ -28,6 +30,7 @@ from heatmap_alignment_core import (  # noqa: E402
     RenderSettings,
     ResourceJobPresentation,
     SignalPlotViewSettings,
+    SyncSlotIdentity,
     TimelineState,
     ViewportGeometry,
     ViewportVisibilitySettings,
@@ -36,6 +39,10 @@ from heatmap_alignment_core import (  # noqa: E402
     apply_viewport_visibility,
     build_alignment_resource_summaries,
     build_leg2_ultrasonic_signal_series,
+    desired_camera_identity,
+    desired_h5_identity,
+    desired_leg2_identity,
+    desired_peak_identity,
     elide_path_middle,
     build_peak_distance_signal_series,
     compute_xcorr_diagnostics,
@@ -45,6 +52,9 @@ from heatmap_alignment_core import (  # noqa: E402
     load_alignment_session,
     load_leg2_mat_ultrasonic,
     prepare_proxy_video,
+    reconcile_camera_action,
+    reconcile_h5_action,
+    reconcile_sync_slot_action,
     rectify_viewport,
     save_alignment_session,
     scale_viewport_corners,
@@ -1490,6 +1500,166 @@ def test_resource_messages_dedupes_job_detail_already_in_reload_errors() -> None
     messages = _resource_messages("camera", runtime)
 
     assert messages == (failure_text,)
+
+
+# ---------------------------------------------------------------------------
+# Session reconcile helpers (task 1.3)
+# ---------------------------------------------------------------------------
+
+
+def test_desired_camera_identity_returns_none_for_empty_path() -> None:
+    session = AlignmentSession()
+    assert desired_camera_identity(session) is None
+
+
+def test_desired_camera_identity_returns_identity_for_nonempty_path() -> None:
+    session = AlignmentSession(camera_track=CameraTrack(path="/tmp/video.mp4"))
+    identity = desired_camera_identity(session)
+    assert identity == CameraSlotIdentity(path="/tmp/video.mp4")
+
+
+def test_desired_h5_identity_returns_none_for_empty_path() -> None:
+    session = AlignmentSession()
+    assert desired_h5_identity(session) is None
+
+
+def test_desired_h5_identity_captures_all_indices() -> None:
+    session = AlignmentSession(
+        heatmap_track=HeatmapTrack(
+            path="/tmp/record.h5",
+            session_idx=1,
+            group_idx=2,
+            entry_idx=3,
+            subsweep_idx=4,
+        )
+    )
+    identity = desired_h5_identity(session)
+    assert identity == H5SlotIdentity(
+        path="/tmp/record.h5",
+        session_idx=1,
+        group_idx=2,
+        entry_idx=3,
+        subsweep_idx=4,
+    )
+
+
+def test_desired_peak_identity_returns_none_for_empty_path() -> None:
+    session = AlignmentSession()
+    assert desired_peak_identity(session) is None
+
+
+def test_desired_leg2_identity_returns_none_for_empty_path() -> None:
+    session = AlignmentSession()
+    assert desired_leg2_identity(session) is None
+
+
+def test_reconcile_camera_keep_when_loaded_path_matches() -> None:
+    desired = CameraSlotIdentity(path="/tmp/video.mp4")
+    action = reconcile_camera_action(desired, loaded_path="/tmp/video.mp4", inflight_path=None)
+    assert action == "keep"
+
+
+def test_reconcile_camera_keep_when_inflight_path_matches() -> None:
+    desired = CameraSlotIdentity(path="/tmp/video.mp4")
+    action = reconcile_camera_action(desired, loaded_path=None, inflight_path="/tmp/video.mp4")
+    assert action == "keep"
+
+
+def test_reconcile_camera_load_when_loaded_and_inflight_differ() -> None:
+    desired = CameraSlotIdentity(path="/tmp/new.mp4")
+    action = reconcile_camera_action(
+        desired, loaded_path="/tmp/old.mp4", inflight_path="/tmp/other.mp4"
+    )
+    assert action == "load"
+
+
+def test_reconcile_camera_load_when_slot_not_loaded() -> None:
+    desired = CameraSlotIdentity(path="/tmp/video.mp4")
+    action = reconcile_camera_action(desired, loaded_path=None, inflight_path=None)
+    assert action == "load"
+
+
+def test_reconcile_camera_unload_when_desired_none_and_loaded() -> None:
+    action = reconcile_camera_action(None, loaded_path="/tmp/video.mp4", inflight_path=None)
+    assert action == "unload"
+
+
+def test_reconcile_camera_unload_when_desired_none_and_inflight() -> None:
+    action = reconcile_camera_action(None, loaded_path=None, inflight_path="/tmp/video.mp4")
+    assert action == "unload"
+
+
+def test_reconcile_camera_keep_when_nothing_loaded_and_desired_none() -> None:
+    action = reconcile_camera_action(None, loaded_path=None, inflight_path=None)
+    assert action == "keep"
+
+
+def test_reconcile_h5_keep_when_identity_matches_loaded() -> None:
+    desired = H5SlotIdentity(path="/tmp/r.h5", session_idx=0, group_idx=0, entry_idx=0, subsweep_idx=0)
+    loaded = H5SlotIdentity(path="/tmp/r.h5", session_idx=0, group_idx=0, entry_idx=0, subsweep_idx=0)
+    action = reconcile_h5_action(desired, loaded_identity=loaded, inflight_identity=None)
+    assert action == "keep"
+
+
+def test_reconcile_h5_keep_when_identity_matches_inflight() -> None:
+    desired = H5SlotIdentity(path="/tmp/r.h5", session_idx=0, group_idx=0, entry_idx=0, subsweep_idx=1)
+    inflight = H5SlotIdentity(path="/tmp/r.h5", session_idx=0, group_idx=0, entry_idx=0, subsweep_idx=1)
+    action = reconcile_h5_action(desired, loaded_identity=None, inflight_identity=inflight)
+    assert action == "keep"
+
+
+def test_reconcile_h5_load_when_path_differs() -> None:
+    desired = H5SlotIdentity(path="/tmp/new.h5", session_idx=0, group_idx=0, entry_idx=0, subsweep_idx=0)
+    loaded = H5SlotIdentity(path="/tmp/old.h5", session_idx=0, group_idx=0, entry_idx=0, subsweep_idx=0)
+    action = reconcile_h5_action(desired, loaded_identity=loaded, inflight_identity=None)
+    assert action == "load"
+
+
+def test_reconcile_h5_load_when_subsweep_index_differs() -> None:
+    desired = H5SlotIdentity(path="/tmp/r.h5", session_idx=0, group_idx=0, entry_idx=0, subsweep_idx=1)
+    loaded = H5SlotIdentity(path="/tmp/r.h5", session_idx=0, group_idx=0, entry_idx=0, subsweep_idx=0)
+    action = reconcile_h5_action(desired, loaded_identity=loaded, inflight_identity=None)
+    assert action == "load"
+
+
+def test_reconcile_h5_unload_when_desired_none_and_loaded() -> None:
+    loaded = H5SlotIdentity(path="/tmp/r.h5", session_idx=0, group_idx=0, entry_idx=0, subsweep_idx=0)
+    action = reconcile_h5_action(None, loaded_identity=loaded, inflight_identity=None)
+    assert action == "unload"
+
+
+def test_reconcile_h5_unload_when_desired_none_and_inflight() -> None:
+    inflight = H5SlotIdentity(path="/tmp/r.h5", session_idx=0, group_idx=0, entry_idx=0, subsweep_idx=0)
+    action = reconcile_h5_action(None, loaded_identity=None, inflight_identity=inflight)
+    assert action == "unload"
+
+
+def test_reconcile_sync_slot_keep_when_path_matches_loaded() -> None:
+    desired = SyncSlotIdentity(path="/tmp/peaks.json")
+    action = reconcile_sync_slot_action(desired, loaded_path="/tmp/peaks.json")
+    assert action == "keep"
+
+
+def test_reconcile_sync_slot_load_when_loaded_path_differs() -> None:
+    desired = SyncSlotIdentity(path="/tmp/new_peaks.json")
+    action = reconcile_sync_slot_action(desired, loaded_path="/tmp/old_peaks.json")
+    assert action == "load"
+
+
+def test_reconcile_sync_slot_load_when_datasource_not_present() -> None:
+    desired = SyncSlotIdentity(path="/tmp/peaks.json")
+    action = reconcile_sync_slot_action(desired, loaded_path=None)
+    assert action == "load"
+
+
+def test_reconcile_sync_slot_unload_when_desired_none_and_loaded() -> None:
+    action = reconcile_sync_slot_action(None, loaded_path="/tmp/peaks.json")
+    assert action == "unload"
+
+
+def test_reconcile_sync_slot_keep_when_desired_none_and_not_loaded() -> None:
+    action = reconcile_sync_slot_action(None, loaded_path=None)
+    assert action == "keep"
 
 
 def test_resource_messages_prepends_job_detail_when_not_in_reload_errors() -> None:

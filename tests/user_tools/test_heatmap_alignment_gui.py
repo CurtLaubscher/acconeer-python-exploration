@@ -1322,3 +1322,305 @@ def test_apply_camera_job_result_resets_incompatible_viewport(
 
     assert initialized == ["default"]
     assert window.session.viewport.corners == [[1.0, 1.0], [2.0, 1.0], [2.0, 2.0], [1.0, 2.0]]
+
+
+# ---------------------------------------------------------------------------
+# Session reconcile integration tests (tasks 4.1–4.7)
+# ---------------------------------------------------------------------------
+
+
+def _make_session_file(
+    tmp_path: Path,
+    *,
+    camera_path: str = "",
+    h5_path: str = "",
+    session_idx: int = 0,
+    group_idx: int = 0,
+    entry_idx: int = 0,
+    subsweep_idx: int = 0,
+    offset_s: float = 0.0,
+) -> Path:
+    session = AlignmentSession(
+        camera_track=CameraTrack(path=camera_path),
+        heatmap_track=HeatmapTrack(
+            path=h5_path,
+            session_idx=session_idx,
+            group_idx=group_idx,
+            entry_idx=entry_idx,
+            subsweep_idx=subsweep_idx,
+        ),
+    )
+    session.timeline.offset_s = offset_s
+    path = tmp_path / "session.json"
+    save_alignment_session(session, path)
+    return path
+
+
+def test_reconcile_camera_keep_does_not_abandon_inflight_job(
+    tmp_path: Path,
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Task 4.1: same camera identity → keep; in-flight job is not abandoned."""
+    from heatmap_alignment_resource_jobs import begin_resource_job
+
+    camera_file = tmp_path / "video.mp4"
+    camera_file.write_bytes(b"")
+
+    session_path = _make_session_file(tmp_path, camera_path=str(camera_file))
+
+    window = HeatmapAlignmentWindow()
+
+    # Simulate an in-flight camera job for the same path.
+    begin_resource_job(
+        window._resource_job_manager.board(),
+        "camera",
+        target_path=camera_file,
+        replaces_active=False,
+    )
+    initial_generation = window._resource_job_manager.board().camera.generation
+
+    load_camera_calls: list[Path] = []
+    monkeypatch.setattr(window, "load_camera_from_path", lambda p: load_camera_calls.append(p))
+
+    window.load_session_from_path(session_path)
+
+    # The in-flight job must not have been abandoned (generation unchanged).
+    assert window._resource_job_manager.board().camera.generation == initial_generation
+    assert load_camera_calls == [], "load_camera_from_path must not be called when identity matches"
+
+
+def test_reconcile_h5_keep_does_not_abandon_inflight_job(
+    tmp_path: Path,
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Task 4.1: same H5 identity → keep; in-flight job is not abandoned."""
+    from heatmap_alignment_core import H5SlotIdentity
+    from heatmap_alignment_resource_jobs import begin_resource_job
+
+    h5_file = tmp_path / "record.h5"
+    h5_file.write_bytes(b"")
+
+    session_path = _make_session_file(tmp_path, h5_path=str(h5_file), subsweep_idx=0)
+
+    window = HeatmapAlignmentWindow()
+
+    # Pre-set the inflight H5 identity matching the session.
+    window._inflight_h5_identity = H5SlotIdentity(
+        path=str(h5_file), session_idx=0, group_idx=0, entry_idx=0, subsweep_idx=0
+    )
+    begin_resource_job(
+        window._resource_job_manager.board(),
+        "radar_h5",
+        target_path=h5_file,
+        replaces_active=False,
+    )
+    initial_generation = window._resource_job_manager.board().radar_h5.generation
+
+    load_h5_calls: list[Path] = []
+    monkeypatch.setattr(window, "load_h5_from_path", lambda p: load_h5_calls.append(p))
+
+    window.load_session_from_path(session_path)
+
+    assert window._resource_job_manager.board().radar_h5.generation == initial_generation
+    assert load_h5_calls == [], "load_h5_from_path must not be called when identity matches"
+
+
+def test_reconcile_h5_load_when_identity_changes(
+    tmp_path: Path,
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Task 4.2: changed H5 path → reconcile as load."""
+    old_h5 = tmp_path / "old.h5"
+    new_h5 = tmp_path / "new.h5"
+    old_h5.write_bytes(b"")
+    new_h5.write_bytes(b"")
+
+    session_path = _make_session_file(tmp_path, h5_path=str(new_h5))
+
+    window = HeatmapAlignmentWindow()
+    # Pretend old H5 is loaded.
+    window.session.heatmap_track = HeatmapTrack(path=str(old_h5))
+
+    class _FakeHeatmapSource:
+        path = old_h5
+        record = type("rec", (), {"session_idx": 0, "group_idx": 0, "entry_idx": 0})()
+        subsweep_idx = 0
+
+    window.heatmap_source = _FakeHeatmapSource()  # type: ignore[assignment]
+
+    load_h5_calls: list[Path] = []
+    monkeypatch.setattr(window, "load_h5_from_path", lambda p: load_h5_calls.append(p))
+    monkeypatch.setattr(window, "_sync_previews", lambda **kwargs: None)
+
+    window.load_session_from_path(session_path)
+
+    assert len(load_h5_calls) == 1
+    assert load_h5_calls[0] == new_h5
+
+
+def test_reconcile_camera_unload_when_session_omits_path(
+    tmp_path: Path,
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Task 4.3: empty camera path in session → unload when camera was loaded."""
+    session_path = _make_session_file(tmp_path, camera_path="")
+
+    window = HeatmapAlignmentWindow()
+    # Pretend a camera was loaded.
+    class _FakeCameraSource:
+        def close(self) -> None:
+            pass
+    window.camera_source = _FakeCameraSource()  # type: ignore[assignment]
+    window.session.camera_track = CameraTrack(path="/tmp/old.mp4")
+
+    unloaded: list[str] = []
+    original_unload_camera = window.unload_camera_video
+
+    def _track_unload() -> None:
+        unloaded.append("camera")
+        original_unload_camera()
+
+    monkeypatch.setattr(window, "unload_camera_video", _track_unload)
+
+    window.load_session_from_path(session_path)
+
+    assert "camera" in unloaded
+
+
+def test_reconcile_h5_unload_when_session_omits_path(
+    tmp_path: Path,
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Task 4.4: empty H5 path in session → unload when H5 was loaded."""
+    session_path = _make_session_file(tmp_path, h5_path="")
+
+    window = HeatmapAlignmentWindow()
+
+    class _FakeHeatmapSource:
+        path = Path("/tmp/old.h5")
+        record = type("rec", (), {"session_idx": 0, "group_idx": 0, "entry_idx": 0, "close": lambda self: None})()
+        subsweep_idx = 0
+        def close(self) -> None:
+            pass
+
+    window.heatmap_source = _FakeHeatmapSource()  # type: ignore[assignment]
+    window.session.heatmap_track = HeatmapTrack(path="/tmp/old.h5")
+
+    unloaded: list[str] = []
+    original_unload_h5 = window.unload_h5_recording
+
+    def _track_unload() -> None:
+        unloaded.append("h5")
+        original_unload_h5()
+
+    monkeypatch.setattr(window, "unload_h5_recording", _track_unload)
+
+    window.load_session_from_path(session_path)
+
+    assert "h5" in unloaded
+
+
+def test_reconcile_leg2_and_peak_unload_when_session_omits_paths(
+    tmp_path: Path,
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Task 4.5: empty peak/Leg2 paths → unload when datasources were loaded."""
+    session_path = _make_session_file(tmp_path)  # no peak or leg2 paths
+
+    window = HeatmapAlignmentWindow()
+    # Pretend datasources are loaded — set session paths so reconcile can see them.
+    window.session.peak_distance_datasource.path = "/tmp/peaks.json"
+    window.session.leg2_ultrasonic_datasource.path = "/tmp/leg2.mat"
+    window.peak_distance_datasource = object()  # type: ignore[assignment]
+    window.leg2_ultrasonic_datasource = object()  # type: ignore[assignment]
+
+    cleared: list[str] = []
+
+    def _track_clear_peak() -> None:
+        cleared.append("peak")
+        window.peak_distance_datasource = None
+
+    def _track_clear_leg2() -> None:
+        cleared.append("leg2")
+        window.leg2_ultrasonic_datasource = None
+
+    monkeypatch.setattr(window, "_clear_peak_distance_datasource", _track_clear_peak)
+    monkeypatch.setattr(window, "_clear_leg2_ultrasonic_datasource", _track_clear_leg2)
+    # Prevent real reload calls.
+    monkeypatch.setattr(window, "_reload_peak_distance_datasource_from_session", lambda: None)
+    monkeypatch.setattr(window, "_reload_leg2_ultrasonic_datasource_from_session", lambda: None)
+
+    window.load_session_from_path(session_path)
+
+    assert "peak" in cleared
+    assert "leg2" in cleared
+
+
+def test_reconcile_session_fields_applied_after_camera_keep(
+    tmp_path: Path,
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Task 4.6: session fields (e.g. timeline offset) applied even when camera slot uses keep."""
+    camera_file = tmp_path / "video.mp4"
+    camera_file.write_bytes(b"")
+
+    session_path = _make_session_file(tmp_path, camera_path=str(camera_file), offset_s=2.5)
+
+    window = HeatmapAlignmentWindow()
+    # Simulate camera already loaded with same path.
+    class _FakeCameraSource:
+        def close(self) -> None:
+            pass
+    window.camera_source = _FakeCameraSource()  # type: ignore[assignment]
+    window.session.camera_track = CameraTrack(path=str(camera_file))
+
+    # Prevent new loads and preview rendering.
+    monkeypatch.setattr(window, "load_camera_from_path", lambda p: None)
+    monkeypatch.setattr(window, "_sync_previews", lambda **kwargs: None)
+    monkeypatch.setattr(window, "_load_current_camera_frame", lambda access_hint="auto": None)
+    monkeypatch.setattr(window, "_refresh_camera_view_corners", lambda: None)
+
+    window.load_session_from_path(session_path)
+
+    # Session fields from the JSON must be applied regardless of keep.
+    assert window.session.timeline.offset_s == pytest.approx(2.5)
+
+
+def test_reconcile_session_fields_applied_after_h5_keep(
+    tmp_path: Path,
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Task 4.7: session fields applied when H5 slot uses keep."""
+    h5_file = tmp_path / "record.h5"
+    h5_file.write_bytes(b"")
+
+    session_path = _make_session_file(tmp_path, h5_path=str(h5_file), offset_s=1.25)
+
+    window = HeatmapAlignmentWindow()
+
+    class _FakeHeatmapSource:
+        path = h5_file
+        record = type("rec", (), {"session_idx": 0, "group_idx": 0, "entry_idx": 0})()
+        subsweep_idx = 0
+
+    window.heatmap_source = _FakeHeatmapSource()  # type: ignore[assignment]
+    window.session.heatmap_track = HeatmapTrack(
+        path=str(h5_file), session_idx=0, group_idx=0, entry_idx=0, subsweep_idx=0
+    )
+    window._inflight_h5_identity = None
+
+    monkeypatch.setattr(window, "load_h5_from_path", lambda p: None)
+    monkeypatch.setattr(window, "_reload_peak_distance_datasource_from_session", lambda: None)
+    monkeypatch.setattr(window, "_sync_previews", lambda **kwargs: None)
+
+    window.load_session_from_path(session_path)
+
+    assert window.session.timeline.offset_s == pytest.approx(1.25)
