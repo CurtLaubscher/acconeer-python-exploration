@@ -116,9 +116,17 @@ from heatmap_alignment_resource_jobs import (
 )
 from sparse_iq_peak_distance_core import (
     STATUS_DETECTED,
+    PeakDistanceExportResult,
     PeakDistanceJsonImportError,
     annotate_heatmap_rgb_with_peak,
-    measurement_for_frame,
+)
+from heatmap_peak_distance_resource import (
+    PeakDistanceResourceState,
+    active_peak_measurements,
+    active_peak_zero_velocity_m_s,
+    generate_peak_distances_from_heatmap_record,
+    peak_state_detected_counts,
+    save_peak_state_to_path,
 )
 
 from PySide6 import QtCore, QtGui, QtWidgets
@@ -138,6 +146,9 @@ RESOURCE_STATUS_LABELS = {
 
 RESOURCES_DETAILS_SECTION_SPACING_PX = 6
 RESOURCES_DETAILS_PATH_BLOCK_TOP_MARGIN_PX = 6
+# Initial column widths (Interactive; user can resize; not enforced on refresh).
+RESOURCES_TABLE_RESOURCE_COLUMN_DEFAULT_WIDTH_PX = 140
+RESOURCES_TABLE_STATUS_COLUMN_DEFAULT_WIDTH_PX = 150
 
 RESOURCE_ACTION_LABELS: dict[ResourceAction, str] = {
     "load": "&Load...",
@@ -147,6 +158,9 @@ RESOURCE_ACTION_LABELS: dict[ResourceAction, str] = {
     "reveal": "Show in &File Manager",
     "inspect": "Inspect &Warnings",
     "cancel": "&Cancel Load",
+    "generate": "&Generate",
+    "save": "&Save Peaks",
+    "save_as": "Save Peaks &As...",
 }
 
 RESOURCE_JOB_STATUS_LABELS = {
@@ -2724,6 +2738,17 @@ class ResourcesWindow(QtWidgets.QDialog):
         table_header.setSectionsClickable(False)
         table_header.setHighlightSections(False)
         self.table.setColumnWidth(0, 34)
+        table_metrics = self.table.fontMetrics()
+        resource_default_width = max(
+            RESOURCES_TABLE_RESOURCE_COLUMN_DEFAULT_WIDTH_PX,
+            table_metrics.horizontalAdvance("Radar Peak (JSON)") + 20,
+        )
+        status_default_width = max(
+            RESOURCES_TABLE_STATUS_COLUMN_DEFAULT_WIDTH_PX,
+            table_metrics.horizontalAdvance("Generated (unsaved)") + 20,
+        )
+        self.table.setColumnWidth(1, resource_default_width)
+        self.table.setColumnWidth(3, status_default_width)
         self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
         self.table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -2779,6 +2804,9 @@ class ResourcesWindow(QtWidgets.QDialog):
         self.reveal_button = QtWidgets.QPushButton(RESOURCE_ACTION_LABELS["reveal"])
         self.inspect_button = QtWidgets.QPushButton(RESOURCE_ACTION_LABELS["inspect"])
         self.cancel_button = QtWidgets.QPushButton(RESOURCE_ACTION_LABELS["cancel"])
+        self.generate_button = QtWidgets.QPushButton(RESOURCE_ACTION_LABELS["generate"])
+        self.save_peaks_button = QtWidgets.QPushButton(RESOURCE_ACTION_LABELS["save"])
+        self.save_peaks_as_button = QtWidgets.QPushButton(RESOURCE_ACTION_LABELS["save_as"])
         for button in (
             self.load_button,
             self.replace_button,
@@ -2787,6 +2815,9 @@ class ResourcesWindow(QtWidgets.QDialog):
             self.reveal_button,
             self.inspect_button,
             self.cancel_button,
+            self.generate_button,
+            self.save_peaks_button,
+            self.save_peaks_as_button,
         ):
             action_row.addWidget(button)
         action_row.addStretch(1)
@@ -2800,6 +2831,9 @@ class ResourcesWindow(QtWidgets.QDialog):
         self.reveal_button.clicked.connect(lambda: self._invoke_action("reveal"))
         self.inspect_button.clicked.connect(lambda: self._invoke_action("inspect"))
         self.cancel_button.clicked.connect(lambda: self._invoke_action("cancel"))
+        self.generate_button.clicked.connect(lambda: self._invoke_action("generate"))
+        self.save_peaks_button.clicked.connect(lambda: self._invoke_action("save"))
+        self.save_peaks_as_button.clicked.connect(lambda: self._invoke_action("save_as"))
 
         bottom_row = QtWidgets.QHBoxLayout()
         self.clear_all_button = QtWidgets.QPushButton("Clear All Resources...")
@@ -2871,7 +2905,7 @@ class ResourcesWindow(QtWidgets.QDialog):
                 self._configure_table_item(role_item)
                 self.table.setItem(row_index, 2, role_item)
 
-                status_text = RESOURCE_STATUS_LABELS[summary.status]
+                status_text = summary.status_label if summary.status_label else RESOURCE_STATUS_LABELS[summary.status]
                 if summary.job_phase not in ("idle", "superseded"):
                     status_text = RESOURCE_JOB_STATUS_LABELS[summary.job_phase]
                 status_item = QtWidgets.QTableWidgetItem(status_text)
@@ -2923,6 +2957,9 @@ class ResourcesWindow(QtWidgets.QDialog):
                 self.reveal_button,
                 self.inspect_button,
                 self.cancel_button,
+                self.generate_button,
+                self.save_peaks_button,
+                self.save_peaks_as_button,
             ):
                 button.setEnabled(False)
             return
@@ -2930,9 +2967,8 @@ class ResourcesWindow(QtWidgets.QDialog):
         self.details_identity_label.setText(
             f"{summary.display_name} ({summary.role})"
         )
-        self.details_status_label.setText(
-            f"{RESOURCE_STATUS_LABELS[summary.status]}\n{summary.details}"
-        )
+        display_status = summary.status_label if summary.status_label else RESOURCE_STATUS_LABELS[summary.status]
+        self.details_status_label.setText(f"{display_status}\n{summary.details}")
         if summary.messages:
             self.details_messages_label.setText("\n".join(summary.messages))
             self.details_messages_label.setVisible(True)
@@ -2955,6 +2991,9 @@ class ResourcesWindow(QtWidgets.QDialog):
         self.reveal_button.setEnabled("reveal" in action_set)
         self.inspect_button.setEnabled("inspect" in action_set)
         self.cancel_button.setEnabled("cancel" in action_set)
+        self.generate_button.setEnabled("generate" in action_set)
+        self.save_peaks_button.setEnabled("save" in action_set)
+        self.save_peaks_as_button.setEnabled("save_as" in action_set)
 
     def _invoke_action(self, action: ResourceAction) -> None:
         summary = self._selected_summary()
@@ -3024,6 +3063,8 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._camera_reference_height = 0
         self._overlay_plot_renderer: HeatmapPlotRenderer | None = None
         self.peak_distance_datasource: LoadedPeakDistanceDatasource | None = None
+        self._generated_peak_result: PeakDistanceExportResult | None = None
+        self._peaks_dirty: bool = False
         self.leg2_ultrasonic_datasource: LoadedLeg2UltrasonicDatasource | None = None
         self._freeze_export_overlay_preview = False
         self._export_in_progress = False
@@ -3081,7 +3122,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         QtCore.QTimer.singleShot(0, self.schedule_timeline_axis_geometry_sync)
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
-        if self._session_dirty:
+        if self._session_dirty or self._peaks_dirty:
             choice = self._prompt_save_discard_cancel("quit")
             if choice == "cancel":
                 event.ignore()
@@ -3443,6 +3484,8 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             self.heatmap_source.close()
             self.heatmap_source = None
         self.peak_distance_datasource = None
+        self._generated_peak_result = None
+        self._peaks_dirty = False
         self.leg2_ultrasonic_datasource = None
         self.camera_view.set_export_overlay_preview_frame(None)
         self.camera_view.set_corners(None)
@@ -3575,6 +3618,8 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             self._refresh_resources_ui()
             return False
 
+        self._generated_peak_result = None
+        self._peaks_dirty = False
         self.peak_distance_datasource = datasource
         self.session.peak_distance_datasource.path = str(json_path)
         self.session.peak_distance_datasource.visible = self.show_peak_marker_checkbox.isChecked()
@@ -3600,7 +3645,43 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._refresh_resources_ui()
         return True
 
+    def _confirm_action_dialog(
+        self,
+        *,
+        title: str,
+        question: str,
+        informative: str = "",
+        accept_label: str,
+        reject_label: str = "Cancel",
+    ) -> bool:
+        """Show a confirmation with the question in the body and verb-labeled buttons."""
+        box = QtWidgets.QMessageBox(self)
+        box.setIcon(QtWidgets.QMessageBox.Icon.Question)
+        box.setWindowTitle(title)
+        box.setText(question)
+        if informative:
+            box.setInformativeText(informative)
+        box.setStandardButtons(
+            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No
+        )
+        accept_button = box.button(QtWidgets.QMessageBox.StandardButton.Yes)
+        reject_button = box.button(QtWidgets.QMessageBox.StandardButton.No)
+        if accept_button is not None:
+            accept_button.setText(accept_label)
+        if reject_button is not None:
+            reject_button.setText(reject_label)
+        box.setDefaultButton(QtWidgets.QMessageBox.StandardButton.Yes)
+        return box.exec() == QtWidgets.QMessageBox.StandardButton.Yes
+
     def _import_peak_distance_json(self) -> None:
+        if self._peaks_dirty and not self._confirm_action_dialog(
+            title="Replace peaks",
+            question="Replace the current in-memory peak data with the selected JSON file?",
+            informative="Files on disk are unchanged until you save peaks.",
+            accept_label="Replace",
+        ):
+            return
+
         filename, _ = QtWidgets.QFileDialog.getOpenFileName(
             self,
             "Import peak-distance JSON",
@@ -3616,7 +3697,15 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             require_heatmap=True,
         )
 
-    def _clear_peak_distance_datasource(self, *, mark_dirty: bool = True) -> None:
+    def _clear_peak_distance_datasource(self, *, mark_dirty: bool = True, confirm: bool = True) -> None:
+        if confirm and self._peaks_dirty and not self._confirm_action_dialog(
+            title="Discard peaks",
+            question="Discard unsaved peak-distance data?",
+            accept_label="Discard",
+        ):
+            return
+        self._peaks_dirty = False
+        self._generated_peak_result = None
         if mark_dirty:
             self._mark_session_dirty()
         self.peak_distance_datasource = None
@@ -3628,6 +3717,116 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._sync_previews(camera_access_hint="auto")
         self._refresh_resources_ui()
         self.statusBar().showMessage("Cleared imported peak-distance datasource.")
+
+    def _generate_peak_distances(self) -> None:
+        if self.heatmap_source is None:
+            return
+        if self._has_peaks_in_memory() and not self._confirm_action_dialog(
+            title="Replace peaks",
+            question="Replace the current in-memory peak data?",
+            informative="Files on disk are unchanged until you save peaks.",
+            accept_label="Replace",
+        ):
+            return
+
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.CursorShape.WaitCursor)
+        self.statusBar().showMessage("Generating peak distances...")
+        try:
+            result = generate_peak_distances_from_heatmap_record(
+                self.heatmap_source.record,
+                h5_path=self.heatmap_source.path,
+                subsweep_idx=self.heatmap_source.subsweep_idx,
+            )
+        except Exception as exc:
+            QtWidgets.QApplication.restoreOverrideCursor()
+            QtWidgets.QMessageBox.warning(
+                self, "Generation failed", f"Could not generate peak distances: {exc}"
+            )
+            return
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+
+        self.peak_distance_datasource = None
+        self._generated_peak_result = result
+        self._peaks_dirty = True
+        self._set_resource_reload_error("radar_peak", None)
+        self._set_resource_warnings("radar_peak", ())
+        self._update_peak_datasource_controls()
+        self._sync_previews(camera_access_hint="auto")
+        self._refresh_resources_ui()
+        counts = peak_state_detected_counts(result)
+        if counts:
+            detected, total = counts
+            self.statusBar().showMessage(
+                f"Generated peaks: {detected}/{total} frames detected."
+            )
+        else:
+            self.statusBar().showMessage("Generated peaks.")
+
+    def _save_peaks(self) -> None:
+        peak_state = self._active_peak_state()
+        if peak_state is None or not self._peaks_dirty:
+            return
+        existing_path = self.session.peak_distance_datasource.path
+        if not existing_path:
+            self._save_peaks_as()
+            return
+        output_path = Path(existing_path)
+        if output_path.exists():
+            reply = QtWidgets.QMessageBox.question(
+                self,
+                "Overwrite peaks file?",
+                f"Overwrite existing file?\n{output_path}",
+                QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+                QtWidgets.QMessageBox.StandardButton.No,
+            )
+            if reply != QtWidgets.QMessageBox.StandardButton.Yes:
+                return
+        self._write_peaks_to_path(peak_state, output_path)
+
+    def _save_peaks_as(self) -> None:
+        peak_state = self._active_peak_state()
+        if peak_state is None:
+            return
+        default_path = ""
+        if self.heatmap_source is not None:
+            h5_path = self.heatmap_source.path
+            default_path = str(h5_path.parent / (h5_path.stem + "_peak_distances.json"))
+        elif self.session.peak_distance_datasource.path:
+            default_path = self.session.peak_distance_datasource.path
+        filename, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Save peaks as",
+            default_path or self._dialog_start_path("last_peak_json_path"),
+            "Peak-distance JSON (*.json);;All files (*)",
+        )
+        if not filename:
+            return
+        self._write_peaks_to_path(peak_state, Path(filename))
+
+    def _write_peaks_to_path(self, peak_state: PeakDistanceResourceState, output_path: Path) -> bool:
+        try:
+            saved_datasource = save_peak_state_to_path(peak_state, output_path)
+        except OSError as exc:
+            QtWidgets.QMessageBox.warning(
+                self, "Save peaks failed", f"Could not save peak distances:\n{exc}"
+            )
+            return False
+
+        old_path = self.session.peak_distance_datasource.path
+        self.peak_distance_datasource = saved_datasource
+        self._generated_peak_result = None
+        self._peaks_dirty = False
+        self.session.peak_distance_datasource.path = str(output_path)
+        if str(output_path) != old_path:
+            self._mark_session_dirty()
+        self.settings.setValue("last_peak_json_path", str(output_path))
+        self._set_resource_reload_error("radar_peak", None)
+        self._update_peak_datasource_controls()
+        self._sync_previews(camera_access_hint="auto")
+        self._refresh_resources_ui()
+        self.statusBar().showMessage(f"Saved peaks: {output_path.name}")
+        return True
 
     def load_leg2_mat_from_path(
         self,
@@ -3786,6 +3985,8 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             self._refresh_resources_ui()
             return
 
+        self._generated_peak_result = None
+        self._peaks_dirty = False
         self.peak_distance_datasource = datasource
         self._set_resource_reload_error("radar_peak", None)
         self._set_resource_warnings("radar_peak", tuple(warnings))
@@ -3802,24 +4003,35 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._sync_previews(camera_access_hint="auto")
 
     def _update_peak_datasource_controls(self) -> None:
-        datasource = self.peak_distance_datasource
-        has_datasource = datasource is not None
+        has_datasource = self._has_peaks_in_memory()
         self.show_peak_marker_checkbox.setEnabled(has_datasource)
 
+    def _active_peak_state(self) -> PeakDistanceResourceState | None:
+        """Return whichever peak state is active: generated result or loaded datasource."""
+        if self._generated_peak_result is not None:
+            return self._generated_peak_result
+        return self.peak_distance_datasource
+
+    def _has_peaks_in_memory(self) -> bool:
+        return self._generated_peak_result is not None or self.peak_distance_datasource is not None
+
     def _peak_overlay_for_frame(self, frame_idx: int) -> tuple[float, float] | None:
-        if (
-            self.peak_distance_datasource is None
-            or not self.session.peak_distance_datasource.visible
-        ):
+        peak_state = self._active_peak_state()
+        if peak_state is None or not self.session.peak_distance_datasource.visible:
             return None
-        measurement = measurement_for_frame(self.peak_distance_datasource, frame_idx)
+        measurements = active_peak_measurements(peak_state)
+        if measurements is None:
+            return None
+        measurement = next(
+            (m for m in measurements if m.frame_index == frame_idx), None
+        )
         if measurement is None or measurement.status != STATUS_DETECTED:
             return None
         if measurement.peak_distance_m is None:
             return None
         return (
             measurement.peak_distance_m,
-            self.peak_distance_datasource.metadata.zero_velocity_m_s,
+            active_peak_zero_velocity_m_s(peak_state),
         )
 
     def _annotate_truth_frame_with_peak(
@@ -3868,6 +4080,21 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.warning(self, "Cannot save session", str(exc))
             return False
 
+        if self._peaks_dirty:
+            reply = QtWidgets.QMessageBox.question(
+                self,
+                "Save session with unsaved peaks?",
+                (
+                    "The alignment session does not include generated peak-distance data.\n\n"
+                    "To preserve peaks, save them from the Resources window (Save Peaks) before saving the session.\n\n"
+                    "Save session anyway?"
+                ),
+                QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+                QtWidgets.QMessageBox.StandardButton.Yes,
+            )
+            if reply != QtWidgets.QMessageBox.StandardButton.Yes:
+                return False
+
         save_alignment_session(self.session, session_path)
         self._current_session_path = session_path
         self.settings.setValue("last_session_path", str(session_path))
@@ -3891,7 +4118,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         return self._write_session_to_path(self._current_session_path)
 
     def _load_session(self) -> None:
-        if self._session_dirty:
+        if self._session_dirty or self._peaks_dirty:
             choice = self._prompt_save_discard_cancel("open")
             if choice == "cancel":
                 return
@@ -4003,8 +4230,8 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         # h5 "keep" — nothing to do
 
         if peak_action == "unload":
-            if self.peak_distance_datasource is not None:
-                self._clear_peak_distance_datasource(mark_dirty=False)
+            if self._has_peaks_in_memory():
+                self._clear_peak_distance_datasource(mark_dirty=False, confirm=False)
         elif peak_action == "load":
             # H5 load will call _reload_peak_distance_datasource_from_session on completion;
             # only load peak now when H5 is not loading.
@@ -4169,7 +4396,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._rebuild_overlay_plot_renderer()
         self.settings.setValue("last_h5_path", str(payload.path))
         if previous_path and previous_path != str(payload.path):
-            self._clear_peak_distance_datasource(mark_dirty=False)
+            self._clear_peak_distance_datasource(mark_dirty=False, confirm=False)
         else:
             self._reload_peak_distance_datasource_from_session()
         self._h5_replacement_backup = None
@@ -5163,12 +5390,13 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
 
     def _refresh_signal_plot(self) -> None:
         peak_series = None
-        if self.peak_distance_datasource is not None:
+        peak_state = self._active_peak_state()
+        if peak_state is not None:
             peak_series = build_peak_distance_signal_series(
-                self.peak_distance_datasource.measurements
+                active_peak_measurements(peak_state)
             )
         peak_visible = (
-            self.peak_distance_datasource is not None
+            peak_state is not None
             and self.session.peak_distance_datasource.visible
         )
         leg2_series = None
@@ -5203,7 +5431,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         )
         has_heatmap = self.heatmap_source is not None and not h5_job_busy
         has_optional_signal = (
-            self.peak_distance_datasource is not None
+            self._has_peaks_in_memory()
             or self.leg2_ultrasonic_datasource is not None
         )
         enabled = has_camera or has_heatmap or has_optional_signal
@@ -5237,13 +5465,11 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
     def _resource_runtime(self) -> AlignmentResourceRuntime:
         peak_detected: int | None = None
         peak_total: int | None = None
-        if self.peak_distance_datasource is not None:
-            peak_total = len(self.peak_distance_datasource.measurements)
-            peak_detected = sum(
-                1
-                for row in self.peak_distance_datasource.measurements
-                if row.status == STATUS_DETECTED
-            )
+        peak_state = self._active_peak_state()
+        if peak_state is not None:
+            counts = peak_state_detected_counts(peak_state)
+            if counts is not None:
+                peak_detected, peak_total = counts
         leg2_valid: int | None = None
         leg2_samples: int | None = None
         if self.leg2_ultrasonic_datasource is not None:
@@ -5253,10 +5479,11 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         return AlignmentResourceRuntime(
             camera_loaded=self.camera_source is not None,
             radar_h5_loaded=self.heatmap_source is not None,
-            radar_peak_loaded=self.peak_distance_datasource is not None,
+            radar_peak_loaded=self._has_peaks_in_memory(),
             leg2_loaded=self.leg2_ultrasonic_datasource is not None,
             peak_detected_count=peak_detected,
             peak_measurement_count=peak_total,
+            peaks_dirty=self._peaks_dirty,
             leg2_valid_segment_count=leg2_valid,
             leg2_sample_count=leg2_samples,
             reload_errors=tuple(self._resource_reload_errors.items()),
@@ -5293,7 +5520,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         if self.camera_source is not None or self.heatmap_source is not None:
             return False
         if (
-            self.peak_distance_datasource is not None
+            self._has_peaks_in_memory()
             or self.leg2_ultrasonic_datasource is not None
         ):
             return False
@@ -5308,19 +5535,55 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             "close": "Close Session?",
             "quit": "Quit Heatmap Alignment?",
         }
-        texts = {
-            "open": (
-                "There are unsaved changes. Do you want to save them before "
-                "opening another session?"
-            ),
-            "close": (
-                "There are unsaved changes. Do you want to save them before "
-                "closing this session?"
-            ),
-            "quit": (
-                "There are unsaved changes. Do you want to save them before quitting?"
-            ),
-        }
+        peaks_note = (
+            "Saving the alignment session does not write peak JSON."
+        )
+        if self._session_dirty and self._peaks_dirty:
+            texts = {
+                "open": (
+                    "There are unsaved changes. Do you want to save them before "
+                    f"opening another session?\n\nUnsaved peak-distance data will also be lost. "
+                    f"{peaks_note}"
+                ),
+                "close": (
+                    "There are unsaved changes. Do you want to save them before "
+                    f"closing this session?\n\nUnsaved peak-distance data will also be lost. "
+                    f"{peaks_note}"
+                ),
+                "quit": (
+                    "There are unsaved changes. Do you want to save them before quitting?"
+                    f"\n\nUnsaved peak-distance data will also be lost. {peaks_note}"
+                ),
+            }
+        elif self._peaks_dirty:
+            texts = {
+                "open": (
+                    "Unsaved peak-distance data will be lost if you open another session. "
+                    f"{peaks_note}\n\nProceed?"
+                ),
+                "close": (
+                    "Unsaved peak-distance data will be lost if you close this session. "
+                    f"{peaks_note}\n\nProceed?"
+                ),
+                "quit": (
+                    "Unsaved peak-distance data will be lost if you quit. "
+                    f"{peaks_note}\n\nProceed?"
+                ),
+            }
+        else:
+            texts = {
+                "open": (
+                    "There are unsaved changes. Do you want to save them before "
+                    "opening another session?"
+                ),
+                "close": (
+                    "There are unsaved changes. Do you want to save them before "
+                    "closing this session?"
+                ),
+                "quit": (
+                    "There are unsaved changes. Do you want to save them before quitting?"
+                ),
+            }
         message_box = QtWidgets.QMessageBox(self)
         message_box.setIcon(QtWidgets.QMessageBox.Icon.Warning)
         message_box.setWindowTitle(titles[action])
@@ -5379,7 +5642,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.unload_camera_action.setEnabled(self.camera_source is not None)
         self.unload_h5_action.setEnabled(self.heatmap_source is not None)
         self.unload_peak_action.setEnabled(
-            self.peak_distance_datasource is not None or has_peak_path
+            self._has_peaks_in_memory() or has_peak_path
         )
         self.unload_leg2_action.setEnabled(
             self.leg2_ultrasonic_datasource is not None or has_leg2_path
@@ -5430,6 +5693,18 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             if kind in ("camera", "radar_h5"):
                 if self._resource_job_manager.cancel_job(kind):
                     self._handle_resource_job_state_changed()
+            return
+        if action == "generate":
+            if kind == "radar_peak":
+                self._generate_peak_distances()
+            return
+        if action == "save":
+            if kind == "radar_peak":
+                self._save_peaks()
+            return
+        if action == "save_as":
+            if kind == "radar_peak":
+                self._save_peaks_as()
             return
         if action == "load":
             if kind == "camera":
@@ -5487,6 +5762,13 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         elif kind == "radar_h5":
             self.load_h5_from_path(path)
         elif kind == "radar_peak":
+            if self._peaks_dirty and not self._confirm_action_dialog(
+                title="Reload peaks",
+                question="Reload peak data from disk and discard unsaved changes?",
+                informative="Unsaved generated peak data will be lost.",
+                accept_label="Reload",
+            ):
+                return
             self.load_peak_distance_from_path(path, show_dialogs=True, require_heatmap=False)
         elif kind == "leg2_mat":
             self.load_leg2_mat_from_path(path, show_dialogs=True)
@@ -5568,12 +5850,16 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage("Unloaded radar raw H5 recording.")
 
     def clear_all_resources(self) -> None:
+        peaks_warning = (
+            "\n\nUnsaved generated peak-distance data will also be lost."
+            if self._peaks_dirty else ""
+        )
         reply = QtWidgets.QMessageBox.question(
             self,
             "Clear All Resources",
             (
                 "Unload Camera Video, Radar Raw (H5), Radar Peak (JSON), and Leg2 MAT "
-                "from this workbench?\n\nThe current session path will be kept."
+                f"from this workbench?{peaks_warning}\n\nThe current session path will be kept."
             ),
             QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
             QtWidgets.QMessageBox.StandardButton.No,
@@ -5582,13 +5868,13 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             return
         self.unload_camera_video(mark_dirty=False)
         self.unload_h5_recording(mark_dirty=False)
-        self._clear_peak_distance_datasource(mark_dirty=False)
+        self._clear_peak_distance_datasource(mark_dirty=False, confirm=False)
         self._clear_leg2_ultrasonic_datasource(mark_dirty=False)
         self._mark_session_dirty()
         self.statusBar().showMessage("Cleared all loaded resources.")
 
     def _close_session(self) -> None:
-        if self._session_dirty:
+        if self._session_dirty or self._peaks_dirty:
             choice = self._prompt_save_discard_cancel("close")
             if choice == "cancel":
                 return
@@ -5606,6 +5892,8 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             self._current_session_path = None
             self._resource_reload_errors.clear()
             self._resource_load_warnings.clear()
+            self._generated_peak_result = None
+            self._peaks_dirty = False
             self._populate_controls_from_session()
             self._update_controls_enabled_state()
             self._sync_previews(camera_access_hint="auto")
