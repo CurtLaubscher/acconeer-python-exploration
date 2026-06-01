@@ -816,11 +816,11 @@ The system SHALL allow users to manage resources from the Resources window.
 
 #### Scenario: Inspect resource warnings
 - **WHEN** the user selects a resource row with warnings or load errors
-- **THEN** the Resources window provides a way to inspect the warning or error details without relying only on the status bar
+- **THEN** the system provides a way to inspect the warning or error details without relying only on the status bar
 
 #### Scenario: Use row context menu actions
 - **WHEN** the user opens a context menu on a resource row
-- **THEN** the context menu offers the same applicable row-scoped actions as the Resources window selected-row controls, such as load or replace, unload or clear, reload, reveal path, and inspect warnings
+- **THEN** the context menu offers the same applicable row-scoped actions as the Resources window selected-row controls, including generate and save peaks for Radar Peak (JSON) when applicable
 
 #### Scenario: Omit double-click load behavior
 - **WHEN** the user double-clicks a resource row
@@ -833,6 +833,18 @@ The system SHALL allow users to manage resources from the Resources window.
 #### Scenario: Confirm clear all resources
 - **WHEN** the user invokes Clear All Resources
 - **THEN** the confirmation message tells the user that loaded resources will be cleared and the current session path will be kept
+
+#### Scenario: Confirm clear all with unsaved generated peaks
+- **WHEN** peaks are dirty and the user invokes Clear All Resources
+- **THEN** the confirmation message also states that unsaved generated peak data will be lost
+
+#### Scenario: Generate peaks from Resources window
+- **WHEN** the user selects the Radar Peak (JSON) row, Radar Raw (H5) is loaded, and the user invokes Generate
+- **THEN** the system generates peak-distance data from the loaded H5 and updates the workbench without writing JSON until the user saves peaks
+
+#### Scenario: Save peaks from Resources window
+- **WHEN** the user selects the Radar Peak (JSON) row and invokes Save peaks while peaks are dirty, or Save peaks as… while peak data is in memory
+- **THEN** the system writes canonical peak-distance JSON according to the save-peaks requirements
 
 ### Requirement: Session dirty state
 The system SHALL track whether the current alignment session has unsaved changes relative to the last successful save, successful open, or reset to a pristine untitled session.
@@ -882,7 +894,9 @@ When the session is dirty, the system SHALL prompt the user with **Save**, **Don
 
 The prompt SHALL use conventional desktop wording: state that there are unsaved changes and ask whether to save them before quitting, closing the current session, or opening another session. The system SHALL NOT use internal terms such as “workbench” in the prompt text.
 
-For **Open Session**, the system SHALL show the unsaved-changes prompt before the open file dialog when the current session is dirty.
+When peaks are dirty, the prompt body SHALL additionally warn that unsaved peak-distance data will be lost and that saving the alignment session does not write peak JSON. The prompt SHALL NOT imply that choosing **Save** in that dialog saves peak JSON.
+
+For **Open Session**, the system SHALL show the unsaved-changes prompt before the open file dialog when the current session is dirty or peaks are dirty.
 
 For **Save** in the prompt, the system SHALL save to the current session path when known, or behave like Save Session As when the session is untitled. If save fails or the user cancels Save As, the system SHALL cancel the guarded action and leave the current session unchanged and dirty.
 
@@ -892,55 +906,21 @@ For **Cancel**, the system SHALL abort the requested action and leave the curren
 
 The system SHALL NOT show the unsaved-changes prompt when loading a session from `--session` on startup or when tests call session load helpers directly without the menu guard.
 
-When the session is not dirty, the system SHALL NOT show the unsaved-changes prompt on quit or close.
-
 #### Scenario: Prompt before quit when dirty
-- **WHEN** the user quits the application while the session is dirty
-- **THEN** the system shows an unsaved-changes prompt with Save, Don't Save, and Cancel before exiting
-
-#### Scenario: No prompt before quit when clean
-- **WHEN** the user quits the application while the session is not dirty
-- **THEN** the system exits without an unsaved-changes or save prompt
+- **WHEN** the user chooses Quit and the session is dirty or peaks are dirty
+- **THEN** the system shows the unsaved-changes prompt before exiting
 
 #### Scenario: Prompt before close session when dirty
-- **WHEN** the user invokes Close Session while the session is dirty
-- **THEN** the system shows an unsaved-changes prompt with Save, Don't Save, and Cancel before clearing session state
-
-#### Scenario: Confirm close session when clean but not pristine
-- **WHEN** the user invokes Close Session, the session is not dirty, and the workbench is not pristine (for example a known session path and/or loaded resources)
-- **THEN** the system shows a single Yes/No confirmation that the session will be closed and resources unloaded, and does not show the Save / Don't Save / Cancel prompt
+- **WHEN** the user closes the current session and the session is dirty or peaks are dirty
+- **THEN** the system shows the unsaved-changes prompt before clearing the session
 
 #### Scenario: Prompt before open session when dirty
-- **WHEN** the user invokes Open Session while the session is dirty
-- **THEN** the system shows an unsaved-changes prompt with Save, Don't Save, and Cancel before showing the open file dialog
+- **WHEN** the user chooses Open Session and the session is dirty or peaks are dirty
+- **THEN** the system shows the unsaved-changes prompt before the open file dialog
 
-#### Scenario: Don't save then open loads from disk
-- **WHEN** the user chooses Don't Save in the Open Session unsaved-changes prompt and then selects a session file
-- **THEN** the system loads that file using session load reconciliation and discards unsaved in-memory changes
-
-#### Scenario: Don't save then cancel open file dialog
-- **WHEN** the user chooses Don't Save in the Open Session unsaved-changes prompt and then cancels the open file dialog without selecting a file
-- **THEN** the system does not load a new session, leaves the current session unchanged, and keeps the session dirty
-
-#### Scenario: Save then open when path known
-- **WHEN** the user chooses Save in the Open Session unsaved-changes prompt and the current session path is known and save succeeds
-- **THEN** the system saves to the current path and then continues to the open file dialog
-
-#### Scenario: Save then open when untitled
-- **WHEN** the user chooses Save in the Open Session unsaved-changes prompt and no current session path is known
-- **THEN** the system prompts for a save path as in Save Session As and continues to open only if save succeeds
-
-#### Scenario: Abort guarded action when save validation fails
-- **WHEN** the user chooses Save in an unsaved-changes prompt and session save fails validation
-- **THEN** the system shows the validation error, keeps the session dirty, and does not quit, close the session, or open another session
-
-#### Scenario: No prompt on startup session load
-- **WHEN** the user launches the heatmap alignment GUI with `--session` and a valid session path
-- **THEN** the system loads that session without an unsaved-changes prompt
-
-#### Scenario: Close pristine session without dialog
-- **WHEN** the user invokes Close Session, the session is not dirty, and the workbench is pristine (untitled, default session state, no loaded resources)
-- **THEN** the system closes the session without a confirmation or unsaved-changes dialog
+#### Scenario: No prompt when clean
+- **WHEN** the user quits, closes the session, or opens another session and neither the session nor peaks are dirty
+- **THEN** the system does not show the unsaved-changes prompt for that action
 
 ### Requirement: Session identity and file actions
 The system SHALL expose current session identity and expected session save/close actions while keeping session state separate from datasource rows.
@@ -1322,4 +1302,117 @@ Before starting H5 **load** actions, the system SHALL assign the desired session
 #### Scenario: No modal session loading dialog
 - **WHEN** the user opens a saved alignment session
 - **THEN** the system does not show a dedicated modal loading dialog for the session; loading state appears through existing Resources rows and affected preview loading presentation
+
+### Requirement: In-app peak generation from loaded H5
+The system SHALL allow the user to generate Radar Peak (JSON) measurements from the currently loaded Radar Raw (H5) recording without leaving the heatmap alignment workbench.
+
+Generation SHALL use the same zero-velocity-slice peak algorithm and default threshold as the `peak-distances` CLI (`650` until a future change adds UI). Generation SHALL use the loaded H5 session, group, entry, and subsweep indices from the current heatmap track. Generation SHALL process all frames (no `every_n` or `max_frames` in the GUI).
+
+The system SHALL enable Generate only when Radar Raw (H5) is loaded. The system SHALL disable or omit Generate when H5 is not loaded.
+
+Generation SHALL run synchronously on the GUI thread for v1, with a clear busy indication, and SHALL reuse the in-memory H5 record rather than re-opening the file through `export_peak_distances()`.
+
+#### Scenario: Generate peaks from loaded H5
+- **WHEN** Radar Raw (H5) is loaded and the user invokes Generate on the Radar Peak (JSON) resource row
+- **THEN** the system computes peak-distance measurements from the loaded H5 and holds them in memory as the active peak-distance data without writing JSON to disk
+
+#### Scenario: Generate disabled without H5
+- **WHEN** Radar Raw (H5) is not loaded
+- **THEN** the system does not offer a usable Generate action for Radar Peak (JSON)
+
+#### Scenario: Refresh UI after generate
+- **WHEN** peak generation completes successfully
+- **THEN** the system updates the Signals plot, heatmap peak overlay, and Resources row details the same way as after a successful peak-distance JSON import, without requiring a separate import step
+
+#### Scenario: Confirm replace in-memory peaks
+- **WHEN** the user invokes Generate while peak-distance data is already present in memory (loaded or previously generated)
+- **THEN** the system confirms that generation replaces in-memory peak data and that files on disk are unchanged until the user saves peaks
+
+### Requirement: Peaks dirty state and Resources status
+The system SHALL track whether the in-memory peak-distance datasource differs from the last successful save to disk.
+
+The system SHALL NOT add a peaks-dirty indicator to the main window title asterisk.
+
+The system SHALL show peaks unsaved state in the Radar Peak (JSON) Resources table **Status** column as **Generated (unsaved)** when peaks were generated and not yet saved. The system SHALL NOT add new table columns for this state.
+
+#### Scenario: Show generated unsaved in Status column
+- **WHEN** the user generated peaks and has not saved them to disk
+- **THEN** the Radar Peak (JSON) resource row Status column shows **Generated (unsaved)**
+
+#### Scenario: Clear peaks dirty after save
+- **WHEN** the user successfully saves peaks to a JSON path
+- **THEN** the system clears peaks dirty, loads or reflects the saved file as the active peak-distance datasource, and shows a normal loaded status in the Status column
+
+### Requirement: Save peaks from Resources
+The system SHALL allow saving in-memory peak-distance data to canonical peak-distance JSON from the Resources window.
+
+The system SHALL write JSON using the same format as `peak-distances` (`write_peak_distance_json` / `acconeer_peak_distances`).
+
+The system SHALL set `session.peak_distance_datasource.path` only after a successful save. The system SHALL mark the alignment session dirty when the saved peak path changes from what was previously stored in the session.
+
+**Save peaks** SHALL be enabled when peaks are dirty and peak data is in memory. When no output path is set, **Save peaks** SHALL open a file dialog (same default naming as Save peaks as…). When a path is shown in the resource row, **Save peaks** SHALL write to that path after overwrite confirmation.
+
+**Save peaks as…** SHALL be enabled whenever peak data is in memory, including when peaks are not dirty. **Save peaks as…** SHALL always prompt for an output path. The default suggested filename SHALL be `{h5_stem}_peak_distances.json` beside the loaded H5 when practical.
+
+The system SHALL NOT write peak JSON automatically as part of Generate.
+
+#### Scenario: Save peaks as first save
+- **WHEN** peaks are dirty, no peak JSON path is set, and the user invokes Save peaks
+- **THEN** the system prompts for an output path and writes canonical JSON on confirmation
+
+#### Scenario: Save peaks to existing path
+- **WHEN** peaks are dirty, a peak JSON path is shown in the resource row, and the user invokes Save peaks
+- **THEN** the system confirms overwrite if the file exists and writes canonical JSON to that path
+
+#### Scenario: Save peaks disabled when not dirty
+- **WHEN** peaks are in memory but not dirty
+- **THEN** Save peaks is disabled or omitted
+
+#### Scenario: Save peaks as enabled when peaks in memory
+- **WHEN** peak-distance data is in memory, including after a successful save when peaks are not dirty
+- **THEN** Save peaks as… is available
+
+#### Scenario: Save peaks as disabled without peaks
+- **WHEN** no peak-distance data is in memory
+- **THEN** Save peaks as… is disabled or omitted
+
+### Requirement: Unsaved peaks in session navigation prompts
+When peaks are dirty, the system SHALL include peak-loss warning text in the same unsaved-changes prompt used for a dirty alignment session on quit, close session, and open session, without showing a second modal solely for peaks.
+
+The warning SHALL state that unsaved peak-distance data will be lost. The warning SHALL state that saving the alignment session does not write peak JSON. The warning SHALL NOT imply that choosing **Save** in that dialog writes peak JSON. The **Save** control SHALL retain its existing behavior (save alignment session only).
+
+#### Scenario: Peaks-only dirty still prompts
+- **WHEN** peaks are dirty and the alignment session is not dirty, and the user quits, closes the session, or opens another session
+- **THEN** the system shows the unsaved-changes prompt before proceeding
+
+#### Scenario: Warn on quit with unsaved peaks
+- **WHEN** the user quits while peaks are dirty
+- **THEN** the unsaved-changes prompt includes text that unsaved peak-distance data will be lost and that saving the session does not save peak JSON
+
+#### Scenario: Warn on open session with unsaved peaks
+- **WHEN** the user opens another session while peaks are dirty
+- **THEN** the same combined unsaved-changes prompt behavior applies as for quit
+
+### Requirement: Confirmations for peak resource actions
+The system SHALL confirm before clearing or unloading Radar Peak (JSON) when peaks are dirty.
+
+The system SHALL confirm before Reload on Radar Peak (JSON) when peaks are dirty, because reload reads from disk and discards unsaved generated data.
+
+The system SHALL prompt when the user saves the alignment session while peaks are dirty, warning that peak JSON is not saved with the session and that the user should save peaks from Resources first.
+
+#### Scenario: Confirm unload with unsaved generated peaks
+- **WHEN** peaks are dirty and the user unloads or clears Radar Peak (JSON)
+- **THEN** the system confirms that unsaved generated peak data will be lost
+
+#### Scenario: Confirm reload with unsaved generated peaks
+- **WHEN** peaks are dirty and the user invokes Reload on Radar Peak (JSON)
+- **THEN** the system shows a blocking confirmation that reload discards unsaved generated data and proceeds only if the user confirms
+
+#### Scenario: Confirm save session with unsaved peaks
+- **WHEN** peaks are dirty and the user invokes Save Session
+- **THEN** the system warns that peak JSON is not included in the session save before continuing
+
+#### Scenario: Session save does not persist generated peaks
+- **WHEN** the user saves the alignment session while peaks are dirty and later reopens that session
+- **THEN** the system loads peak-distance data from the peak JSON path stored in the session, or omits peaks if no path was saved, and does not restore unsaved generated peaks from the prior session
 
