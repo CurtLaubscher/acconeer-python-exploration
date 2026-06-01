@@ -936,6 +936,43 @@ def validate_alignment_session(
         raise ValueError("Viewport visibility gamma must be positive.")
 
 
+def session_equivalent_for_pristine(
+    left: AlignmentSession,
+    right: AlignmentSession,
+) -> bool:
+    """Return whether two sessions match for pristine-workbench comparison."""
+
+    return _json_values_equivalent_for_pristine(
+        left.to_json_dict(),
+        right.to_json_dict(),
+    )
+
+
+def _json_values_equivalent_for_pristine(left: object, right: object) -> bool:
+    if isinstance(left, dict) and isinstance(right, dict):
+        if set(left.keys()) != set(right.keys()):
+            return False
+        return all(
+            _json_values_equivalent_for_pristine(left[key], right[key]) for key in left
+        )
+
+    if isinstance(left, list) and isinstance(right, list):
+        if len(left) != len(right):
+            return False
+        return all(
+            _json_values_equivalent_for_pristine(left_item, right_item)
+            for left_item, right_item in zip(left, right, strict=True)
+        )
+
+    if isinstance(left, bool) or isinstance(right, bool):
+        return left is right
+
+    if isinstance(left, (int, float)) and isinstance(right, (int, float)):
+        return math.isclose(float(left), float(right), rel_tol=0.0, abs_tol=1e-9)
+
+    return left == right
+
+
 def probe_video(path: Path) -> VideoProbe:
     capture = cv2.VideoCapture(str(path))
     if not capture.isOpened():
