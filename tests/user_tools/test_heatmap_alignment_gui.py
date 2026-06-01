@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from PySide6 import QtCore, QtGui
+from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtWidgets import QApplication
 
 
@@ -43,6 +43,8 @@ from heatmap_alignment_core import (  # noqa: E402
     ResourceJobPresentation,
     build_alignment_resource_summaries,
     save_alignment_session,
+    session_equivalent_for_pristine,
+    validate_alignment_session,
 )
 from scipy.io import savemat
 
@@ -52,12 +54,6 @@ def _legend_item_labels(legend: object) -> list[str]:
     for _sample, label in legend.items:
         labels.append(str(getattr(label, "text", label)))
     return labels
-
-
-@pytest.fixture(autouse=True, scope="module")
-def qapplication() -> QApplication:
-    app = QApplication.instance()
-    return app if app is not None else QApplication()
 
 
 def test_build_argument_parser_accepts_peaks() -> None:
@@ -1164,7 +1160,7 @@ def test_apply_h5_job_result_clears_peak_datasource_for_different_replacement(
     window.peak_distance_datasource = object()
     cleared: list[str] = []
 
-    def _clear() -> None:
+    def _clear(**_kwargs: object) -> None:
         cleared.append("cleared")
         window.peak_distance_datasource = None
 
@@ -1381,7 +1377,11 @@ def test_reconcile_camera_keep_does_not_abandon_inflight_job(
     initial_generation = window._resource_job_manager.board().camera.generation
 
     load_camera_calls: list[Path] = []
-    monkeypatch.setattr(window, "load_camera_from_path", lambda p: load_camera_calls.append(p))
+    monkeypatch.setattr(
+        window,
+        "load_camera_from_path",
+        lambda p, **kwargs: load_camera_calls.append(p),
+    )
 
     window.load_session_from_path(session_path)
 
@@ -1419,7 +1419,11 @@ def test_reconcile_h5_keep_does_not_abandon_inflight_job(
     initial_generation = window._resource_job_manager.board().radar_h5.generation
 
     load_h5_calls: list[Path] = []
-    monkeypatch.setattr(window, "load_h5_from_path", lambda p: load_h5_calls.append(p))
+    monkeypatch.setattr(
+        window,
+        "load_h5_from_path",
+        lambda p, **kwargs: load_h5_calls.append(p),
+    )
 
     window.load_session_from_path(session_path)
 
@@ -1452,7 +1456,11 @@ def test_reconcile_h5_load_when_identity_changes(
     window.heatmap_source = _FakeHeatmapSource()  # type: ignore[assignment]
 
     load_h5_calls: list[Path] = []
-    monkeypatch.setattr(window, "load_h5_from_path", lambda p: load_h5_calls.append(p))
+    monkeypatch.setattr(
+        window,
+        "load_h5_from_path",
+        lambda p, **kwargs: load_h5_calls.append(p),
+    )
     monkeypatch.setattr(window, "_sync_previews", lambda **kwargs: None)
 
     window.load_session_from_path(session_path)
@@ -1480,9 +1488,9 @@ def test_reconcile_camera_unload_when_session_omits_path(
     unloaded: list[str] = []
     original_unload_camera = window.unload_camera_video
 
-    def _track_unload() -> None:
+    def _track_unload(**kwargs: object) -> None:
         unloaded.append("camera")
-        original_unload_camera()
+        original_unload_camera(**kwargs)
 
     monkeypatch.setattr(window, "unload_camera_video", _track_unload)
 
@@ -1514,9 +1522,9 @@ def test_reconcile_h5_unload_when_session_omits_path(
     unloaded: list[str] = []
     original_unload_h5 = window.unload_h5_recording
 
-    def _track_unload() -> None:
+    def _track_unload(**kwargs: object) -> None:
         unloaded.append("h5")
-        original_unload_h5()
+        original_unload_h5(**kwargs)
 
     monkeypatch.setattr(window, "unload_h5_recording", _track_unload)
 
@@ -1542,11 +1550,11 @@ def test_reconcile_leg2_and_peak_unload_when_session_omits_paths(
 
     cleared: list[str] = []
 
-    def _track_clear_peak() -> None:
+    def _track_clear_peak(**kwargs: object) -> None:
         cleared.append("peak")
         window.peak_distance_datasource = None
 
-    def _track_clear_leg2() -> None:
+    def _track_clear_leg2(**kwargs: object) -> None:
         cleared.append("leg2")
         window.leg2_ultrasonic_datasource = None
 
@@ -1582,7 +1590,7 @@ def test_reconcile_session_fields_applied_after_camera_keep(
     window.session.camera_track = CameraTrack(path=str(camera_file))
 
     # Prevent new loads and preview rendering.
-    monkeypatch.setattr(window, "load_camera_from_path", lambda p: None)
+    monkeypatch.setattr(window, "load_camera_from_path", lambda p, **kwargs: None)
     monkeypatch.setattr(window, "_sync_previews", lambda **kwargs: None)
     monkeypatch.setattr(window, "_load_current_camera_frame", lambda access_hint="auto": None)
     monkeypatch.setattr(window, "_refresh_camera_view_corners", lambda: None)
@@ -1617,10 +1625,368 @@ def test_reconcile_session_fields_applied_after_h5_keep(
     )
     window._inflight_h5_identity = None
 
-    monkeypatch.setattr(window, "load_h5_from_path", lambda p: None)
+    monkeypatch.setattr(window, "load_h5_from_path", lambda p, **kwargs: None)
     monkeypatch.setattr(window, "_reload_peak_distance_datasource_from_session", lambda: None)
     monkeypatch.setattr(window, "_sync_previews", lambda **kwargs: None)
 
     window.load_session_from_path(session_path)
 
     assert window.session.timeline.offset_s == pytest.approx(1.25)
+
+
+# ---------------------------------------------------------------------------
+# Dirty session and unsaved prompts (dirty-session-prompts)
+# ---------------------------------------------------------------------------
+
+
+def test_session_equivalent_for_pristine_matches_default() -> None:
+    assert session_equivalent_for_pristine(AlignmentSession(), AlignmentSession())
+
+
+def test_save_session_without_loaded_camera_or_h5(
+    tmp_path: Path,
+    qapplication: QApplication,
+) -> None:
+    session_path = tmp_path / "paths_only.json"
+    window = HeatmapAlignmentWindow()
+    window.session.camera_track.path = str(tmp_path / "missing_camera.mp4")
+    window.session.heatmap_track.path = str(tmp_path / "missing.h5")
+    window._current_session_path = session_path
+
+    window._write_session_to_path(session_path)
+
+    assert session_path.is_file()
+    assert window._session_dirty is False
+
+
+def test_title_shows_asterisk_when_dirty_and_clears_after_save(
+    tmp_path: Path,
+    qapplication: QApplication,
+) -> None:
+    session_path = tmp_path / "session.json"
+    save_alignment_session(AlignmentSession(), session_path)
+
+    window = HeatmapAlignmentWindow()
+    window.load_session_from_path(session_path)
+    assert "*" not in window.windowTitle()
+
+    window.offset_spin.setValue(0.5)
+    qapplication.processEvents()
+    assert window._session_dirty is True
+    assert window.windowTitle().endswith("*")
+
+    window._write_session_to_path(session_path)
+    assert window._session_dirty is False
+    assert "*" not in window.windowTitle()
+
+
+def test_cancel_on_quit_leaves_session_dirty(
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = HeatmapAlignmentWindow()
+    window._mark_session_dirty()
+
+    monkeypatch.setattr(
+        window,
+        "_prompt_save_discard_cancel",
+        lambda action: "cancel",
+    )
+
+    event = QtGui.QCloseEvent()
+    window.closeEvent(event)
+
+    assert event.isAccepted() is False
+    assert window._session_dirty is True
+
+
+def test_dont_save_then_open_proceeds(
+    tmp_path: Path,
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first_path = tmp_path / "first.json"
+    second_path = tmp_path / "second.json"
+    save_alignment_session(AlignmentSession(), first_path)
+    save_alignment_session(AlignmentSession(), second_path)
+
+    window = HeatmapAlignmentWindow()
+    window.load_session_from_path(first_path)
+    window._mark_session_dirty()
+
+    monkeypatch.setattr(
+        window,
+        "_prompt_save_discard_cancel",
+        lambda action: "discard",
+    )
+    monkeypatch.setattr(
+        QtWidgets.QFileDialog,
+        "getOpenFileName",
+        lambda *args, **kwargs: (str(second_path), ""),
+    )
+
+    window._load_session()
+
+    assert window._current_session_path == second_path
+    assert window._session_dirty is False
+
+
+def test_dont_save_then_cancel_open_dialog_stays_dirty(
+    tmp_path: Path,
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_path = tmp_path / "session.json"
+    save_alignment_session(AlignmentSession(), session_path)
+
+    window = HeatmapAlignmentWindow()
+    window.load_session_from_path(session_path)
+    window._mark_session_dirty()
+
+    monkeypatch.setattr(
+        window,
+        "_prompt_save_discard_cancel",
+        lambda action: "discard",
+    )
+    monkeypatch.setattr(
+        QtWidgets.QFileDialog,
+        "getOpenFileName",
+        lambda *args, **kwargs: ("", ""),
+    )
+
+    window._load_session()
+
+    assert window._current_session_path == session_path
+    assert window._session_dirty is True
+
+
+def test_save_from_prompt_calls_write_path(
+    tmp_path: Path,
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_path = tmp_path / "session.json"
+    save_alignment_session(AlignmentSession(), session_path)
+
+    window = HeatmapAlignmentWindow()
+    window.load_session_from_path(session_path)
+    window._mark_session_dirty()
+
+    write_calls: list[Path] = []
+    monkeypatch.setattr(
+        window,
+        "_write_session_to_path",
+        lambda path: write_calls.append(path) or True,
+    )
+    monkeypatch.setattr(
+        window,
+        "_prompt_save_discard_cancel",
+        lambda action: "save",
+    )
+
+    window._close_session()
+
+    assert write_calls == [session_path]
+
+
+def test_pristine_close_session_does_not_show_dialog(
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = HeatmapAlignmentWindow()
+    prompt_called = False
+    confirm_called = False
+
+    def _fail_prompt(*_args: object, **_kwargs: object) -> str:
+        nonlocal prompt_called
+        prompt_called = True
+        return "cancel"
+
+    def _fail_confirm() -> bool:
+        nonlocal confirm_called
+        confirm_called = True
+        return False
+
+    monkeypatch.setattr(window, "_prompt_save_discard_cancel", _fail_prompt)
+    monkeypatch.setattr(window, "_confirm_close_session_clean", _fail_confirm)
+    monkeypatch.setattr(window, "_reset_session_after_close", lambda: None)
+
+    window._close_session()
+
+    assert prompt_called is False
+    assert confirm_called is False
+
+
+def test_clean_non_pristine_close_session_shows_yes_no_only(
+    tmp_path: Path,
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_path = tmp_path / "session.json"
+    save_alignment_session(AlignmentSession(), session_path)
+
+    window = HeatmapAlignmentWindow()
+    window.load_session_from_path(session_path)
+
+    tri_state_called = False
+
+    def _fail_tri_state(*_args: object, **_kwargs: object) -> str:
+        nonlocal tri_state_called
+        tri_state_called = True
+        return "cancel"
+
+    monkeypatch.setattr(window, "_prompt_save_discard_cancel", _fail_tri_state)
+    monkeypatch.setattr(window, "_confirm_close_session_clean", lambda: False)
+
+    window._close_session()
+
+    assert tri_state_called is False
+
+
+def test_clean_quit_does_not_show_dialog(
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = HeatmapAlignmentWindow()
+    prompt_called = False
+
+    monkeypatch.setattr(
+        window,
+        "_prompt_save_discard_cancel",
+        lambda action: (_ for _ in ()).throw(AssertionError("unexpected prompt")) or "cancel",
+    )
+
+    def _track_prompt(*_args: object, **_kwargs: object) -> str:
+        nonlocal prompt_called
+        prompt_called = True
+        return "cancel"
+
+    monkeypatch.setattr(window, "_prompt_save_discard_cancel", _track_prompt)
+    monkeypatch.setattr(window, "_close_sources", lambda: None)
+    monkeypatch.setattr(
+        window.viewport_source_resolution_timer,
+        "stop",
+        lambda: None,
+    )
+    monkeypatch.setattr(window._source_resolution_thread, "quit", lambda: None)
+    monkeypatch.setattr(window._source_resolution_thread, "wait", lambda: None)
+
+    event = QtGui.QCloseEvent()
+    window.closeEvent(event)
+
+    assert prompt_called is False
+    assert event.isAccepted() is True
+
+
+def test_no_dirty_after_camera_job_completion_on_session_open(
+    tmp_path: Path,
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from heatmap_alignment_resource_jobs import CameraResourceJobResult, ProxyVideoResult
+    from heatmap_alignment_core import VideoProbe
+
+    camera_file = tmp_path / "video.mp4"
+    camera_file.write_bytes(b"")
+    session_path = _make_session_file(tmp_path, camera_path=str(camera_file))
+
+    window = HeatmapAlignmentWindow()
+    window.load_session_from_path(session_path)
+
+    probe = VideoProbe(
+        path=camera_file,
+        fps=30.0,
+        frame_count=100,
+        duration_s=3.0,
+        width=640,
+        height=480,
+    )
+    result = CameraResourceJobResult(
+        source_path=camera_file,
+        proxy_result=ProxyVideoResult(
+            source_path=camera_file,
+            display_path=camera_file,
+            source_probe=probe,
+            proxy_path=None,
+            state="original",
+        ),
+        camera_track=CameraTrack(path=str(camera_file), fps=30.0, duration_s=3.0, frame_count=100),
+    )
+    class _FakeCameraSource:
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        "heatmap_alignment_gui.CameraVideoSource",
+        lambda path: _FakeCameraSource(),
+    )
+    monkeypatch.setattr(window, "_initialize_default_export_overlay_if_needed", lambda: None)
+    monkeypatch.setattr(window, "_load_current_camera_frame", lambda access_hint="auto": None)
+    monkeypatch.setattr(window, "_refresh_camera_view_corners", lambda: None)
+    monkeypatch.setattr(window, "_native_viewport_corners", lambda: None)
+    monkeypatch.setattr(window, "_initialize_default_viewport_corners_native", lambda: None)
+    monkeypatch.setattr(window, "_update_controls_enabled_state", lambda: None)
+    monkeypatch.setattr(window, "_refresh_resources_ui", lambda: None)
+
+    window._apply_camera_job_result(result)
+
+    assert window._session_dirty is False
+    assert "*" not in window.windowTitle()
+
+
+def test_clear_all_resources_marks_dirty(
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = HeatmapAlignmentWindow()
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox,
+        "question",
+        lambda *args, **kwargs: QtWidgets.QMessageBox.StandardButton.Yes,
+    )
+    monkeypatch.setattr(window, "unload_camera_video", lambda **kwargs: None)
+    monkeypatch.setattr(window, "unload_h5_recording", lambda **kwargs: None)
+    monkeypatch.setattr(window, "_clear_peak_distance_datasource", lambda **kwargs: None)
+    monkeypatch.setattr(window, "_clear_leg2_ultrasonic_datasource", lambda **kwargs: None)
+
+    window.clear_all_resources()
+
+    assert window._session_dirty is True
+
+
+def test_visibility_toggles_mark_dirty(qapplication: QApplication) -> None:
+    window = HeatmapAlignmentWindow()
+    window.show_peak_marker_checkbox.setEnabled(True)
+    window.show_peak_marker_checkbox.setChecked(not window.session.peak_distance_datasource.visible)
+    qapplication.processEvents()
+    assert window._session_dirty is True
+
+
+def test_save_from_prompt_aborted_when_validation_fails(
+    tmp_path: Path,
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = HeatmapAlignmentWindow()
+    window._mark_session_dirty()
+    window.session.viewport.corners = [[0.0, 0.0], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0]]
+
+    monkeypatch.setattr(
+        window,
+        "_prompt_save_discard_cancel",
+        lambda action: "save",
+    )
+    reset_called = False
+
+    def _track_reset() -> None:
+        nonlocal reset_called
+        reset_called = True
+
+    monkeypatch.setattr(window, "_reset_session_after_close", _track_reset)
+
+    window._close_session()
+
+    assert window._session_dirty is True
+    assert reset_called is False
+    with pytest.raises(ValueError):
+        validate_alignment_session(window.session, allow_missing_sources=True)

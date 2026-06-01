@@ -208,8 +208,14 @@ Possible directions:
 - Consider removing or reducing top-level load buttons once the menu organization is clear enough.
 - Keep common first-run actions discoverable if buttons are removed.
 - Use the same organization for future data sources so new imports do not keep expanding the main control row.
-- Add dirty-session tracking after the resource manager/session identity cleanup: mark the session as modified after resource, viewport, alignment, render, signal, or export-overlay changes; reflect the dirty state in the window title; and prompt to save, discard, or cancel before quitting, opening another session, closing the current session, or performing another action that would discard unsaved session state.
+- **Shipped (`dirty-session-prompts`, archived 2026-06-01):** single session dirty flag, `*` in the window title, Save / Don't Save / Cancel when dirty on open (before file dialog), close, and quit; clean quit silent; pristine close silent; clean non-pristine close uses Yes/No only; dirty marking at user-initiated entry points only (not async job completion after open); Save without requiring camera+H5 in memory; mark dirty after Clear All Resources. Deferred: unsaved tri-state on Clear All, playhead/`current_time_s` as dirty, timeline zoom persistence (below).
 - Make status-bar messages transient for one-shot actions such as loading or saving sessions/resources. Persistent state should live in the window title, Resources window, or resource rows; action confirmations should clear after a short timeout so stale "Saved session" or "Loaded session" text is not mistaken for current-state labeling.
+- Persist timeline **visible range / zoom** (today held only in `timeline_range_model`, not in session JSON) so save/reload restores the same timeline viewport.
+- Decide playhead policy for **`timeline.current_time_s`**: already in session JSON but excluded from v1 dirty tracking; consider whether scrubbing should mark dirty and whether reload should restore last playhead.
+- Optional future hardening: **JSON snapshot baseline** dirty detection (compare `session.to_json_dict()` to last-saved baseline) to catch missed `_mark_session_dirty` call sites; trade off false positives from async metadata updates.
+- **Save with validation warnings:** when save validation reports non-fatal issues (e.g. missing files on disk, weak viewport), offer “save anyway” or an explicit confirm so users do not lose work; v1 still blocks on structural errors (degenerate viewport, bad version).
+- Unsaved-changes tri-state before **Clear All Resources** (in addition to today’s clear confirm) if users want parity with quit/open/close.
+- **GUI refactor:** `heatmap_alignment_gui.py` is very large (~5700 lines); consider splitting session lifecycle (dirty, save, open, close, prompts), resource orchestration, and main layout into focused modules without changing behavior.
 
 ### Render panel control layout cleanup
 

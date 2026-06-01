@@ -26,9 +26,10 @@ import argparse
 import math
 import sys
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Iterator, Literal
 
 import cv2
 import numpy as np
@@ -80,6 +81,7 @@ from heatmap_alignment_core import (
     reconcile_sync_slot_action,
     rectify_viewport,
     save_alignment_session,
+    session_equivalent_for_pristine,
     scale_viewport_corners,
     TimelineH5DragSnapshot,
     apply_timeline_h5_alignment_drag,
@@ -3009,6 +3011,8 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.resize(1600, 980)
 
         self.session = AlignmentSession()
+        self._session_dirty = False
+        self._session_dirty_guard_depth = 0
         self._current_session_path: Path | None = None
         self._resources_window: ResourcesWindow | None = None
         self._resource_reload_errors: dict[ResourceKind, str] = {}
@@ -3077,6 +3081,14 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         QtCore.QTimer.singleShot(0, self.schedule_timeline_axis_geometry_sync)
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
+        if self._session_dirty:
+            choice = self._prompt_save_discard_cancel("quit")
+            if choice == "cancel":
+                event.ignore()
+                return
+            if choice == "save" and not self._save_session_for_prompt():
+                event.ignore()
+                return
         self.viewport_source_resolution_timer.stop()
         self._source_resolution_thread.quit()
         self._source_resolution_thread.wait()
@@ -3447,7 +3459,9 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         if filename:
             self.load_camera_from_path(Path(filename))
 
-    def load_camera_from_path(self, camera_path: Path) -> None:
+    def load_camera_from_path(self, camera_path: Path, *, mark_dirty: bool = True) -> None:
+        if mark_dirty:
+            self._mark_session_dirty()
         if not camera_path.exists():
             self._set_resource_reload_error("camera", f"File not found: {camera_path}")
             self._refresh_resources_ui()
@@ -3475,7 +3489,9 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         if filename:
             self.load_h5_from_path(Path(filename))
 
-    def load_h5_from_path(self, h5_path: Path) -> None:
+    def load_h5_from_path(self, h5_path: Path, *, mark_dirty: bool = True) -> None:
+        if mark_dirty:
+            self._mark_session_dirty()
         if not h5_path.exists():
             self._set_resource_reload_error("radar_h5", f"File not found: {h5_path}")
             self._refresh_resources_ui()
@@ -3518,7 +3534,10 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         *,
         show_dialogs: bool = False,
         require_heatmap: bool = False,
+        mark_dirty: bool = True,
     ) -> bool:
+        if mark_dirty:
+            self._mark_session_dirty()
         if require_heatmap and self.heatmap_source is None:
             if show_dialogs:
                 QtWidgets.QMessageBox.information(
@@ -3597,7 +3616,9 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             require_heatmap=True,
         )
 
-    def _clear_peak_distance_datasource(self) -> None:
+    def _clear_peak_distance_datasource(self, *, mark_dirty: bool = True) -> None:
+        if mark_dirty:
+            self._mark_session_dirty()
         self.peak_distance_datasource = None
         self.session.peak_distance_datasource.path = ""
         self.session.peak_distance_datasource.visible = True
@@ -3613,7 +3634,10 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         mat_path: Path,
         *,
         show_dialogs: bool = False,
+        mark_dirty: bool = True,
     ) -> bool:
+        if mark_dirty:
+            self._mark_session_dirty()
         try:
             datasource = import_leg2_mat_for_heatmap(mat_path)
         except (Leg2MatImportError, TypeError) as exc:
@@ -3663,7 +3687,9 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             return
         self.load_leg2_mat_from_path(Path(filename), show_dialogs=True)
 
-    def _clear_leg2_ultrasonic_datasource(self) -> None:
+    def _clear_leg2_ultrasonic_datasource(self, *, mark_dirty: bool = True) -> None:
+        if mark_dirty:
+            self._mark_session_dirty()
         self.leg2_ultrasonic_datasource = None
         self.session.leg2_ultrasonic_datasource.path = ""
         self.session.leg2_ultrasonic_datasource.visible = True
@@ -3692,7 +3718,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             self._refresh_resources_ui()
             return
 
-        if not self.load_leg2_mat_from_path(mat_path, show_dialogs=False):
+        if not self.load_leg2_mat_from_path(mat_path, show_dialogs=False, mark_dirty=False):
             self._set_resource_reload_error(
                 "leg2_mat",
                 f"Could not reload Leg2 MAT: {mat_path.name}",
@@ -3704,10 +3730,12 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         signal_kind = self.leg2_signal_kind_combo.currentData()
         if signal_kind not in ("raw", "filtered"):
             return
+        self._mark_session_dirty()
         self.session.leg2_ultrasonic_datasource.signal_kind = signal_kind
         self._sync_previews(camera_access_hint="auto")
 
     def _leg2_signal_visibility_changed(self, visible: bool) -> None:
+        self._mark_session_dirty()
         self.session.leg2_ultrasonic_datasource.visible = visible
         self._sync_previews(camera_access_hint="auto")
 
@@ -3736,7 +3764,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             return
 
         if self.heatmap_source is None:
-            if self.load_peak_distance_from_path(json_path, show_dialogs=False):
+            if self.load_peak_distance_from_path(json_path, show_dialogs=False, mark_dirty=False):
                 return
             self._update_peak_datasource_controls()
             self._refresh_resources_ui()
@@ -3769,6 +3797,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._refresh_resources_ui()
 
     def _peak_marker_visibility_changed(self, visible: bool) -> None:
+        self._mark_session_dirty()
         self.session.peak_distance_datasource.visible = visible
         self._sync_previews(camera_access_hint="auto")
 
@@ -3832,21 +3861,43 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             return
         self._write_session_to_path(Path(filename))
 
-    def _write_session_to_path(self, session_path: Path) -> None:
+    def _write_session_to_path(self, session_path: Path) -> bool:
         try:
-            validate_alignment_session(self.session, allow_missing_sources=False)
+            validate_alignment_session(self.session, allow_missing_sources=True)
         except ValueError as exc:
             QtWidgets.QMessageBox.warning(self, "Cannot save session", str(exc))
-            return
+            return False
 
         save_alignment_session(self.session, session_path)
         self._current_session_path = session_path
         self.settings.setValue("last_session_path", str(session_path))
+        self._clear_session_dirty()
         self._refresh_session_title()
         self._refresh_resources_ui()
         self.statusBar().showMessage(f"Saved session: {session_path}")
+        return True
+
+    def _save_session_for_prompt(self) -> bool:
+        if self._current_session_path is None:
+            filename, _ = QtWidgets.QFileDialog.getSaveFileName(
+                self,
+                "Save session as",
+                self._dialog_start_path("last_session_path"),
+                "JSON files (*.json);;All files (*)",
+            )
+            if not filename:
+                return False
+            return self._write_session_to_path(Path(filename))
+        return self._write_session_to_path(self._current_session_path)
 
     def _load_session(self) -> None:
+        if self._session_dirty:
+            choice = self._prompt_save_discard_cancel("open")
+            if choice == "cancel":
+                return
+            if choice == "save" and not self._save_session_for_prompt():
+                return
+
         filename, _ = QtWidgets.QFileDialog.getOpenFileName(
             self,
             "Open session",
@@ -3932,28 +3983,28 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
 
         # Execute per-slot actions
         if camera_action == "unload":
-            self.unload_camera_video()
+            self.unload_camera_video(mark_dirty=False)
         elif camera_action == "load":
             camera_path = Path(desired_session.camera_track.path)
             if camera_path.exists():
-                self.load_camera_from_path(camera_path)
+                self.load_camera_from_path(camera_path, mark_dirty=False)
             else:
                 self._set_resource_reload_error("camera", f"File not found: {camera_path}")
         # camera "keep" — nothing to do
 
         if h5_action == "unload":
-            self.unload_h5_recording()
+            self.unload_h5_recording(mark_dirty=False)
         elif h5_action == "load":
             h5_path = Path(desired_session.heatmap_track.path)
             if h5_path.exists():
-                self.load_h5_from_path(h5_path)
+                self.load_h5_from_path(h5_path, mark_dirty=False)
             else:
                 self._set_resource_reload_error("radar_h5", f"File not found: {h5_path}")
         # h5 "keep" — nothing to do
 
         if peak_action == "unload":
             if self.peak_distance_datasource is not None:
-                self._clear_peak_distance_datasource()
+                self._clear_peak_distance_datasource(mark_dirty=False)
         elif peak_action == "load":
             # H5 load will call _reload_peak_distance_datasource_from_session on completion;
             # only load peak now when H5 is not loading.
@@ -3963,44 +4014,45 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
 
         if leg2_action == "unload":
             if self.leg2_ultrasonic_datasource is not None:
-                self._clear_leg2_ultrasonic_datasource()
+                self._clear_leg2_ultrasonic_datasource(mark_dirty=False)
         elif leg2_action == "load":
             self._reload_leg2_ultrasonic_datasource_from_session()
         # leg2 "keep" — nothing to do
 
     def load_session_from_path(self, session_path: Path) -> None:
-        desired_session = load_alignment_session(session_path)
-        prior_session = self.session
+        with self._session_dirty_guard():
+            desired_session = load_alignment_session(session_path)
+            prior_session = self.session
 
-        # Assign self.session BEFORE reconcile so load_h5_from_path reads correct indices.
-        self.session = desired_session
-        self._current_session_path = session_path
-        self._resource_reload_errors.clear()
-        self._resource_load_warnings.clear()
+            # Assign self.session BEFORE reconcile so load_h5_from_path reads correct indices.
+            self.session = desired_session
+            self._current_session_path = session_path
+            self._resource_reload_errors.clear()
+            self._resource_load_warnings.clear()
 
-        self._reconcile_session_load(desired_session, prior_session)
+            self._reconcile_session_load(desired_session, prior_session)
 
-        # Restore session after reconcile: unload/clear helpers may mutate non-resource fields
-        # (e.g. peak visibility). Reassign desired_session to guarantee populate reads it.
-        self.session = desired_session
+            # Restore session after reconcile: unload/clear helpers may mutate non-resource fields
+            # (e.g. peak visibility). Reassign desired_session to guarantee populate reads it.
+            self.session = desired_session
 
-        # Populate controls after reconcile (jobs may still be in-flight).
-        self._populate_controls_from_session()
-        if self.camera_source is not None:
-            self._load_current_camera_frame(access_hint="random")
-            self._refresh_camera_view_corners()
-            self.camera_view.set_export_overlay(self.session.export_overlay)
-        self._update_controls_enabled_state()
-        if self.camera_source is not None or self.heatmap_source is not None:
-            self._sync_previews(camera_access_hint="auto")
-        self.settings.setValue("last_session_path", str(session_path))
-        if self.session.camera_track.path:
-            self.settings.setValue("last_camera_path", self.session.camera_track.path)
-        if self.session.heatmap_track.path:
-            self.settings.setValue("last_h5_path", self.session.heatmap_track.path)
-        self._refresh_session_title()
-        self._refresh_resources_ui()
-        self.statusBar().showMessage(f"Loaded session: {session_path}")
+            # Populate controls after reconcile (jobs may still be in-flight).
+            self._populate_controls_from_session()
+            if self.camera_source is not None:
+                self._load_current_camera_frame(access_hint="random")
+                self._refresh_camera_view_corners()
+                self.camera_view.set_export_overlay(self.session.export_overlay)
+            self._update_controls_enabled_state()
+            if self.camera_source is not None or self.heatmap_source is not None:
+                self._sync_previews(camera_access_hint="auto")
+            self.settings.setValue("last_session_path", str(session_path))
+            if self.session.camera_track.path:
+                self.settings.setValue("last_camera_path", self.session.camera_track.path)
+            if self.session.heatmap_track.path:
+                self.settings.setValue("last_h5_path", self.session.heatmap_track.path)
+            self._refresh_resources_ui()
+            self.statusBar().showMessage(f"Loaded session: {session_path}")
+        self._clear_session_dirty()
 
     def _snapshot_active_camera(self) -> _CameraResourceBackup:
         if self.camera_source is None:
@@ -4117,7 +4169,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._rebuild_overlay_plot_renderer()
         self.settings.setValue("last_h5_path", str(payload.path))
         if previous_path and previous_path != str(payload.path):
-            self._clear_peak_distance_datasource()
+            self._clear_peak_distance_datasource(mark_dirty=False)
         else:
             self._reload_peak_distance_datasource_from_session()
         self._h5_replacement_backup = None
@@ -4262,6 +4314,10 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         return tuple(presentations)
 
     def _populate_controls_from_session(self) -> None:
+        with self._session_dirty_guard():
+            self._populate_controls_from_session_impl()
+
+    def _populate_controls_from_session_impl(self) -> None:
         self.offset_spin.blockSignals(True)
         self.offset_spin.setValue(self.session.timeline.offset_s)
         self.offset_spin.blockSignals(False)
@@ -4323,6 +4379,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
 
     def _signal_plot_view_settings_changed(self) -> None:
         self.session.signal_plot_view = self._signal_plot_view_settings_copy_from_plot()
+        self._mark_session_dirty()
 
     def _signal_plot_view_settings_copy_from_plot(self) -> SignalPlotViewSettings:
         view = self.signal_plot.view_settings()
@@ -4334,6 +4391,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         )
 
     def _viewport_visibility_changed(self) -> None:
+        self._mark_session_dirty()
         self.session.viewport_visibility.enabled = self.viewport_enhance_checkbox.isChecked()
         self.session.viewport_visibility.map_to_viridis = (
             self.viewport_map_to_viridis_checkbox.isChecked()
@@ -4346,6 +4404,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         )
 
     def _viewport_visibility_range_changed(self, low: float, high: float) -> None:
+        self._mark_session_dirty()
         self.session.viewport_visibility.low = low
         self.session.viewport_visibility.high = high
         self._update_viewport_visibility_labels()
@@ -4373,6 +4432,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.viewport_high_label.setEnabled(enabled)
 
     def _offset_changed(self, value: float) -> None:
+        self._mark_session_dirty()
         self.session.timeline.offset_s = value
         self._sync_previews(camera_access_hint="auto")
 
@@ -4405,6 +4465,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.offset_spin.setValue(offset_s)
 
     def _timeline_leg2_offset_changed(self, offset_s: float) -> None:
+        self._mark_session_dirty()
         self.session.leg2_ultrasonic_datasource.offset_s = offset_s
         self._sync_previews(camera_access_hint="auto")
 
@@ -4428,6 +4489,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         )
 
     def _timeline_h5_alignment_drag_finished(self) -> None:
+        self._mark_session_dirty()
         range_start_s, range_end_s = self.timeline_range_model.visible_range_s()
         self._sync_previews(
             camera_access_hint="auto",
@@ -4481,6 +4543,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             self._set_playback_active(False)
 
     def _render_settings_changed(self) -> None:
+        self._mark_session_dirty()
         self.session.render.color_min = self.color_min_spin.value()
         self.session.render.color_max = self.color_max_spin.value()
         if self.heatmap_source is not None:
@@ -4493,12 +4556,14 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._sync_previews(camera_access_hint="auto")
 
     def _preprocess_settings_changed(self) -> None:
+        self._mark_session_dirty()
         self.session.preprocess.blur_sigma = self.blur_spin.value()
         self.session.preprocess.downscale_factor = self.downscale_spin.value()
         self.session.preprocess.lag_window_s = self.lag_window_spin.value()
         self.session.preprocess.sample_count = self.sample_count_spin.value()
 
     def _corners_changed(self, corners: list) -> None:
+        self._mark_session_dirty()
         native_corners = self._display_corners_to_native(np.asarray(corners, dtype=np.float32))
         self.session.viewport.corners = native_corners.tolist()
         self._sync_previews(camera_access_hint="auto")
@@ -4509,17 +4574,20 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._sync_previews(camera_access_hint="auto")
 
     def _export_overlay_changed(self, x: float, y: float, width: float, height: float) -> None:
+        self._mark_session_dirty()
         self.session.export_overlay.x = x
         self.session.export_overlay.y = y
         self.session.export_overlay.width = width
         self.session.export_overlay.height = height
 
     def _set_export_overlay_visible(self, visible: bool) -> None:
+        self._mark_session_dirty()
         self.session.export_overlay.visible = visible
         self.camera_view.set_export_overlay(self.session.export_overlay)
         self._sync_previews(camera_access_hint="auto")
 
     def _set_export_overlay_preview_enabled(self, enabled: bool) -> None:
+        self._mark_session_dirty()
         self.session.export_overlay.preview_enabled = enabled
         self.camera_view.set_export_overlay(self.session.export_overlay)
         self._sync_previews(camera_access_hint="auto")
@@ -4530,6 +4598,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             self._sync_previews(camera_access_hint="auto")
 
     def _reset_export_overlay(self) -> None:
+        self._mark_session_dirty()
         self._initialize_default_export_overlay(force=True)
         self.camera_view.set_export_overlay(self.session.export_overlay)
         self._sync_previews(camera_access_hint="auto")
@@ -5161,6 +5230,8 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._sync_previews(camera_access_hint="auto")
 
     def _viewport_drag_finished(self) -> None:
+        if self._viewport_drag_start_corners is not None:
+            self._mark_session_dirty()
         self._viewport_drag_start_corners = None
 
     def _resource_runtime(self) -> AlignmentResourceRuntime:
@@ -5196,12 +5267,103 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
     def resource_summaries(self) -> tuple[ResourceSummary, ...]:
         return build_alignment_resource_summaries(self.session, self._resource_runtime())
 
+    def _mark_session_dirty(self) -> None:
+        if self._session_dirty_guard_depth > 0:
+            return
+        if not self._session_dirty:
+            self._session_dirty = True
+            self._refresh_session_title()
+
+    def _clear_session_dirty(self) -> None:
+        if self._session_dirty:
+            self._session_dirty = False
+            self._refresh_session_title()
+
+    @contextmanager
+    def _session_dirty_guard(self) -> Iterator[None]:
+        self._session_dirty_guard_depth += 1
+        try:
+            yield
+        finally:
+            self._session_dirty_guard_depth -= 1
+
+    def workbench_is_pristine(self) -> bool:
+        if self._current_session_path is not None:
+            return False
+        if self.camera_source is not None or self.heatmap_source is not None:
+            return False
+        if (
+            self.peak_distance_datasource is not None
+            or self.leg2_ultrasonic_datasource is not None
+        ):
+            return False
+        return session_equivalent_for_pristine(self.session, AlignmentSession())
+
+    def _prompt_save_discard_cancel(
+        self,
+        action: Literal["open", "close", "quit"],
+    ) -> Literal["save", "discard", "cancel"]:
+        titles = {
+            "open": "Open Another Session?",
+            "close": "Close Session?",
+            "quit": "Quit Heatmap Alignment?",
+        }
+        texts = {
+            "open": (
+                "There are unsaved changes. Do you want to save them before "
+                "opening another session?"
+            ),
+            "close": (
+                "There are unsaved changes. Do you want to save them before "
+                "closing this session?"
+            ),
+            "quit": (
+                "There are unsaved changes. Do you want to save them before quitting?"
+            ),
+        }
+        message_box = QtWidgets.QMessageBox(self)
+        message_box.setIcon(QtWidgets.QMessageBox.Icon.Warning)
+        message_box.setWindowTitle(titles[action])
+        message_box.setText(texts[action])
+        save_button = message_box.addButton(
+            "Save",
+            QtWidgets.QMessageBox.ButtonRole.AcceptRole,
+        )
+        discard_button = message_box.addButton(
+            "Don't Save",
+            QtWidgets.QMessageBox.ButtonRole.DestructiveRole,
+        )
+        cancel_button = message_box.addButton(
+            QtWidgets.QMessageBox.StandardButton.Cancel,
+        )
+        message_box.setDefaultButton(save_button)
+        message_box.exec()
+        clicked = message_box.clickedButton()
+        if clicked is save_button:
+            return "save"
+        if clicked is discard_button:
+            return "discard"
+        return "cancel"
+
+    def _confirm_close_session_clean(self) -> bool:
+        reply = QtWidgets.QMessageBox.question(
+            self,
+            "Close Session?",
+            "Close this session and unload all resources?",
+            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+            QtWidgets.QMessageBox.StandardButton.No,
+        )
+        return reply == QtWidgets.QMessageBox.StandardButton.Yes
+
     def _refresh_session_title(self) -> None:
+        dirty_suffix = "*" if self._session_dirty else ""
         if self._current_session_path is None:
-            self.setWindowTitle("Heatmap Alignment Workbench — Untitled Session")
+            self.setWindowTitle(
+                f"Heatmap Alignment Workbench — Untitled Session{dirty_suffix}"
+            )
             return
         self.setWindowTitle(
-            f"Heatmap Alignment Workbench — {self._current_session_path.name}"
+            f"Heatmap Alignment Workbench — {self._current_session_path.name}{dirty_suffix}"
         )
 
     def _refresh_resources_ui(self) -> None:
@@ -5227,9 +5389,6 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.reload_peak_action.setEnabled(has_peak_path)
         self.reload_leg2_action.setEnabled(has_leg2_path)
 
-        self.save_session_action.setEnabled(
-            self.camera_source is not None and self.heatmap_source is not None
-        )
         self.export_synced_action.setEnabled(
             self.camera_source is not None
             and self.heatmap_source is not None
@@ -5360,7 +5519,9 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             "\n".join(summary.messages),
         )
 
-    def unload_camera_video(self) -> None:
+    def unload_camera_video(self, *, mark_dirty: bool = True) -> None:
+        if mark_dirty:
+            self._mark_session_dirty()
         self._resource_job_manager.cancel_job("camera")
         clear_resource_job(self._resource_job_manager.board(), "camera")
         self._camera_replacement_backup = None
@@ -5385,7 +5546,9 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._refresh_resources_ui()
         self.statusBar().showMessage("Unloaded camera video.")
 
-    def unload_h5_recording(self) -> None:
+    def unload_h5_recording(self, *, mark_dirty: bool = True) -> None:
+        if mark_dirty:
+            self._mark_session_dirty()
         self._resource_job_manager.cancel_job("radar_h5")
         clear_resource_job(self._resource_job_manager.board(), "radar_h5")
         self._h5_replacement_backup = None
@@ -5417,33 +5580,38 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         )
         if reply != QtWidgets.QMessageBox.StandardButton.Yes:
             return
-        self.unload_camera_video()
-        self.unload_h5_recording()
-        self._clear_peak_distance_datasource()
-        self._clear_leg2_ultrasonic_datasource()
+        self.unload_camera_video(mark_dirty=False)
+        self.unload_h5_recording(mark_dirty=False)
+        self._clear_peak_distance_datasource(mark_dirty=False)
+        self._clear_leg2_ultrasonic_datasource(mark_dirty=False)
+        self._mark_session_dirty()
         self.statusBar().showMessage("Cleared all loaded resources.")
 
     def _close_session(self) -> None:
-        reply = QtWidgets.QMessageBox.question(
-            self,
-            "Close Session",
-            "Close the current session and return to an untitled empty workbench?",
-            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
-            QtWidgets.QMessageBox.StandardButton.No,
-        )
-        if reply != QtWidgets.QMessageBox.StandardButton.Yes:
-            return
-        self._close_sources()
-        self.session = AlignmentSession()
-        self._current_session_path = None
-        self._resource_reload_errors.clear()
-        self._resource_load_warnings.clear()
-        self._populate_controls_from_session()
-        self._update_controls_enabled_state()
-        self._sync_previews(camera_access_hint="auto")
-        self._refresh_session_title()
-        self._refresh_resources_ui()
-        self.statusBar().showMessage("Closed session.")
+        if self._session_dirty:
+            choice = self._prompt_save_discard_cancel("close")
+            if choice == "cancel":
+                return
+            if choice == "save" and not self._save_session_for_prompt():
+                return
+        elif not self.workbench_is_pristine():
+            if not self._confirm_close_session_clean():
+                return
+        self._reset_session_after_close()
+
+    def _reset_session_after_close(self) -> None:
+        with self._session_dirty_guard():
+            self._close_sources()
+            self.session = AlignmentSession()
+            self._current_session_path = None
+            self._resource_reload_errors.clear()
+            self._resource_load_warnings.clear()
+            self._populate_controls_from_session()
+            self._update_controls_enabled_state()
+            self._sync_previews(camera_access_hint="auto")
+            self._refresh_resources_ui()
+            self.statusBar().showMessage("Closed session.")
+        self._clear_session_dirty()
 
     def _dialog_start_path(self, key: str) -> str:
         value = self.settings.value(key, "", type=str)
@@ -5669,21 +5837,21 @@ def main() -> None:
         def _load_session_on_start() -> None:
             window.load_session_from_path(session_path)
             if peaks_path is not None:
-                window.load_peak_distance_from_path(peaks_path)
+                window.load_peak_distance_from_path(peaks_path, mark_dirty=False)
             if mat_path is not None:
-                window.load_leg2_mat_from_path(mat_path)
+                window.load_leg2_mat_from_path(mat_path, mark_dirty=False)
 
         QtCore.QTimer.singleShot(0, _load_session_on_start)
     else:
         def _load_resources_on_start() -> None:
             if args.camera is not None:
-                window.load_camera_from_path(args.camera)
+                window.load_camera_from_path(args.camera, mark_dirty=False)
             if args.h5 is not None:
-                window.load_h5_from_path(args.h5)
+                window.load_h5_from_path(args.h5, mark_dirty=False)
             if args.peaks is not None:
-                window.load_peak_distance_from_path(args.peaks)
+                window.load_peak_distance_from_path(args.peaks, mark_dirty=False)
             if args.mat is not None:
-                window.load_leg2_mat_from_path(args.mat)
+                window.load_leg2_mat_from_path(args.mat, mark_dirty=False)
 
         QtCore.QTimer.singleShot(0, _load_resources_on_start)
 
