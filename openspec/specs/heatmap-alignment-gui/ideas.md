@@ -227,8 +227,11 @@ Related layout direction:
 
 Move long-running work off the main GUI path so the app remains interactive.
 
+Note: the async-resource-loading-jobs change moved camera video and Radar Raw (H5) preparation to background jobs. Leg2 MAT and Radar Peak (JSON) imports remain synchronous on the GUI thread for now; keep them here as future candidates if session or per-resource load still feels slow after session-open orchestration improvements.
+
 Possible directions:
 - Load camera/H5 files without freezing the UI, especially for longer trials.
+- Move Leg2 MAT and peak-distance JSON loading onto the same background resource job model when measured load times justify it.
 - Show loading progress or a clear busy state when file probing, H5 loading, or proxy preparation takes noticeable time.
 - Export while the user can continue reviewing or preparing another session.
 - Generate or rebuild proxy videos in the background.
