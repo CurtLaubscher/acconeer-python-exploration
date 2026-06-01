@@ -2010,6 +2010,9 @@ ResourceAction = Literal[
     "reveal",
     "inspect",
     "cancel",
+    "generate",
+    "save",
+    "save_as",
 ]
 
 
@@ -2031,6 +2034,7 @@ class ResourceSummary:
     job_target_filename: str = ""
     job_detail: str = ""
     job_cancellable: bool = False
+    status_label: str = ""
 
 
 @dataclass(frozen=True)
@@ -2054,6 +2058,7 @@ class AlignmentResourceRuntime:
     peak_measurement_count: int | None = None
     leg2_valid_segment_count: int | None = None
     leg2_sample_count: int | None = None
+    peaks_dirty: bool = False
     reload_errors: tuple[tuple[ResourceKind, str], ...] = ()
     load_warnings: tuple[tuple[ResourceKind, str], ...] = ()
     resource_jobs: tuple[ResourceJobPresentation, ...] = ()
@@ -2319,16 +2324,43 @@ def build_alignment_resource_summaries(
         loaded=runtime.radar_peak_loaded,
         messages=peak_messages,
     )
+    # Build details
     peak_details = "No radar peak JSON loaded."
     if runtime.radar_peak_loaded and runtime.peak_detected_count is not None:
         total = runtime.peak_measurement_count or 0
+        generated_suffix = " (generated, unsaved)" if runtime.peaks_dirty else ""
         peak_details = (
-            f"{runtime.peak_detected_count}/{total} frames detected"
+            f"{runtime.peak_detected_count}/{total} frames detected{generated_suffix}"
             if total
-            else f"{runtime.peak_detected_count} detections"
+            else f"{runtime.peak_detected_count} detections{generated_suffix}"
         )
     elif peak_path:
         peak_details = "Remembered peak JSON path is not currently loaded."
+
+    # Peak-specific action list
+    peak_actions: list[ResourceAction] = list(_resource_actions(
+        status=peak_status,
+        path_text=peak_path,
+        can_unload=runtime.radar_peak_loaded or bool(peak_path),
+        messages=peak_messages,
+    ))
+    # Generate: enabled when H5 is loaded (regardless of peak state)
+    if runtime.radar_h5_loaded and "generate" not in peak_actions:
+        peak_actions.insert(0, "generate")
+    # Save: enabled when peaks are dirty
+    if runtime.peaks_dirty and "save" not in peak_actions:
+        save_pos = next((i for i, a in enumerate(peak_actions) if a in ("reload", "reveal", "inspect", "cancel")), len(peak_actions))
+        peak_actions.insert(save_pos, "save")
+    # Save As: enabled when peaks are in memory (loaded or generated)
+    if runtime.radar_peak_loaded and "save_as" not in peak_actions:
+        save_as_pos = next((i for i, a in enumerate(peak_actions) if a in ("reload", "reveal", "inspect", "cancel")), len(peak_actions))
+        # Insert after save if present
+        save_pos2 = next((i for i, a in enumerate(peak_actions) if a == "save"), -1)
+        insert_pos = save_pos2 + 1 if save_pos2 >= 0 else save_as_pos
+        peak_actions.insert(insert_pos, "save_as")
+
+    peak_status_label = "Generated (unsaved)" if runtime.peaks_dirty else ""
+
     summaries.append(
         ResourceSummary(
             kind="radar_peak",
@@ -2340,12 +2372,8 @@ def build_alignment_resource_summaries(
             color_muted=not runtime.radar_peak_loaded,
             details=peak_details,
             messages=peak_messages,
-            actions=_resource_actions(
-                status=peak_status,
-                path_text=peak_path,
-                can_unload=runtime.radar_peak_loaded or bool(peak_path),
-                messages=peak_messages,
-            ),
+            actions=tuple(peak_actions),
+            status_label=peak_status_label,
         )
     )
 
