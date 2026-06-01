@@ -15,7 +15,6 @@ from sparse_iq_peak_distance_core import (
     LoadedPeakDistanceDatasource,
     PeakDistanceExportResult,
     analyze_heatmap_record,
-    peak_distance_document,
     write_peak_distance_json,
 )
 

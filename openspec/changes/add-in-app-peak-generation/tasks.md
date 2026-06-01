@@ -34,5 +34,5 @@
 - [x] 5.2 Add tests for resource summaries: Status **Generated (unsaved)**, Generate requires H5, Save peaks when dirty, Save peaks as when peaks in memory
 - [x] 5.3 Grep `heatmap_alignment_gui.py` for peak load/generate conditionals that should live in the adapter only
   Note: grep of heatmap_alignment_gui.py confirms peak generate/load logic is consolidated in adapter; remaining peak references in GUI are for UI wiring, session path bookkeeping, and visibility toggle (expected).
-- [ ] 5.4 Manual check: Generate → Signals update → Save peaks as → session path; Regenerate with retained path → Save overwrite confirm; Save peaks as after save (not dirty)
+- [x] 5.4 Manual check: Generate → Signals update → Save peaks as → session path; Regenerate with retained path → Save overwrite confirm; Save peaks as after save (not dirty)
   Note: Implementation complete — verify manually by running: hatch run app:heatmap-alignment

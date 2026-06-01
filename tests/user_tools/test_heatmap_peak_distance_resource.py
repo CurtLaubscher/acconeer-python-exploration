@@ -23,6 +23,7 @@ from heatmap_alignment_core import (  # noqa: E402
 from heatmap_peak_distance_resource import (  # noqa: E402
     active_peak_measurements,
     active_peak_zero_velocity_m_s,
+    generate_peak_distances_from_heatmap_record,
     peak_state_detected_counts,
     save_peak_state_to_path,
 )
@@ -336,3 +337,78 @@ def test_radar_peak_summary_kind_is_radar_peak() -> None:
     summaries = build_alignment_resource_summaries(AlignmentSession(), AlignmentResourceRuntime())
     kinds = [s.kind for s in summaries]
     assert "radar_peak" in kinds
+
+
+# ---------------------------------------------------------------------------
+# Task 5.1 supplement: generate_peak_distances_from_heatmap_record
+# ---------------------------------------------------------------------------
+
+class TestGeneratePeakDistancesFromHeatmapRecord:
+    """Verify generate_peak_distances_from_heatmap_record delegates correctly."""
+
+    def test_calls_analyze_heatmap_record_with_all_frames_and_default_threshold(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """analyze_heatmap_record is called with all frame indices and threshold 650."""
+        import heatmap_peak_distance_resource as adapter_mod
+
+        captured: dict = {}
+
+        def fake_analyze(heatmap_record, *, h5_path, subsweep_idx, frame_indices, threshold):
+            captured["frame_indices"] = frame_indices
+            captured["threshold"] = threshold
+            captured["h5_path"] = h5_path
+            captured["subsweep_idx"] = subsweep_idx
+            # Return a minimal real result using the real fixture helper
+            return _make_export_result()
+
+        monkeypatch.setattr(adapter_mod, "analyze_heatmap_record", fake_analyze)
+
+        class _FakeResult:
+            pass
+
+        class _FakeRecord:
+            results = [_FakeResult(), _FakeResult(), _FakeResult()]  # 3 frames
+
+        h5_path = tmp_path / "test.h5"
+        result = generate_peak_distances_from_heatmap_record(
+            _FakeRecord(),
+            h5_path=h5_path,
+            subsweep_idx=2,
+        )
+
+        assert captured["frame_indices"] == [0, 1, 2]
+        assert captured["threshold"] == 650.0
+        assert captured["h5_path"] == h5_path
+        assert captured["subsweep_idx"] == 2
+        assert result is not None
+
+    def test_passes_explicit_threshold_override(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An explicit threshold is forwarded to analyze_heatmap_record."""
+        import heatmap_peak_distance_resource as adapter_mod
+
+        captured: dict = {}
+
+        def fake_analyze(heatmap_record, *, h5_path, subsweep_idx, frame_indices, threshold):
+            captured["threshold"] = threshold
+            return _make_export_result()
+
+        monkeypatch.setattr(adapter_mod, "analyze_heatmap_record", fake_analyze)
+
+        class _FakeRecord:
+            results = [object()]
+
+        generate_peak_distances_from_heatmap_record(
+            _FakeRecord(),
+            h5_path=tmp_path / "x.h5",
+            subsweep_idx=0,
+            threshold=999.0,
+        )
+
+        assert captured["threshold"] == 999.0

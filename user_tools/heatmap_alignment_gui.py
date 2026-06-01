@@ -146,6 +146,9 @@ RESOURCE_STATUS_LABELS = {
 
 RESOURCES_DETAILS_SECTION_SPACING_PX = 6
 RESOURCES_DETAILS_PATH_BLOCK_TOP_MARGIN_PX = 6
+# Initial column widths (Interactive; user can resize; not enforced on refresh).
+RESOURCES_TABLE_RESOURCE_COLUMN_DEFAULT_WIDTH_PX = 140
+RESOURCES_TABLE_STATUS_COLUMN_DEFAULT_WIDTH_PX = 150
 
 RESOURCE_ACTION_LABELS: dict[ResourceAction, str] = {
     "load": "&Load...",
@@ -2735,6 +2738,17 @@ class ResourcesWindow(QtWidgets.QDialog):
         table_header.setSectionsClickable(False)
         table_header.setHighlightSections(False)
         self.table.setColumnWidth(0, 34)
+        table_metrics = self.table.fontMetrics()
+        resource_default_width = max(
+            RESOURCES_TABLE_RESOURCE_COLUMN_DEFAULT_WIDTH_PX,
+            table_metrics.horizontalAdvance("Radar Peak (JSON)") + 20,
+        )
+        status_default_width = max(
+            RESOURCES_TABLE_STATUS_COLUMN_DEFAULT_WIDTH_PX,
+            table_metrics.horizontalAdvance("Generated (unsaved)") + 20,
+        )
+        self.table.setColumnWidth(1, resource_default_width)
+        self.table.setColumnWidth(3, status_default_width)
         self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
         self.table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -3631,7 +3645,43 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._refresh_resources_ui()
         return True
 
+    def _confirm_action_dialog(
+        self,
+        *,
+        title: str,
+        question: str,
+        informative: str = "",
+        accept_label: str,
+        reject_label: str = "Cancel",
+    ) -> bool:
+        """Show a confirmation with the question in the body and verb-labeled buttons."""
+        box = QtWidgets.QMessageBox(self)
+        box.setIcon(QtWidgets.QMessageBox.Icon.Question)
+        box.setWindowTitle(title)
+        box.setText(question)
+        if informative:
+            box.setInformativeText(informative)
+        box.setStandardButtons(
+            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No
+        )
+        accept_button = box.button(QtWidgets.QMessageBox.StandardButton.Yes)
+        reject_button = box.button(QtWidgets.QMessageBox.StandardButton.No)
+        if accept_button is not None:
+            accept_button.setText(accept_label)
+        if reject_button is not None:
+            reject_button.setText(reject_label)
+        box.setDefaultButton(QtWidgets.QMessageBox.StandardButton.Yes)
+        return box.exec() == QtWidgets.QMessageBox.StandardButton.Yes
+
     def _import_peak_distance_json(self) -> None:
+        if self._peaks_dirty and not self._confirm_action_dialog(
+            title="Replace peaks",
+            question="Replace the current in-memory peak data with the selected JSON file?",
+            informative="Files on disk are unchanged until you save peaks.",
+            accept_label="Replace",
+        ):
+            return
+
         filename, _ = QtWidgets.QFileDialog.getOpenFileName(
             self,
             "Import peak-distance JSON",
@@ -3648,16 +3698,12 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         )
 
     def _clear_peak_distance_datasource(self, *, mark_dirty: bool = True, confirm: bool = True) -> None:
-        if confirm and self._peaks_dirty:
-            reply = QtWidgets.QMessageBox.question(
-                self,
-                "Discard unsaved peaks?",
-                "Unsaved generated peak data will be lost. Discard?",
-                QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
-                QtWidgets.QMessageBox.StandardButton.No,
-            )
-            if reply != QtWidgets.QMessageBox.StandardButton.Yes:
-                return
+        if confirm and self._peaks_dirty and not self._confirm_action_dialog(
+            title="Discard peaks",
+            question="Discard unsaved peak-distance data?",
+            accept_label="Discard",
+        ):
+            return
         self._peaks_dirty = False
         self._generated_peak_result = None
         if mark_dirty:
@@ -3675,19 +3721,13 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
     def _generate_peak_distances(self) -> None:
         if self.heatmap_source is None:
             return
-        if self._has_peaks_in_memory():
-            reply = QtWidgets.QMessageBox.question(
-                self,
-                "Replace In-Memory Peaks?",
-                (
-                    "Generate will replace the current in-memory peak data.\n\n"
-                    "Files on disk are unchanged until you save peaks."
-                ),
-                QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
-                QtWidgets.QMessageBox.StandardButton.No,
-            )
-            if reply != QtWidgets.QMessageBox.StandardButton.Yes:
-                return
+        if self._has_peaks_in_memory() and not self._confirm_action_dialog(
+            title="Replace peaks",
+            question="Replace the current in-memory peak data?",
+            informative="Files on disk are unchanged until you save peaks.",
+            accept_label="Replace",
+        ):
+            return
 
         QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.CursorShape.WaitCursor)
         self.statusBar().showMessage("Generating peak distances...")
@@ -5495,23 +5535,55 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             "close": "Close Session?",
             "quit": "Quit Heatmap Alignment?",
         }
-        peaks_warning = (
-            "\n\nUnsaved peak-distance data will also be lost. "
+        peaks_note = (
             "Saving the alignment session does not write peak JSON."
-        ) if self._peaks_dirty else ""
-        texts = {
-            "open": (
-                "There are unsaved changes. Do you want to save them before "
-                f"opening another session?{peaks_warning}"
-            ),
-            "close": (
-                "There are unsaved changes. Do you want to save them before "
-                f"closing this session?{peaks_warning}"
-            ),
-            "quit": (
-                f"There are unsaved changes. Do you want to save them before quitting?{peaks_warning}"
-            ),
-        }
+        )
+        if self._session_dirty and self._peaks_dirty:
+            texts = {
+                "open": (
+                    "There are unsaved changes. Do you want to save them before "
+                    f"opening another session?\n\nUnsaved peak-distance data will also be lost. "
+                    f"{peaks_note}"
+                ),
+                "close": (
+                    "There are unsaved changes. Do you want to save them before "
+                    f"closing this session?\n\nUnsaved peak-distance data will also be lost. "
+                    f"{peaks_note}"
+                ),
+                "quit": (
+                    "There are unsaved changes. Do you want to save them before quitting?"
+                    f"\n\nUnsaved peak-distance data will also be lost. {peaks_note}"
+                ),
+            }
+        elif self._peaks_dirty:
+            texts = {
+                "open": (
+                    "Unsaved peak-distance data will be lost if you open another session. "
+                    f"{peaks_note}\n\nProceed?"
+                ),
+                "close": (
+                    "Unsaved peak-distance data will be lost if you close this session. "
+                    f"{peaks_note}\n\nProceed?"
+                ),
+                "quit": (
+                    "Unsaved peak-distance data will be lost if you quit. "
+                    f"{peaks_note}\n\nProceed?"
+                ),
+            }
+        else:
+            texts = {
+                "open": (
+                    "There are unsaved changes. Do you want to save them before "
+                    "opening another session?"
+                ),
+                "close": (
+                    "There are unsaved changes. Do you want to save them before "
+                    "closing this session?"
+                ),
+                "quit": (
+                    "There are unsaved changes. Do you want to save them before quitting?"
+                ),
+            }
         message_box = QtWidgets.QMessageBox(self)
         message_box.setIcon(QtWidgets.QMessageBox.Icon.Warning)
         message_box.setWindowTitle(titles[action])
@@ -5690,16 +5762,13 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         elif kind == "radar_h5":
             self.load_h5_from_path(path)
         elif kind == "radar_peak":
-            if self._peaks_dirty:
-                reply = QtWidgets.QMessageBox.question(
-                    self,
-                    "Reload and discard unsaved peaks?",
-                    "Reloading will discard unsaved generated peak data. Proceed?",
-                    QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
-                    QtWidgets.QMessageBox.StandardButton.No,
-                )
-                if reply != QtWidgets.QMessageBox.StandardButton.Yes:
-                    return
+            if self._peaks_dirty and not self._confirm_action_dialog(
+                title="Reload peaks",
+                question="Reload peak data from disk and discard unsaved changes?",
+                informative="Unsaved generated peak data will be lost.",
+                accept_label="Reload",
+            ):
+                return
             self.load_peak_distance_from_path(path, show_dialogs=True, require_heatmap=False)
         elif kind == "leg2_mat":
             self.load_leg2_mat_from_path(path, show_dialogs=True)
