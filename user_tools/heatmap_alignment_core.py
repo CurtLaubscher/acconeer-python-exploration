@@ -48,7 +48,9 @@ SIGNAL_PLOT_NO_DETECTION_ALPHA = 72
 SIGNAL_PLOT_PRIMARY_SEGMENT_OPACITY = 0.7
 SIGNAL_PLOT_PRIMARY_SEGMENT_ALPHA = int(round(255 * SIGNAL_PLOT_PRIMARY_SEGMENT_OPACITY))
 TIMELINE_PLAYHEAD_COLOR_HEX = "#f8fafc"
-SIGNAL_PLAYHEAD_ALPHA = 96
+# Shared alpha for both Timeline and Signals playheads (~13% transparency). Tune here only.
+PLAYHEAD_ALPHA = int(round(255 * 0.87))
+SIGNAL_PLAYHEAD_ALPHA = PLAYHEAD_ALPHA  # kept for any external references
 
 SignalPlotRangeMode = Literal["auto", "manual"]
 Leg2UltrasonicSignalKind = Literal["raw", "filtered"]

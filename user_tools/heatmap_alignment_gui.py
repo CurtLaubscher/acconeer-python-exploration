@@ -36,7 +36,7 @@ import numpy as np
 from heatmap_alignment_core import (
     H5_TIMELINE_TRACK_COLOR_HEX,
     LEG2_TIMELINE_TRACK_COLOR_HEX,
-    SIGNAL_PLAYHEAD_ALPHA,
+    PLAYHEAD_ALPHA,
     SIGNAL_PLOT_BACKGROUND_HEX,
     SIGNAL_PLOT_NO_DETECTION_ALPHA,
     SIGNAL_PLOT_PRIMARY_SEGMENT_ALPHA,
@@ -602,6 +602,7 @@ class SignalPlotWidget(pg.PlotWidget):
 
     view_settings_changed = QtCore.Signal()
     axis_geometry_sync_requested = QtCore.Signal()
+    playhead_scrubbed = QtCore.Signal(float)
 
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent=parent)
@@ -672,13 +673,17 @@ class SignalPlotWidget(pg.PlotWidget):
             angle=90,
             movable=False,
             pen=pg.mkPen(
-                _plot_color_with_alpha(TIMELINE_PLAYHEAD_COLOR_HEX, SIGNAL_PLAYHEAD_ALPHA),
+                _plot_color_with_alpha(TIMELINE_PLAYHEAD_COLOR_HEX, PLAYHEAD_ALPHA),
                 width=1.0,
             ),
         )
         self._current_time_line.setAcceptedMouseButtons(QtCore.Qt.MouseButton.NoButton)
         self._current_time_line.setHoverPen(None)
         self.addItem(self._current_time_line)
+        self._dragging_playhead = False
+        self._hover_on_playhead = False
+        self._playhead_hit_half_width_px = 8.0
+        self.setMouseTracking(True)
         view_box = self.getPlotItem().getViewBox()
         view_box.disableAutoRange()
         view_box.sigRangeChanged.connect(self._view_box_range_changed)
@@ -723,6 +728,73 @@ class SignalPlotWidget(pg.PlotWidget):
 
     def set_current_time_s(self, time_s: float) -> None:
         self._current_time_line.setPos(float(time_s))
+
+    def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:
+        if event.button() == QtCore.Qt.MouseButton.LeftButton and self._playhead_hit_test(
+            event.position()
+        ):
+            self._dragging_playhead = True
+            self.setCursor(QtCore.Qt.CursorShape.SizeHorCursor)
+            self.playhead_scrubbed.emit(self._time_from_widget_x(event.position().x(), clamp=True))
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QtGui.QMouseEvent) -> None:
+        if self._dragging_playhead:
+            self.playhead_scrubbed.emit(self._time_from_widget_x(event.position().x(), clamp=True))
+            return
+        hover = self._playhead_hit_test(event.position())
+        if hover != self._hover_on_playhead:
+            self._hover_on_playhead = hover
+            if hover:
+                self.setCursor(QtCore.Qt.CursorShape.SizeHorCursor)
+            else:
+                self.unsetCursor()
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QtGui.QMouseEvent) -> None:
+        if event.button() == QtCore.Qt.MouseButton.LeftButton and self._dragging_playhead:
+            self._dragging_playhead = False
+            self._hover_on_playhead = self._playhead_hit_test(event.position())
+            if self._hover_on_playhead:
+                self.setCursor(QtCore.Qt.CursorShape.SizeHorCursor)
+            else:
+                self.unsetCursor()
+            return
+        super().mouseReleaseEvent(event)
+
+    def leaveEvent(self, event: QtCore.QEvent) -> None:
+        if not self._dragging_playhead:
+            self._hover_on_playhead = False
+            self.unsetCursor()
+        super().leaveEvent(event)
+
+    def _playhead_hit_test(self, widget_pos: QtCore.QPointF) -> bool:
+        playhead_widget_x = self._playhead_x_in_widget()
+        if playhead_widget_x is None:
+            return False
+        return abs(widget_pos.x() - playhead_widget_x) <= self._playhead_hit_half_width_px
+
+    def _playhead_x_in_widget(self) -> float | None:
+        view_box = self.getPlotItem().getViewBox()
+        scene_pt = view_box.mapViewToScene(QtCore.QPointF(self._current_time_line.value(), 0.0))
+        widget_pt = self.mapFromScene(scene_pt)
+        vb_scene_rect = view_box.mapToScene(view_box.boundingRect()).boundingRect()
+        vb_widget_rect = self.mapFromScene(vb_scene_rect).boundingRect()
+        center_y = vb_widget_rect.center().y()
+        if not vb_widget_rect.contains(widget_pt.x(), center_y):
+            return None
+        return float(widget_pt.x())
+
+    def _time_from_widget_x(self, widget_x: float, *, clamp: bool) -> float:
+        view_box = self.getPlotItem().getViewBox()
+        scene_pt = self.mapToScene(QtCore.QPoint(int(widget_x), 0))
+        data_pt = view_box.mapSceneToView(scene_pt)
+        time_s = float(data_pt.x())
+        if clamp:
+            x_min, x_max = view_box.viewRange()[0]
+            time_s = max(float(x_min), min(float(x_max), time_s))
+        return time_s
 
     def sync_x_if_following(self) -> None:
         """Apply the shared visible timeline range when x-axis follows the timeline."""
@@ -1165,7 +1237,9 @@ class AlignmentTimelineWidget(QtWidgets.QWidget):
             camera_brush = QtGui.QBrush(QtGui.QColor("#f97316"))
             heatmap_brush = QtGui.QBrush(QtGui.QColor(H5_TIMELINE_TRACK_COLOR_HEX))
             leg2_brush = QtGui.QBrush(QtGui.QColor(LEG2_TIMELINE_TRACK_COLOR_HEX))
-            playhead_pen = QtGui.QPen(QtGui.QColor(TIMELINE_PLAYHEAD_COLOR_HEX), 2.5)
+            playhead_color = QtGui.QColor(TIMELINE_PLAYHEAD_COLOR_HEX)
+            playhead_color.setAlpha(PLAYHEAD_ALPHA)
+            playhead_pen = QtGui.QPen(playhead_color, 2.5)
 
             painter.setPen(label_pen)
             axis_y = plot_rect.top() + 16
@@ -3453,6 +3527,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.show_leg2_signal_checkbox.toggled.connect(self._leg2_signal_visibility_changed)
         self.play_button.clicked.connect(self._toggle_playback)
         self.timeline_view.playhead_changed.connect(self._timeline_playhead_changed)
+        self.signal_plot.playhead_scrubbed.connect(self._signal_playhead_scrubbed)
         self.timeline_view.camera_offset_changed.connect(self._timeline_camera_offset_changed)
         self.timeline_view.leg2_offset_changed.connect(self._timeline_leg2_offset_changed)
         self.timeline_view.h5_alignment_drag_changed.connect(self._timeline_h5_alignment_drag_changed)
@@ -4750,6 +4825,11 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._sync_previews(camera_access_hint="scrub")
 
     def _timeline_playhead_changed(self, time_s: float) -> None:
+        self.session.timeline.current_time_s = time_s
+        self._reanchor_playback_clock()
+        self._sync_previews(camera_access_hint="scrub")
+
+    def _signal_playhead_scrubbed(self, time_s: float) -> None:
         self.session.timeline.current_time_s = time_s
         self._reanchor_playback_clock()
         self._sync_previews(camera_access_hint="scrub")
