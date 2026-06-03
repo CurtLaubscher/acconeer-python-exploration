@@ -37,6 +37,7 @@ from heatmap_alignment_core import (
     H5_TIMELINE_TRACK_COLOR_HEX,
     LEG2_TIMELINE_TRACK_COLOR_HEX,
     PLAYHEAD_ALPHA,
+    PLAYHEAD_PEN_WIDTH,
     SIGNAL_PLOT_BACKGROUND_HEX,
     SIGNAL_PLOT_NO_DETECTION_ALPHA,
     SIGNAL_PLOT_PRIMARY_SEGMENT_ALPHA,
@@ -674,7 +675,7 @@ class SignalPlotWidget(pg.PlotWidget):
             movable=False,
             pen=pg.mkPen(
                 _plot_color_with_alpha(TIMELINE_PLAYHEAD_COLOR_HEX, PLAYHEAD_ALPHA),
-                width=1.0,
+                width=PLAYHEAD_PEN_WIDTH,
             ),
         )
         self._current_time_line.setAcceptedMouseButtons(QtCore.Qt.MouseButton.NoButton)
@@ -1239,7 +1240,7 @@ class AlignmentTimelineWidget(QtWidgets.QWidget):
             leg2_brush = QtGui.QBrush(QtGui.QColor(LEG2_TIMELINE_TRACK_COLOR_HEX))
             playhead_color = QtGui.QColor(TIMELINE_PLAYHEAD_COLOR_HEX)
             playhead_color.setAlpha(PLAYHEAD_ALPHA)
-            playhead_pen = QtGui.QPen(playhead_color, 2.5)
+            playhead_pen = QtGui.QPen(playhead_color, PLAYHEAD_PEN_WIDTH)
 
             painter.setPen(label_pen)
             axis_y = plot_rect.top() + 16

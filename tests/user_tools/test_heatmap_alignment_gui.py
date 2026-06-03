@@ -2108,14 +2108,32 @@ def test_signal_playhead_drag_in_manual_x_mode_uses_signal_plot_x_scale(
     assert 2.0 <= moved_time <= 4.0
 
 
-def test_signal_playhead_drag_preserves_x_range_and_does_not_mark_dirty(
+def test_signal_playhead_drag_preserves_ranges_modes_and_offsets(
     qapplication: QApplication,
 ) -> None:
+    range_model = TimelineRangeModel()
+    range_model.set_track_state(
+        camera_duration_s=5.0,
+        heatmap_duration_s=5.0,
+        camera_offset_s=1.5,
+        leg2_duration_s=3.0,
+        leg2_offset_s=0.5,
+    )
+    range_model.set_visible_range(0.0, 10.0)
+
     plot = _make_signal_plot_with_range(qapplication, x_start=0.0, x_end=10.0, current_time_s=5.0)
+    plot.set_view_settings(
+        SignalPlotViewSettings(x_range_mode="manual", y_range_mode="manual", manual_x_range=(0.0, 10.0))
+    )
+    plot.attach_timeline_range_model(range_model)
+    qapplication.processEvents()
 
     vb = plot.getPlotItem().getViewBox()
     x_range_before = vb.viewRange()[0]
     y_range_before = vb.viewRange()[1]
+    timeline_range_before = range_model.visible_range_s()
+    camera_offset_before = range_model.camera_offset_s
+    leg2_offset_before = range_model.leg2_offset_s
 
     scrubbed: list[float] = []
     plot.playhead_scrubbed.connect(scrubbed.append)
@@ -2130,10 +2148,13 @@ def test_signal_playhead_drag_preserves_x_range_and_does_not_mark_dirty(
     _signal_plot_mouse_release(plot, move_pos)
     qapplication.processEvents()
 
-    x_range_after = vb.viewRange()[0]
-    y_range_after = vb.viewRange()[1]
-    assert x_range_after == pytest.approx(x_range_before, abs=1e-6)
-    assert y_range_after == pytest.approx(y_range_before, abs=1e-6)
+    assert vb.viewRange()[0] == pytest.approx(x_range_before, abs=1e-6)
+    assert vb.viewRange()[1] == pytest.approx(y_range_before, abs=1e-6)
+    assert plot.view_settings().x_range_mode == "manual"
+    assert plot.view_settings().y_range_mode == "manual"
+    assert range_model.visible_range_s() == pytest.approx(timeline_range_before, abs=1e-6)
+    assert range_model.camera_offset_s == pytest.approx(camera_offset_before, abs=1e-6)
+    assert range_model.leg2_offset_s == pytest.approx(leg2_offset_before, abs=1e-6)
     assert len(scrubbed) >= 1
 
 

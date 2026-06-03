@@ -22,5 +22,5 @@
 ## 4. Verification
 
 - [x] 4.1 Run the focused GUI tests with the repo-managed Hatch test environment.
-- [ ] 4.2 Launch the heatmap alignment GUI with `hatch run app:heatmap-align` and manually verify Timeline-mode scrubbing, manual-x-mode scrubbing, out-of-bounds drag cleanup, cursor changes, and playhead visibility.
+- [x] 4.2 Launch the heatmap alignment GUI with `hatch run app:heatmap-align` and manually verify Timeline-mode scrubbing, manual-x-mode scrubbing, out-of-bounds drag cleanup, cursor changes, and playhead visibility.
 - [x] 4.3 Run OpenSpec validation/status for `enable-signals-playhead-scrubbing` and resolve any artifact issues.

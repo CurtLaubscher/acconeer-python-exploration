@@ -99,6 +99,7 @@ Possible directions:
 - Clean up the timeline time-axis presentation: move tick labels farther from vertical grid lines so decimal points remain legible, remove the horizontal time-axis line if the grid already communicates scale, and remove the redundant "Time" label.
 - Add frame-by-frame navigation for the H5 track, camera track, or current aligned preview.
 - Add simple keyboard shortcuts for navigating time, such as stepping frames, nudging by small time increments, jumping to start/end, and toggling playback.
+- Review discrete H5 frame selection semantics for current-time mapping. Users likely expect a nearest-frame relationship: for H5 frame timestamp `t` and frame interval `dt`, the heatmap for that frame should be shown when the playhead is within roughly `t - dt / 2` to `t + dt / 2`. If the current implementation effectively floors to the nearest frame at or before the playhead, that can make the rendered heatmap feel one frame behind the H5 peak plot.
 - Preserve the simple H5-fixed, camera-draggable model unless a broader timeline model is explicitly needed.
 - Move toward a neutral/global timeline reference where H5 has its own offset instead of being the implicit zero-time ground truth. H5 probably should become an offset-bearing track like the other sources so the timeline model does not privilege one loaded resource as the permanent coordinate origin.
 - Treat short-term H5 dragging that shifts the view, current time, and all non-H5 offsets as a bridge, not the final model. In that bridge model, dragging H5 while H5 is the only loaded timeline resource is necessarily a no-op because there are no other offsets to shift; that behavior should change once H5 has its own offset against a global reference.
@@ -166,6 +167,8 @@ Open UX question:
 The first Signals plot implementation may conservatively disable pyqtgraph context-menu actions while the x-axis is in Timeline/match mode if those actions can disturb the shared time-axis contract. A later polish pass could re-enable actions that are safe or can be adapted to preserve the timeline-matched x-axis.
 
 Possible directions:
+- Add an optional Signals x-range behavior for keeping the playhead visible while scrubbing. This could live in the Signals right-click menu, a settings menu, or a future range-mode control. Keep current Manual behavior available so users can inspect a fixed x-window even when the playhead moves off screen.
+- Distinguish possible "Follow Playhead" behaviors before implementing: continuous push/scroll when the playhead reaches an edge, versus discrete page/window jumps that advance the x-limits by a fixed period. Each has different predictability and motion tradeoffs.
 - Keep `Log X`, `Invert X`, `Y vs. Y'`, and `Power Spectrum (FFT)` disabled while x Timeline mode is active because they change or invert the physical-time x-axis.
 - Convert `View All` into a y-only action such as `View All Y` while x Timeline mode is active, fitting the y-axis without changing the timeline-matched x-range.
 - Allow `dy/dx` if the transformed curve preserves the original time x-values and only changes plotted y-values.
@@ -289,6 +292,18 @@ Possible directions:
 - Document startup precedence if users rely on command-line launches regularly.
 - Improve CLI help text so `--artifact` precedence over individual `--camera` / `--h5` startup arguments is obvious.
 
+### Recently opened sessions
+
+Make it easier to return to prior alignment work from the GUI without browsing for the session JSON each time.
+
+Possible directions:
+- Add a "Recent Sessions" submenu or section under the session/open actions.
+- Store a bounded list of recently opened session paths in app-local settings rather than in alignment session JSON.
+- Show readable labels such as file name plus parent folder, with full paths in tooltips or secondary text where space allows.
+- Drop or gray out missing files gracefully, with an option to clear unavailable entries.
+- Keep command-line `--artifact` launches and GUI Open Session actions feeding the same recent-session list.
+- Consider a "Clear Recent Sessions" action for privacy and cleanup.
+
 ### Startup load error handling
 
 Startup file arguments currently do not appear to share one consistent user-visible failure path. A future cleanup should standardize how `--artifact`, `--camera`, `--h5`, and `--peaks` report missing files, invalid formats, incompatible metadata, and other startup load failures.
@@ -318,6 +333,7 @@ Some full-repo checks may fail for reasons unrelated to the heatmap alignment wo
 Possible directions:
 - Fix the Windows GUI-test teardown bug where PySide6/Qt tests can report all pytest assertions as passed but the Python process exits afterward with `0xC0000409` / `STATUS_STACK_BUFFER_OVERRUN`, surfaced by PowerShell or Hatch as a nonzero exit such as `-1`. Until fixed, this can mislead future agents into treating a passing GUI test run as failed or, worse, hiding real failures behind teardown noise.
 - Investigate QApplication/widget lifecycle in `tests/user_tools/test_heatmap_alignment_gui.py`, especially full-window tests, and consider pytest-qt's `qapp` fixture or process isolation if it makes teardown reliable on Windows.
+- Clean up minor pointer-to-time precision loss in Signals playhead scrubbing: `_time_from_widget_x` currently converts the floating-point widget x position to an integer `QPoint` before mapping through the ViewBox, which can discretize very fine drag positions by about one screen pixel.
 - Decide which inherited release/changelog checks still matter in this private repo.
 - Either update the tooling configuration for private-repo use or document which full-repo gates are expected to fail locally.
 - Clean up pre-existing Ruff issues in a dedicated refactor if they start obscuring feature-specific lint failures.
