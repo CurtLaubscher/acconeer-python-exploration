@@ -241,6 +241,10 @@ Related layout direction:
 - Consider placing viewport-related controls and rendered-heatmap controls on the right side beside the viewport and rendered heatmap previews.
 - Keep the viewport preview and rendered heatmap preview visually unobstructed during normal use.
 
+Follow-up after the Render panel is removed:
+- Keep disabled xcorr/preprocess controls such as blur, downscale, lag window, and sample count out of the main workflow until xcorr or another diagnostic feature is intentionally reintroduced.
+- If xcorr returns, give it a clearly named diagnostic or advanced alignment-assistance surface rather than placing disabled or experimental controls in the primary alignment workflow.
+
 ## Useful But Lower Priority
 
 ### Background and async processing
@@ -404,6 +408,18 @@ Considerations:
 - Keep backward compatibility with existing saved JSON.
 - Avoid schema churn unless there is a concrete reason.
 - The existing `AlignmentSession` dataclass already uses the right conceptual name.
+
+### Session file compatibility and migrations
+
+As the alignment session JSON grows, the workbench may need a more explicit compatibility policy than strict dataclass construction from nested payload dictionaries.
+
+Possible directions:
+- Keep a small versioned migration chain for older session files, such as `v1 -> v2 -> v3`, when saved-state meaning changes or fields are retired.
+- Warn or fail clearly when a session file contains a newer unsupported version.
+- Consider warning about unrecognized fields in session files when they may indicate that a newer workbench saved state the current app cannot interpret.
+- Distinguish safe automatic upgrades from lossy or ambiguous migrations. Safe upgrades should not interrupt loading; lossy or unsupported cases should produce a clear user-facing message.
+- Decide whether unknown top-level fields and unknown nested fields should be ignored, warned about, or rejected consistently.
+- Add focused tests for loading older session versions, rejecting unsupported future versions, and handling unknown fields.
 
 ### Source-coordinate geometry follow-ups
 
