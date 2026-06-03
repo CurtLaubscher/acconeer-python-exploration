@@ -19,6 +19,10 @@ The system SHALL show current-time indicators in the Timeline and Signals areas 
 - **WHEN** the user drags the Signals current-time indicator
 - **THEN** the system updates the shared current time according to the Signals plot x-axis time mapping at the pointer position
 
+#### Scenario: Clamp signal playhead drag to signal x-limits
+- **WHEN** the user drags the Signals current-time indicator beyond the Signals plot's current x-axis limits
+- **THEN** the system clamps the shared current time to the nearest current Signals x-axis limit
+
 #### Scenario: Drag signal playhead in manual x mode
 - **WHEN** the user drags the Signals current-time indicator while the Signals plot x-axis is in manual mode
 - **THEN** the system uses the Signals plot's current manual x-axis scale to map pointer position to shared current time, even when that scale differs from the Timeline playhead scale
@@ -26,6 +30,10 @@ The system SHALL show current-time indicators in the Timeline and Signals areas 
 #### Scenario: Preserve signal plot range during signal playhead drag
 - **WHEN** the user drags the Signals current-time indicator
 - **THEN** the system does not change the Signals plot x-axis range, y-axis range, x-axis range mode, y-axis range mode, or the Timeline visible range
+
+#### Scenario: Signal playhead scrub does not mark session dirty
+- **WHEN** the user drags the Signals current-time indicator
+- **THEN** the system changes only the shared current time and does not mark the current session dirty
 
 #### Scenario: Ignore signal plot background for scrubbing
 - **WHEN** the user presses or drags in the Signals plot outside the current-time indicator hit area
