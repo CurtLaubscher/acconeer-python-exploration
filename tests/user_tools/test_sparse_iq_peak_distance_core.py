@@ -30,6 +30,9 @@ from sparse_iq_peak_distance_core import (  # noqa: E402
     load_peak_distance_json,
     peak_distance_document,
     reduced_measurements_to_dataframe,
+    PEAK_EXTRACTION_METHOD_SUM_VELOCITY,
+    PEAK_EXTRACTION_METHOD_ZERO_VELOCITY_SLICE,
+    strongest_peak_after_sum_over_velocity,
     strongest_peak_in_zero_velocity_slice,
     validate_peak_distance_import,
     write_peak_distance_csv,
@@ -64,16 +67,35 @@ def test_strongest_peak_slices_zero_velocity_row_not_distance_column() -> None:
     assert peak_distance_m == pytest.approx(1.50)
 
 
+def test_strongest_peak_sum_over_velocity_uses_all_velocity_bins() -> None:
+    dvm = np.zeros((4, 3), dtype=np.float64)
+    dvm[2, 0] = 900.0
+    dvm[0, 2] = 50.0
+    dvm[1, 2] = 50.0
+    distances_m = np.array([0.05, 0.10, 1.50])
+
+    _, candidate_peak_distance_m, peak_distance_m, peak_strength = (
+        strongest_peak_after_sum_over_velocity(
+            dvm,
+            distances_m,
+            threshold=0.0,
+        )
+    )
+
+    assert candidate_peak_distance_m == pytest.approx(0.05)
+    assert peak_distance_m == pytest.approx(0.05)
+    assert peak_strength == pytest.approx(900.0)
+
+
 def test_strongest_peak_exports_distance_when_above_threshold() -> None:
     dvm = np.zeros((3, 5), dtype=np.float64)
     dvm[1, 3] = 750.0
     distances_m = np.array([0.4, 0.8, 1.2, 1.6, 2.0])
 
     status, candidate_peak_distance_m, peak_distance_m, peak_strength = (
-        strongest_peak_in_zero_velocity_slice(
+        strongest_peak_after_sum_over_velocity(
             dvm,
             distances_m,
-            zero_velocity_bin=1,
             threshold=500.0,
         )
     )
@@ -89,10 +111,9 @@ def test_strongest_peak_preserves_candidate_when_below_threshold() -> None:
     distances_m = np.array([0.5, 1.0, 1.5])
 
     status, candidate_peak_distance_m, peak_distance_m, peak_strength = (
-        strongest_peak_in_zero_velocity_slice(
+        strongest_peak_after_sum_over_velocity(
             dvm,
             distances_m,
-            zero_velocity_bin=0,
             threshold=DEFAULT_PEAK_THRESHOLD,
         )
     )
@@ -100,7 +121,7 @@ def test_strongest_peak_preserves_candidate_when_below_threshold() -> None:
     assert status == STATUS_NO_DETECTION
     assert candidate_peak_distance_m == pytest.approx(0.5)
     assert peak_distance_m is None
-    assert peak_strength == pytest.approx(100.0)
+    assert peak_strength == pytest.approx(200.0)
 
 
 def test_elapsed_time_seconds_uses_first_tick_as_zero() -> None:
@@ -121,6 +142,7 @@ def _sample_export_result() -> PeakDistanceExportResult:
         source_duration_s=0.1,
         ticks_per_second=100,
         threshold=DEFAULT_PEAK_THRESHOLD,
+        peak_extraction_method=PEAK_EXTRACTION_METHOD_SUM_VELOCITY,
         zero_velocity_bin_index=4,
         zero_velocity_m_s=0.0,
     )
@@ -168,8 +190,19 @@ def test_peak_distance_document_shape() -> None:
     assert document["format"] == PEAK_DISTANCE_FORMAT
     assert document["version"] == PEAK_DISTANCE_VERSION
     assert document["metadata"]["sensor_id"] == 1
+    assert document["metadata"]["peak_extraction_method"] == PEAK_EXTRACTION_METHOD_SUM_VELOCITY
     assert document["measurements"][1]["absolute_time"] is None
     assert document["measurements"][1]["peak_distance_m"] is None
+
+
+def test_load_peak_distance_json_defaults_legacy_peak_extraction_method(tmp_path: Path) -> None:
+    output_path = tmp_path / "legacy.json"
+    document = peak_distance_document(_sample_export_result())
+    del document["metadata"]["peak_extraction_method"]
+    output_path.write_text(json.dumps(document), encoding="utf-8")
+
+    loaded = load_peak_distance_json(output_path)
+    assert loaded.metadata.peak_extraction_method == PEAK_EXTRACTION_METHOD_ZERO_VELOCITY_SLICE
 
 
 def test_reduced_csv_has_only_measurement_columns(tmp_path: Path) -> None:

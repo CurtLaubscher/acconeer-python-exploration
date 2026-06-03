@@ -1306,7 +1306,7 @@ Before starting H5 **load** actions, the system SHALL assign the desired session
 ### Requirement: In-app peak generation from loaded H5
 The system SHALL allow the user to generate Radar Peak (JSON) measurements from the currently loaded Radar Raw (H5) recording without leaving the heatmap alignment workbench.
 
-Generation SHALL use the same zero-velocity-slice peak algorithm and default threshold as the `peak-distances` CLI (`650` until a future change adds UI). Generation SHALL use the loaded H5 session, group, entry, and subsweep indices from the current heatmap track. Generation SHALL process all frames (no `every_n` or `max_frames` in the GUI).
+Generation SHALL use the same sum-over-velocity peak algorithm and default threshold as the `peak-distances` CLI (`650` until a future change adds UI). Generation SHALL use the loaded H5 session, group, entry, and subsweep indices from the current heatmap track. Generation SHALL process all frames (no `every_n` or `max_frames` in the GUI).
 
 The system SHALL enable Generate only when Radar Raw (H5) is loaded. The system SHALL disable or omit Generate when H5 is not loaded.
 

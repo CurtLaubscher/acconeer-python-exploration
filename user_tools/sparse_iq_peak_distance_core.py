@@ -30,6 +30,9 @@ DEFAULT_PEAK_THRESHOLD = 650.0
 PEAK_DISTANCE_FORMAT = "acconeer_peak_distances"
 PEAK_DISTANCE_VERSION = 1
 
+PEAK_EXTRACTION_METHOD_SUM_VELOCITY = "sum_velocity"
+PEAK_EXTRACTION_METHOD_ZERO_VELOCITY_SLICE = "zero_velocity_slice"
+
 STATUS_DETECTED: Literal["detected"] = "detected"
 STATUS_NO_DETECTION: Literal["no_detection"] = "no_detection"
 
@@ -92,6 +95,7 @@ class PeakDistanceMetadata:
     source_duration_s: float
     ticks_per_second: int
     threshold: float
+    peak_extraction_method: str
     zero_velocity_bin_index: int
     zero_velocity_m_s: float
 
@@ -167,6 +171,56 @@ def zero_velocity_bin_index(velocities_m_s: np.ndarray) -> ZeroVelocityBin:
     return ZeroVelocityBin(bin_index=bin_index, velocity_m_s=float(velocities_m_s[bin_index]))
 
 
+def _strongest_peak_from_distance_profile(
+    profile: np.ndarray,
+    distances_m: np.ndarray,
+    *,
+    threshold: float,
+) -> tuple[str, float, float | None, float]:
+    if profile.ndim != 1:
+        msg = f"Expected 1-D distance profile, got shape {profile.shape!r}."
+        raise ValueError(msg)
+    if len(profile) != len(distances_m):
+        msg = (
+            f"Distance profile length {len(profile)} does not match "
+            f"distance axis length {len(distances_m)}."
+        )
+        raise ValueError(msg)
+
+    peak_bin = int(np.argmax(profile))
+    peak_strength = float(profile[peak_bin])
+    candidate_peak_distance_m = float(distances_m[peak_bin])
+    if peak_strength <= threshold:
+        return STATUS_NO_DETECTION, candidate_peak_distance_m, None, peak_strength
+
+    return STATUS_DETECTED, candidate_peak_distance_m, candidate_peak_distance_m, peak_strength
+
+
+def strongest_peak_after_sum_over_velocity(
+    dvm: np.ndarray,
+    distances_m: np.ndarray,
+    *,
+    threshold: float,
+) -> tuple[str, float, float | None, float]:
+    if dvm.ndim != 2:
+        msg = f"Expected 2-D distance/velocity map, got shape {dvm.shape!r}."
+        raise ValueError(msg)
+    # Rows are velocity bins and columns are distance bins (heatmap x=distance, y=velocity).
+    if dvm.shape[1] != len(distances_m):
+        msg = (
+            f"Distance axis length {len(distances_m)} does not match "
+            f"DVM column count {dvm.shape[1]}."
+        )
+        raise ValueError(msg)
+
+    collapsed_profile = np.sum(dvm, axis=0)
+    return _strongest_peak_from_distance_profile(
+        collapsed_profile,
+        distances_m,
+        threshold=threshold,
+    )
+
+
 def strongest_peak_in_zero_velocity_slice(
     dvm: np.ndarray,
     distances_m: np.ndarray,
@@ -184,13 +238,11 @@ def strongest_peak_in_zero_velocity_slice(
         raise ValueError(msg)
 
     slice_strengths = dvm[zero_velocity_bin, :]
-    peak_bin = int(np.argmax(slice_strengths))
-    peak_strength = float(slice_strengths[peak_bin])
-    candidate_peak_distance_m = float(distances_m[peak_bin])
-    if peak_strength <= threshold:
-        return STATUS_NO_DETECTION, candidate_peak_distance_m, None, peak_strength
-
-    return STATUS_DETECTED, candidate_peak_distance_m, candidate_peak_distance_m, peak_strength
+    return _strongest_peak_from_distance_profile(
+        slice_strengths,
+        distances_m,
+        threshold=threshold,
+    )
 
 
 def _absolute_time_value(record_timestamp: str, elapsed_s: float) -> str | None:
@@ -201,6 +253,31 @@ def _absolute_time_value(record_timestamp: str, elapsed_s: float) -> str | None:
         return None
 
 
+def _extract_strongest_peak(
+    dvm: np.ndarray,
+    distances_m: np.ndarray,
+    *,
+    peak_extraction_method: str,
+    zero_velocity_bin: int,
+    threshold: float,
+) -> tuple[str, float, float | None, float]:
+    if peak_extraction_method == PEAK_EXTRACTION_METHOD_SUM_VELOCITY:
+        return strongest_peak_after_sum_over_velocity(
+            dvm,
+            distances_m,
+            threshold=threshold,
+        )
+    if peak_extraction_method == PEAK_EXTRACTION_METHOD_ZERO_VELOCITY_SLICE:
+        return strongest_peak_in_zero_velocity_slice(
+            dvm,
+            distances_m,
+            zero_velocity_bin=zero_velocity_bin,
+            threshold=threshold,
+        )
+    msg = f"Unsupported peak extraction method {peak_extraction_method!r}."
+    raise ValueError(msg)
+
+
 def analyze_heatmap_record(
     heatmap_record: HeatmapRecord,
     *,
@@ -208,6 +285,7 @@ def analyze_heatmap_record(
     subsweep_idx: int,
     frame_indices: list[int],
     threshold: float,
+    peak_extraction_method: str = PEAK_EXTRACTION_METHOD_SUM_VELOCITY,
 ) -> PeakDistanceExportResult:
     subsweep = select_subsweep(heatmap_record, subsweep_idx)
     axes = heatmap_axes(heatmap_record.metadata, heatmap_record.sensor_config, subsweep)
@@ -216,13 +294,12 @@ def analyze_heatmap_record(
     measurements: list[FramePeakMeasurement] = []
     for frame_index in frame_indices:
         dvm = distance_velocity_map(heatmap_record.results[frame_index].subframes[subsweep_idx])
-        status, candidate_peak_distance_m, peak_distance_m, peak_strength = (
-            strongest_peak_in_zero_velocity_slice(
-                dvm,
-                axes.distances_m,
-                zero_velocity_bin=zero_velocity.bin_index,
-                threshold=threshold,
-            )
+        status, candidate_peak_distance_m, peak_distance_m, peak_strength = _extract_strongest_peak(
+            dvm,
+            axes.distances_m,
+            peak_extraction_method=peak_extraction_method,
+            zero_velocity_bin=zero_velocity.bin_index,
+            threshold=threshold,
         )
         elapsed_s = elapsed_time_seconds(
             heatmap_record.ticks,
@@ -258,6 +335,7 @@ def analyze_heatmap_record(
         source_duration_s=heatmap_record.duration_s,
         ticks_per_second=heatmap_record.ticks_per_second,
         threshold=threshold,
+        peak_extraction_method=peak_extraction_method,
         zero_velocity_bin_index=zero_velocity.bin_index,
         zero_velocity_m_s=zero_velocity.velocity_m_s,
     )
@@ -304,6 +382,7 @@ def peak_distance_document(result: PeakDistanceExportResult) -> dict[str, Any]:
             "source_duration_s": result.metadata.source_duration_s,
             "ticks_per_second": result.metadata.ticks_per_second,
             "threshold": result.metadata.threshold,
+            "peak_extraction_method": result.metadata.peak_extraction_method,
             "zero_velocity_bin_index": result.metadata.zero_velocity_bin_index,
             "zero_velocity_m_s": result.metadata.zero_velocity_m_s,
         },
@@ -355,6 +434,10 @@ def _metadata_from_dict(payload: dict[str, Any]) -> PeakDistanceMetadata:
     if missing:
         msg = f"Metadata is missing required keys: {', '.join(missing)}."
         raise _invalid_peak_distance_json_error(msg)
+    peak_extraction_method = payload.get(
+        "peak_extraction_method",
+        PEAK_EXTRACTION_METHOD_ZERO_VELOCITY_SLICE,
+    )
     return PeakDistanceMetadata(
         source_path=str(payload["source_path"]),
         source_name=str(payload["source_name"]),
@@ -367,6 +450,7 @@ def _metadata_from_dict(payload: dict[str, Any]) -> PeakDistanceMetadata:
         source_duration_s=float(payload["source_duration_s"]),
         ticks_per_second=int(payload["ticks_per_second"]),
         threshold=float(payload["threshold"]),
+        peak_extraction_method=str(peak_extraction_method),
         zero_velocity_bin_index=int(payload["zero_velocity_bin_index"]),
         zero_velocity_m_s=float(payload["zero_velocity_m_s"]),
     )

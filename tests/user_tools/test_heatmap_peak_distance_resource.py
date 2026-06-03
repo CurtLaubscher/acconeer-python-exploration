@@ -29,6 +29,7 @@ from heatmap_peak_distance_resource import (  # noqa: E402
 )
 from sparse_iq_peak_distance_core import (  # noqa: E402
     PEAK_DISTANCE_FORMAT,
+    PEAK_EXTRACTION_METHOD_SUM_VELOCITY,
     STATUS_DETECTED,
     STATUS_NO_DETECTION,
     FramePeakMeasurement,
@@ -57,6 +58,7 @@ def _make_export_result() -> PeakDistanceExportResult:
         source_duration_s=0.3,
         ticks_per_second=1000,
         threshold=650.0,
+        peak_extraction_method=PEAK_EXTRACTION_METHOD_SUM_VELOCITY,
         zero_velocity_bin_index=5,
         zero_velocity_m_s=0.0,
     )
@@ -154,6 +156,7 @@ class TestActivePeakZeroVelocityMs:
             source_duration_s=result.metadata.source_duration_s,
             ticks_per_second=result.metadata.ticks_per_second,
             threshold=result.metadata.threshold,
+            peak_extraction_method=result.metadata.peak_extraction_method,
             zero_velocity_bin_index=result.metadata.zero_velocity_bin_index,
             zero_velocity_m_s=0.15,
         )

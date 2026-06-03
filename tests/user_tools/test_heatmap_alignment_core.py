@@ -67,6 +67,7 @@ from heatmap_alignment_core import (  # noqa: E402
 )
 from sparse_iq_peak_distance_core import (  # noqa: E402
     DEFAULT_PEAK_THRESHOLD,
+    PEAK_EXTRACTION_METHOD_SUM_VELOCITY,
     STATUS_DETECTED,
     STATUS_NO_DETECTION,
     FramePeakMeasurement,
@@ -992,6 +993,7 @@ def _sample_peak_distance_export_result() -> PeakDistanceExportResult:
         source_duration_s=0.1,
         ticks_per_second=100,
         threshold=DEFAULT_PEAK_THRESHOLD,
+        peak_extraction_method=PEAK_EXTRACTION_METHOD_SUM_VELOCITY,
         zero_velocity_bin_index=4,
         zero_velocity_m_s=0.0,
     )

@@ -115,9 +115,13 @@ from heatmap_alignment_resource_jobs import (
     should_apply_job_result,
 )
 from sparse_iq_peak_distance_core import (
+    DEFAULT_PEAK_THRESHOLD,
+    PEAK_EXTRACTION_METHOD_SUM_VELOCITY,
+    PEAK_EXTRACTION_METHOD_ZERO_VELOCITY_SLICE,
     STATUS_DETECTED,
     PeakDistanceExportResult,
     PeakDistanceJsonImportError,
+    analyze_heatmap_record,
     annotate_heatmap_rgb_with_peak,
 )
 from heatmap_peak_distance_resource import (
@@ -149,6 +153,10 @@ RESOURCES_DETAILS_PATH_BLOCK_TOP_MARGIN_PX = 6
 # Initial column widths (Interactive; user can resize; not enforced on refresh).
 RESOURCES_TABLE_RESOURCE_COLUMN_DEFAULT_WIDTH_PX = 140
 RESOURCES_TABLE_STATUS_COLUMN_DEFAULT_WIDTH_PX = 150
+
+# TEMPORARY: overlay v=0-slice peaks on the Signals plot for algorithm comparison.
+# Remove this flag, compare curves, and _temporary_peak_compare_series when done.
+TEMPORARY_COMPARE_PEAK_EXTRACTION_ON_SIGNAL_PLOT = True
 
 RESOURCE_ACTION_LABELS: dict[ResourceAction, str] = {
     "load": "&Load...",
@@ -625,6 +633,29 @@ class SignalPlotWidget(pg.PlotWidget):
             connect="finite",
             name="H5 peak (detected)",
         )
+        compare_color = "#c084fc"
+        compare_detected_pen = pg.mkPen(
+            compare_color,
+            width=2.0,
+            style=QtCore.Qt.PenStyle.DashLine,
+        )
+        compare_candidate_pen = pg.mkPen(
+            _plot_color_with_alpha(compare_color, SIGNAL_PLOT_NO_DETECTION_ALPHA),
+            width=2.0,
+            style=QtCore.Qt.PenStyle.DashLine,
+        )
+        self._compare_candidate_curve = self.plot(
+            pen=compare_candidate_pen,
+            connect="finite",
+            name="H5 peak v=0 slice (no detection)",
+        )
+        self._compare_detected_curve = self.plot(
+            pen=compare_detected_pen,
+            connect="finite",
+            name="H5 peak v=0 slice (detected)",
+        )
+        self._peak_compare_series: PeakDistanceSignalSeries | None = None
+        self._peak_compare_visible = False
         self._leg2_faded_curve = self.plot(
             pen=faded_pen,
             connect="finite",
@@ -715,13 +746,17 @@ class SignalPlotWidget(pg.PlotWidget):
         *,
         peak_series: PeakDistanceSignalSeries | None,
         peak_visible: bool,
+        peak_compare_series: PeakDistanceSignalSeries | None = None,
+        peak_compare_visible: bool = False,
         leg2_series: Leg2UltrasonicSignalSeries | None,
         leg2_visible: bool,
         leg2_legend_name: str,
     ) -> None:
         self._peak_series = peak_series
+        self._peak_compare_series = peak_compare_series
         self._leg2_series = leg2_series
         self._peak_visible = peak_visible and peak_series is not None
+        self._peak_compare_visible = peak_compare_visible and peak_compare_series is not None
         self._leg2_visible = leg2_visible and leg2_series is not None
 
         if self._peak_visible and peak_series is not None:
@@ -736,6 +771,19 @@ class SignalPlotWidget(pg.PlotWidget):
         else:
             self._detected_curve.setData([], [])
             self._candidate_curve.setData([], [])
+
+        if self._peak_compare_visible and peak_compare_series is not None:
+            self._compare_detected_curve.setData(
+                peak_compare_series.detected_time_s,
+                peak_compare_series.detected_distance_m,
+            )
+            self._compare_candidate_curve.setData(
+                peak_compare_series.candidate_time_s,
+                peak_compare_series.candidate_distance_m,
+            )
+        else:
+            self._compare_detected_curve.setData([], [])
+            self._compare_candidate_curve.setData([], [])
 
         if self._leg2_visible and leg2_series is not None:
             self._leg2_primary_curve.setData(
@@ -765,8 +813,21 @@ class SignalPlotWidget(pg.PlotWidget):
             return
         legend.clear()
         if self._peak_visible:
-            legend.addItem(self._detected_curve, "H5 peak (detected)")
-            legend.addItem(self._candidate_curve, "H5 peak (no detection)")
+            detected_label = (
+                "H5 peak sum (detected)"
+                if TEMPORARY_COMPARE_PEAK_EXTRACTION_ON_SIGNAL_PLOT
+                else "H5 peak (detected)"
+            )
+            candidate_label = (
+                "H5 peak sum (no detection)"
+                if TEMPORARY_COMPARE_PEAK_EXTRACTION_ON_SIGNAL_PLOT
+                else "H5 peak (no detection)"
+            )
+            legend.addItem(self._detected_curve, detected_label)
+            legend.addItem(self._candidate_curve, candidate_label)
+        if self._peak_compare_visible:
+            legend.addItem(self._compare_detected_curve, "H5 peak v=0 slice (detected)")
+            legend.addItem(self._compare_candidate_curve, "H5 peak v=0 slice (no detection)")
         if self._leg2_visible:
             legend.addItem(
                 self._leg2_primary_curve,
@@ -781,7 +842,9 @@ class SignalPlotWidget(pg.PlotWidget):
             stance_legend_item.setPen(pg.mkPen(None))
             stance_legend_item.setBrush(pg.mkBrush(patch_color))
             legend.addItem(stance_legend_item, "Stance phase")
-        legend.setVisible(self._peak_visible or self._leg2_visible)
+        legend.setVisible(
+            self._peak_visible or self._peak_compare_visible or self._leg2_visible
+        )
 
     def _clear_stance_patches(self) -> None:
         """Remove all stance phase patch items from the plot."""
@@ -3065,6 +3128,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.peak_distance_datasource: LoadedPeakDistanceDatasource | None = None
         self._generated_peak_result: PeakDistanceExportResult | None = None
         self._peaks_dirty: bool = False
+        self._temp_peak_series_cache: dict[tuple[object, ...], PeakDistanceSignalSeries] = {}
         self.leg2_ultrasonic_datasource: LoadedLeg2UltrasonicDatasource | None = None
         self._freeze_export_overlay_preview = False
         self._export_in_progress = False
@@ -3483,6 +3547,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         if self.heatmap_source is not None:
             self.heatmap_source.close()
             self.heatmap_source = None
+        self._invalidate_temp_peak_series_cache()
         self.peak_distance_datasource = None
         self._generated_peak_result = None
         self._peaks_dirty = False
@@ -4389,6 +4454,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             self._h5_replacement_backup.heatmap_source.close()
         elif self.heatmap_source is not None:
             self.heatmap_source.close()
+        self._invalidate_temp_peak_series_cache()
         self.heatmap_source = build_h5_truth_source_from_payload(payload)
         self.session.heatmap_track = payload.metadata
         self.session.viewport.output_width = payload.first_frame_shape[1]
@@ -5388,6 +5454,39 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             return "Leg2 filtered ultrasonic"
         return "Leg2 raw ultrasonic"
 
+    def _invalidate_temp_peak_series_cache(self) -> None:
+        self._temp_peak_series_cache.clear()
+
+    def _temporary_peak_series_for_method(
+        self,
+        peak_extraction_method: str,
+    ) -> PeakDistanceSignalSeries | None:
+        if not TEMPORARY_COMPARE_PEAK_EXTRACTION_ON_SIGNAL_PLOT:
+            return None
+        if self.heatmap_source is None:
+            return None
+        source = self.heatmap_source
+        cache_key = (
+            str(source.path.resolve()),
+            source.subsweep_idx,
+            len(source.record.results),
+            peak_extraction_method,
+        )
+        cached = self._temp_peak_series_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        result = analyze_heatmap_record(
+            source.record,
+            h5_path=source.path,
+            subsweep_idx=source.subsweep_idx,
+            frame_indices=list(range(len(source.record.results))),
+            threshold=DEFAULT_PEAK_THRESHOLD,
+            peak_extraction_method=peak_extraction_method,
+        )
+        series = build_peak_distance_signal_series(result.measurements)
+        self._temp_peak_series_cache[cache_key] = series
+        return series
+
     def _refresh_signal_plot(self) -> None:
         peak_series = None
         peak_state = self._active_peak_state()
@@ -5399,6 +5498,18 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             peak_state is not None
             and self.session.peak_distance_datasource.visible
         )
+        peak_compare_series = None
+        peak_compare_visible = False
+        if TEMPORARY_COMPARE_PEAK_EXTRACTION_ON_SIGNAL_PLOT and self.heatmap_source is not None:
+            peak_compare_series = self._temporary_peak_series_for_method(
+                PEAK_EXTRACTION_METHOD_ZERO_VELOCITY_SLICE,
+            )
+            peak_compare_visible = peak_compare_series is not None
+            if peak_series is None and peak_compare_visible:
+                peak_series = self._temporary_peak_series_for_method(
+                    PEAK_EXTRACTION_METHOD_SUM_VELOCITY,
+                )
+                peak_visible = self.session.peak_distance_datasource.visible
         leg2_series = None
         if self.leg2_ultrasonic_datasource is not None:
             leg2_series = build_leg2_ultrasonic_signal_series(
@@ -5413,6 +5524,8 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.signal_plot.set_plotted_signals(
             peak_series=peak_series,
             peak_visible=peak_visible,
+            peak_compare_series=peak_compare_series,
+            peak_compare_visible=peak_compare_visible,
             leg2_series=leg2_series,
             leg2_visible=leg2_visible,
             leg2_legend_name=self._leg2_legend_name(),
@@ -5839,6 +5952,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         if self.heatmap_source is not None:
             self.heatmap_source.close()
             self.heatmap_source = None
+        self._invalidate_temp_peak_series_cache()
         self._overlay_plot_renderer = None
         self.session.heatmap_track = HeatmapTrack()
         self.truth_view.set_frame(None)

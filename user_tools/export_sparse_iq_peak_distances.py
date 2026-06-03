@@ -1,4 +1,4 @@
-"""Export zero-velocity peak-distance measurements from an Acconeer H5 log.
+"""Export sum-over-velocity peak-distance measurements from an Acconeer H5 log.
 
 Launch through the repo-managed Hatch app environment:
 
@@ -185,7 +185,10 @@ def _plan_batch_exports(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Export thresholded zero-velocity peak-distance measurements from Sparse IQ H5 logs."
+        description=(
+            "Export thresholded peak-distance measurements from Sparse IQ H5 logs "
+            "(sum magnitude over velocity, then strongest distance peak)."
+        )
     )
     parser.add_argument(
         "inputs",

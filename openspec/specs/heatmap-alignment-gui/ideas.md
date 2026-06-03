@@ -137,8 +137,8 @@ Near-term accepted direction:
 
 Initial algorithm direction:
 - Compute the Sparse IQ distance/velocity magnitude map for each selected frame.
-- Use the velocity bin nearest `0 m/s`.
-- Find the strongest distance peak in that velocity slice.
+- Sum magnitude across all velocity bins, then find the strongest distance peak in the collapsed profile.
+- Heatmap peak markers still use the velocity bin nearest `0 m/s` for display position on the overlay.
 - Export the peak only when it is above a user-configurable threshold.
 - Keep the wording honest: this is a zero-velocity strongest-peak extractor first, not a fully tuned closest-object detector.
 
