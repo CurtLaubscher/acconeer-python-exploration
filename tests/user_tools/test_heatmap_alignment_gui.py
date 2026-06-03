@@ -41,6 +41,7 @@ from heatmap_alignment_core import (  # noqa: E402
     Leg2UltrasonicDatasourceSettings,
     Leg2UltrasonicSignalSeries,
     ResourceJobPresentation,
+    SignalPlotViewSettings,
     build_alignment_resource_summaries,
     save_alignment_session,
     session_equivalent_for_pristine,
@@ -1990,3 +1991,238 @@ def test_save_from_prompt_aborted_when_validation_fails(
     assert reset_called is False
     with pytest.raises(ValueError):
         validate_alignment_session(window.session, allow_missing_sources=True)
+
+
+# ---------------------------------------------------------------------------
+# Signals playhead scrubbing tests
+# ---------------------------------------------------------------------------
+
+
+def _make_signal_plot_with_range(
+    qapplication: QApplication,
+    *,
+    x_start: float,
+    x_end: float,
+    width: int = 800,
+    height: int = 300,
+    current_time_s: float = 0.0,
+) -> SignalPlotWidget:
+    plot = SignalPlotWidget()
+    plot.resize(width, height)
+    plot.show()
+    qapplication.processEvents()
+    plot.getPlotItem().getViewBox().setXRange(x_start, x_end, padding=0.0)
+    qapplication.processEvents()
+    plot.set_current_time_s(current_time_s)
+    qapplication.processEvents()
+    return plot
+
+
+def _signal_plot_mouse_press(widget: SignalPlotWidget, local_pos: QtCore.QPointF) -> None:
+    event = QtGui.QMouseEvent(
+        QtCore.QEvent.Type.MouseButtonPress,
+        local_pos,
+        widget.mapToGlobal(local_pos.toPoint()),
+        QtCore.Qt.MouseButton.LeftButton,
+        QtCore.Qt.MouseButton.LeftButton,
+        QtCore.Qt.KeyboardModifier.NoModifier,
+    )
+    widget.mousePressEvent(event)
+
+
+def _signal_plot_mouse_move(widget: SignalPlotWidget, local_pos: QtCore.QPointF) -> None:
+    event = QtGui.QMouseEvent(
+        QtCore.QEvent.Type.MouseMove,
+        local_pos,
+        widget.mapToGlobal(local_pos.toPoint()),
+        QtCore.Qt.MouseButton.NoButton,
+        QtCore.Qt.MouseButton.LeftButton,
+        QtCore.Qt.KeyboardModifier.NoModifier,
+    )
+    widget.mouseMoveEvent(event)
+
+
+def _signal_plot_mouse_release(widget: SignalPlotWidget, local_pos: QtCore.QPointF) -> None:
+    event = QtGui.QMouseEvent(
+        QtCore.QEvent.Type.MouseButtonRelease,
+        local_pos,
+        widget.mapToGlobal(local_pos.toPoint()),
+        QtCore.Qt.MouseButton.LeftButton,
+        QtCore.Qt.MouseButton.NoButton,
+        QtCore.Qt.KeyboardModifier.NoModifier,
+    )
+    widget.mouseReleaseEvent(event)
+
+
+def test_signal_playhead_drag_emits_scrubbed_signal(
+    qapplication: QApplication,
+) -> None:
+    plot = _make_signal_plot_with_range(qapplication, x_start=0.0, x_end=10.0, current_time_s=5.0)
+
+    scrubbed: list[float] = []
+    plot.playhead_scrubbed.connect(scrubbed.append)
+
+    playhead_x = plot._playhead_x_in_widget()
+    assert playhead_x is not None
+
+    press_pos = QtCore.QPointF(playhead_x, plot.height() / 2.0)
+    _signal_plot_mouse_press(plot, press_pos)
+    assert plot._dragging_playhead
+
+    move_pos = QtCore.QPointF(playhead_x + 10.0, plot.height() / 2.0)
+    _signal_plot_mouse_move(plot, move_pos)
+
+    _signal_plot_mouse_release(plot, move_pos)
+    assert not plot._dragging_playhead
+
+    assert len(scrubbed) >= 2
+    assert scrubbed[0] == pytest.approx(5.0, abs=0.5)
+    assert scrubbed[-1] > scrubbed[0]
+
+
+def test_signal_playhead_drag_in_manual_x_mode_uses_signal_plot_x_scale(
+    qapplication: QApplication,
+) -> None:
+    plot = _make_signal_plot_with_range(qapplication, x_start=2.0, x_end=4.0, current_time_s=3.0)
+    plot.set_view_settings(
+        SignalPlotViewSettings(x_range_mode="manual", y_range_mode="auto", manual_x_range=(2.0, 4.0))
+    )
+    qapplication.processEvents()
+
+    scrubbed: list[float] = []
+    plot.playhead_scrubbed.connect(scrubbed.append)
+
+    playhead_x = plot._playhead_x_in_widget()
+    assert playhead_x is not None
+
+    press_pos = QtCore.QPointF(playhead_x, plot.height() / 2.0)
+    _signal_plot_mouse_press(plot, press_pos)
+    assert plot._dragging_playhead
+
+    move_pos = QtCore.QPointF(playhead_x + 20.0, plot.height() / 2.0)
+    _signal_plot_mouse_move(plot, move_pos)
+    _signal_plot_mouse_release(plot, move_pos)
+
+    assert len(scrubbed) >= 2
+    moved_time = scrubbed[-1]
+    assert 2.0 <= moved_time <= 4.0
+
+
+def test_signal_playhead_drag_preserves_ranges_modes_and_offsets(
+    qapplication: QApplication,
+) -> None:
+    range_model = TimelineRangeModel()
+    range_model.set_track_state(
+        camera_duration_s=5.0,
+        heatmap_duration_s=5.0,
+        camera_offset_s=1.5,
+        leg2_duration_s=3.0,
+        leg2_offset_s=0.5,
+    )
+    range_model.set_visible_range(0.0, 10.0)
+
+    plot = _make_signal_plot_with_range(qapplication, x_start=0.0, x_end=10.0, current_time_s=5.0)
+    plot.set_view_settings(
+        SignalPlotViewSettings(x_range_mode="manual", y_range_mode="manual", manual_x_range=(0.0, 10.0))
+    )
+    plot.attach_timeline_range_model(range_model)
+    qapplication.processEvents()
+
+    vb = plot.getPlotItem().getViewBox()
+    x_range_before = vb.viewRange()[0]
+    y_range_before = vb.viewRange()[1]
+    timeline_range_before = range_model.visible_range_s()
+    camera_offset_before = range_model.camera_offset_s
+    leg2_offset_before = range_model.leg2_offset_s
+
+    scrubbed: list[float] = []
+    plot.playhead_scrubbed.connect(scrubbed.append)
+
+    playhead_x = plot._playhead_x_in_widget()
+    assert playhead_x is not None
+
+    press_pos = QtCore.QPointF(playhead_x, plot.height() / 2.0)
+    _signal_plot_mouse_press(plot, press_pos)
+    move_pos = QtCore.QPointF(playhead_x + 15.0, plot.height() / 2.0)
+    _signal_plot_mouse_move(plot, move_pos)
+    _signal_plot_mouse_release(plot, move_pos)
+    qapplication.processEvents()
+
+    assert vb.viewRange()[0] == pytest.approx(x_range_before, abs=1e-6)
+    assert vb.viewRange()[1] == pytest.approx(y_range_before, abs=1e-6)
+    assert plot.view_settings().x_range_mode == "manual"
+    assert plot.view_settings().y_range_mode == "manual"
+    assert range_model.visible_range_s() == pytest.approx(timeline_range_before, abs=1e-6)
+    assert range_model.camera_offset_s == pytest.approx(camera_offset_before, abs=1e-6)
+    assert range_model.leg2_offset_s == pytest.approx(leg2_offset_before, abs=1e-6)
+    assert len(scrubbed) >= 1
+
+
+def test_signal_plot_background_click_does_not_scrub(
+    qapplication: QApplication,
+) -> None:
+    plot = _make_signal_plot_with_range(qapplication, x_start=0.0, x_end=10.0, current_time_s=5.0)
+
+    scrubbed: list[float] = []
+    plot.playhead_scrubbed.connect(scrubbed.append)
+
+    playhead_x = plot._playhead_x_in_widget()
+    assert playhead_x is not None
+    far_x = playhead_x + plot._playhead_hit_half_width_px * 3.0
+    press_pos = QtCore.QPointF(far_x, plot.height() / 2.0)
+    _signal_plot_mouse_press(plot, press_pos)
+
+    assert not plot._dragging_playhead
+    assert scrubbed == []
+
+
+def test_signal_playhead_out_of_bounds_drag_clamps_and_releases_cleanly(
+    qapplication: QApplication,
+) -> None:
+    plot = _make_signal_plot_with_range(qapplication, x_start=0.0, x_end=10.0, current_time_s=5.0)
+
+    scrubbed: list[float] = []
+    plot.playhead_scrubbed.connect(scrubbed.append)
+
+    playhead_x = plot._playhead_x_in_widget()
+    assert playhead_x is not None
+
+    press_pos = QtCore.QPointF(playhead_x, plot.height() / 2.0)
+    _signal_plot_mouse_press(plot, press_pos)
+    assert plot._dragging_playhead
+
+    far_right_pos = QtCore.QPointF(plot.width() + 200.0, plot.height() / 2.0)
+    _signal_plot_mouse_move(plot, far_right_pos)
+    assert len(scrubbed) >= 2
+    vb = plot.getPlotItem().getViewBox()
+    x_max = vb.viewRange()[0][1]
+    assert scrubbed[-1] == pytest.approx(x_max, abs=1e-6)
+
+    _signal_plot_mouse_release(plot, far_right_pos)
+    assert not plot._dragging_playhead
+
+
+def test_signal_playhead_scrubbed_handler_updates_session_and_calls_scrub_previews(
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = HeatmapAlignmentWindow()
+
+    reanchored: list[None] = []
+    synced_hints: list[str] = []
+    dirty_calls: list[None] = []
+
+    monkeypatch.setattr(window, "_reanchor_playback_clock", lambda: reanchored.append(None))
+    monkeypatch.setattr(
+        window,
+        "_sync_previews",
+        lambda *, camera_access_hint="auto", **_kw: synced_hints.append(camera_access_hint),
+    )
+    monkeypatch.setattr(window, "_mark_session_dirty", lambda: dirty_calls.append(None))
+
+    window._signal_playhead_scrubbed(3.75)
+
+    assert window.session.timeline.current_time_s == pytest.approx(3.75)
+    assert reanchored == [None]
+    assert synced_hints == ["scrub"]
+    assert dirty_calls == []
