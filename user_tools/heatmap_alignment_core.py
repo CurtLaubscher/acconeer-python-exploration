@@ -31,13 +31,12 @@ from sparse_iq_peak_distance_core import (
     STATUS_DETECTED,
     FramePeakMeasurement,
     LoadedPeakDistanceDatasource,
-    PeakDistanceDatasourceSettings,
     load_peak_distance_json,
     validate_peak_distance_import,
 )
 
 
-SESSION_VERSION = 2
+SESSION_VERSION = 3
 
 H5_TIMELINE_TRACK_COLOR_HEX = "#22c55e"
 CAMERA_TIMELINE_TRACK_COLOR_HEX = "#f97316"
@@ -257,6 +256,27 @@ class OverlayPlotPresentation:
     top_margin: float
 
 
+def _filter_dataclass_fields(dc_type: type, raw: dict) -> dict:
+    """Return only the keys from *raw* that are valid fields of *dc_type*."""
+    import dataclasses
+    valid = {f.name for f in dataclasses.fields(dc_type)}
+    return {k: v for k, v in raw.items() if k in valid}
+
+
+def _normalize_heatmap_track_keys(raw: dict) -> dict:
+    """Rename legacy HeatmapTrack JSON keys to their current names."""
+    renames = {
+        "session_index": "session_idx",
+        "group_index": "group_idx",
+        "entry_index": "entry_idx",
+        "subsweep_index": "subsweep_idx",
+    }
+    result = {}
+    for k, v in raw.items():
+        result[renames.get(k, k)] = v
+    return result
+
+
 @dataclass
 class AlignmentSession:
     """Serializable state for one alignment session."""
@@ -272,9 +292,7 @@ class AlignmentSession:
     viewport_visibility: ViewportVisibilitySettings = field(
         default_factory=ViewportVisibilitySettings
     )
-    peak_distance_datasource: PeakDistanceDatasourceSettings = field(
-        default_factory=PeakDistanceDatasourceSettings
-    )
+    peak_series: list = field(default_factory=list)
     leg2_ultrasonic_datasource: Leg2UltrasonicDatasourceSettings = field(
         default_factory=Leg2UltrasonicDatasourceSettings
     )
@@ -287,6 +305,7 @@ class AlignmentSession:
             view["manual_x_range"] = list(view["manual_x_range"])
         if view["manual_y_range"] is not None:
             view["manual_y_range"] = list(view["manual_y_range"])
+        payload["peak_series"] = [e for e in self.peak_series if e.get("path", "")]
         return payload
 
     @classmethod
@@ -307,27 +326,42 @@ class AlignmentSession:
             payload["version"] = 2
             version = 2
 
+        if version == 2:
+            payload = dict(payload)
+            old_peak = payload.pop("peak_distance_datasource", {})
+            old_path = old_peak.get("path", "") if isinstance(old_peak, dict) else ""
+            if old_path:
+                from pathlib import Path
+                payload["peak_series"] = [{"path": old_path, "display_name": Path(old_path).stem, "color": "#3b82f6", "visible": True, "heatmap_selected": False}]
+            else:
+                payload["peak_series"] = []
+            payload["version"] = 3
+            version = 3
+
         if version != SESSION_VERSION:
             raise ValueError(
                 f"Unsupported alignment session version {version!r}; "
                 f"expected {SESSION_VERSION}."
             )
 
+        camera_track_raw = _filter_dataclass_fields(CameraTrack, payload.get("camera_track", {}))
+        heatmap_track_raw = _filter_dataclass_fields(
+            HeatmapTrack, _normalize_heatmap_track_keys(payload.get("heatmap_track", {}))
+        )
+
         session = cls(
             version=version,
-            camera_track=CameraTrack(**payload["camera_track"]),
-            heatmap_track=HeatmapTrack(**payload["heatmap_track"]),
-            viewport=ViewportGeometry(**payload["viewport"]),
-            render=RenderSettings(**payload["render"]),
-            preprocess=PreprocessSettings(**payload["preprocess"]),
-            timeline=TimelineState(**payload["timeline"]),
+            camera_track=CameraTrack(**camera_track_raw),
+            heatmap_track=HeatmapTrack(**heatmap_track_raw),
+            viewport=ViewportGeometry(**payload.get("viewport", {})),
+            render=RenderSettings(**payload.get("render", {})),
+            preprocess=PreprocessSettings(**payload.get("preprocess", {})),
+            timeline=TimelineState(**payload.get("timeline", {})),
             export_overlay=ExportOverlaySettings(**payload.get("export_overlay", {})),
             viewport_visibility=ViewportVisibilitySettings(
                 **payload.get("viewport_visibility", {})
             ),
-            peak_distance_datasource=PeakDistanceDatasourceSettings(
-                **payload.get("peak_distance_datasource", {})
-            ),
+            peak_series=list(payload.get("peak_series", [])),
             leg2_ultrasonic_datasource=Leg2UltrasonicDatasourceSettings(
                 **payload.get("leg2_ultrasonic_datasource", {})
             ),
@@ -1946,10 +1980,9 @@ def desired_h5_identity(session: AlignmentSession) -> H5SlotIdentity | None:
     )
 
 
-def desired_peak_identity(session: AlignmentSession) -> SyncSlotIdentity | None:
-    """Return desired peak-distance JSON identity, or None when path is empty."""
-    path = session.peak_distance_datasource.path
-    return SyncSlotIdentity(path=path) if path else None
+def desired_peak_identities(session: AlignmentSession) -> list:
+    """Return desired peak series identities from session.peak_series."""
+    return [SyncSlotIdentity(path=e["path"]) for e in session.peak_series if e.get("path", "")]
 
 
 def desired_leg2_identity(session: AlignmentSession) -> SyncSlotIdentity | None:
@@ -2051,6 +2084,7 @@ class ResourceSummary:
     job_detail: str = ""
     job_cancellable: bool = False
     status_label: str = ""
+    series_id: str = ""  # Non-empty for peak series rows to enable row-scoped actions.
 
 
 @dataclass(frozen=True)
@@ -2214,6 +2248,7 @@ def _resource_actions(
 def build_alignment_resource_summaries(
     session: AlignmentSession,
     runtime: AlignmentResourceRuntime,
+    peak_series: list | None = None,
 ) -> tuple[ResourceSummary, ...]:
     """Build fixed-slot resource summaries for the Resources window."""
 
@@ -2333,65 +2368,75 @@ def build_alignment_resource_summaries(
         )
     )
 
-    peak_path = session.peak_distance_datasource.path
     peak_messages = _resource_messages("radar_peak", runtime)
-    peak_status = _resource_status(
-        path_text=peak_path,
-        loaded=runtime.radar_peak_loaded,
-        messages=peak_messages,
-    )
-    # Build details
-    peak_details = "No radar peak JSON loaded."
-    if runtime.radar_peak_loaded and runtime.peak_detected_count is not None:
-        total = runtime.peak_measurement_count or 0
-        generated_suffix = " (generated, unsaved)" if runtime.peaks_dirty else ""
-        peak_details = (
-            f"{runtime.peak_detected_count}/{total} frames detected{generated_suffix}"
-            if total
-            else f"{runtime.peak_detected_count} detections{generated_suffix}"
+    if peak_series:
+        # Emit one ResourceSummary per peak series resource.
+        for ps in peak_series:
+            ps_actions: list[ResourceAction] = []
+            if ps.unsaved:
+                ps_actions.append("save")
+            ps_actions.extend(["save_as", "unload"])
+            if ps.json_path:
+                ps_actions.append("reload")
+                ps_actions.append("reveal")
+            ps_status_label = "Generated (unsaved)" if ps.unsaved else ""
+            detected = sum(1 for m in ps.measurements if getattr(m, "status", "") == "detected")
+            total = len(ps.measurements)
+            if ps.unsaved:
+                ps_details = f"{detected}/{total} detected frames (unsaved)"
+            elif ps.json_path:
+                ps_details = f"{detected}/{total} detected frames"
+            else:
+                ps_details = f"{detected}/{total} detected frames"
+            summaries.append(
+                ResourceSummary(
+                    kind="radar_peak",
+                    display_name=ps.display_name,
+                    role="Generated" if ps.provenance == "generated" else "Imported",
+                    status="loaded",
+                    path=str(ps.json_path) if ps.json_path else "",
+                    color_hex=ps.color,
+                    color_muted=False,
+                    details=ps_details,
+                    messages=tuple(ps.warnings) + (peak_messages or ()),
+                    actions=tuple(ps_actions),
+                    status_label=ps_status_label,
+                    series_id=ps.series_id,
+                )
+            )
+    else:
+        # Fallback: one aggregate row for tests and empty-list case.
+        peak_actions: list[ResourceAction] = []
+        if runtime.radar_h5_loaded:
+            peak_actions.append("generate")
+        if runtime.radar_peak_loaded:
+            if runtime.peaks_dirty:
+                peak_actions.append("save")
+            peak_actions.append("save_as")
+        peak_status_label = ""
+        peak_details = "No peak distances generated or loaded."
+        if runtime.radar_peak_loaded:
+            detected = runtime.peak_detected_count or 0
+            total = runtime.peak_measurement_count or 0
+            peak_details = f"{detected}/{total} detected frames"
+            if runtime.peaks_dirty:
+                peak_status_label = "Generated (unsaved)"
+                peak_details += " (unsaved)"
+        summaries.append(
+            ResourceSummary(
+                kind="radar_peak",
+                display_name="Radar Peak Distances",
+                role="Optional signal",
+                status="loaded" if runtime.radar_peak_loaded else "unloaded",
+                path="",
+                color_hex=None,
+                color_muted=not runtime.radar_peak_loaded,
+                details=peak_details,
+                messages=peak_messages,
+                actions=tuple(peak_actions),
+                status_label=peak_status_label,
+            )
         )
-    elif peak_path:
-        peak_details = "Remembered peak JSON path is not currently loaded."
-
-    # Peak-specific action list
-    peak_actions: list[ResourceAction] = list(_resource_actions(
-        status=peak_status,
-        path_text=peak_path,
-        can_unload=runtime.radar_peak_loaded or bool(peak_path),
-        messages=peak_messages,
-    ))
-    # Generate: enabled when H5 is loaded (regardless of peak state)
-    if runtime.radar_h5_loaded and "generate" not in peak_actions:
-        peak_actions.insert(0, "generate")
-    # Save: enabled when peaks are dirty
-    if runtime.peaks_dirty and "save" not in peak_actions:
-        save_pos = next((i for i, a in enumerate(peak_actions) if a in ("reload", "reveal", "inspect", "cancel")), len(peak_actions))
-        peak_actions.insert(save_pos, "save")
-    # Save As: enabled when peaks are in memory (loaded or generated)
-    if runtime.radar_peak_loaded and "save_as" not in peak_actions:
-        save_as_pos = next((i for i, a in enumerate(peak_actions) if a in ("reload", "reveal", "inspect", "cancel")), len(peak_actions))
-        # Insert after save if present
-        save_pos2 = next((i for i, a in enumerate(peak_actions) if a == "save"), -1)
-        insert_pos = save_pos2 + 1 if save_pos2 >= 0 else save_as_pos
-        peak_actions.insert(insert_pos, "save_as")
-
-    peak_status_label = "Generated (unsaved)" if runtime.peaks_dirty else ""
-
-    summaries.append(
-        ResourceSummary(
-            kind="radar_peak",
-            display_name="Radar Peak (JSON)",
-            role="Optional signal",
-            status=peak_status,
-            path=peak_path,
-            color_hex=H5_TIMELINE_TRACK_COLOR_HEX,
-            color_muted=not runtime.radar_peak_loaded,
-            details=peak_details,
-            messages=peak_messages,
-            actions=tuple(peak_actions),
-            status_label=peak_status_label,
-        )
-    )
 
     leg2_path = session.leg2_ultrasonic_datasource.path
     leg2_messages = _resource_messages("leg2_mat", runtime)

@@ -33,6 +33,13 @@ PEAK_DISTANCE_VERSION = 1
 PEAK_EXTRACTION_METHOD_SUM_VELOCITY = "sum_velocity"
 PEAK_EXTRACTION_METHOD_ZERO_VELOCITY_SLICE = "zero_velocity_slice"
 
+ALGORITHM_LABEL_SUM_VELOCITY = "sum v"
+ALGORITHM_LABEL_ZERO_VELOCITY_SLICE = "v0 slice"
+PEAK_ALGORITHM_REGISTRY = {
+    PEAK_EXTRACTION_METHOD_SUM_VELOCITY: ALGORITHM_LABEL_SUM_VELOCITY,
+    PEAK_EXTRACTION_METHOD_ZERO_VELOCITY_SLICE: ALGORITHM_LABEL_ZERO_VELOCITY_SLICE,
+}
+
 STATUS_DETECTED: Literal["detected"] = "detected"
 STATUS_NO_DETECTION: Literal["no_detection"] = "no_detection"
 
@@ -62,6 +69,7 @@ class PeakDistanceExportConfig:
     threshold: float = DEFAULT_PEAK_THRESHOLD
     every_n: int = 1
     max_frames: int | None = None
+    peak_extraction_method: str = PEAK_EXTRACTION_METHOD_SUM_VELOCITY
 
 
 @dataclass(frozen=True)
@@ -360,6 +368,7 @@ def export_peak_distances(config: PeakDistanceExportConfig) -> PeakDistanceExpor
             subsweep_idx=config.subsweep_idx,
             frame_indices=frame_indices,
             threshold=config.threshold,
+            peak_extraction_method=config.peak_extraction_method,
         )
     finally:
         heatmap_record.close()
@@ -435,7 +444,7 @@ def _metadata_from_dict(payload: dict[str, Any]) -> PeakDistanceMetadata:
         raise _invalid_peak_distance_json_error(msg)
     peak_extraction_method = payload.get(
         "peak_extraction_method",
-        PEAK_EXTRACTION_METHOD_ZERO_VELOCITY_SLICE,
+        PEAK_EXTRACTION_METHOD_SUM_VELOCITY,
     )
     return PeakDistanceMetadata(
         source_path=str(payload["source_path"]),
@@ -700,4 +709,5 @@ def resolve_peak_distance_export_indices(
         threshold=config.threshold,
         every_n=config.every_n,
         max_frames=config.max_frames,
+        peak_extraction_method=config.peak_extraction_method,
     )
