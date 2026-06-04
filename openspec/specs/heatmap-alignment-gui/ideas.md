@@ -84,6 +84,7 @@ Possible directions:
 - Add user-editable overlay plot styling for font sizes, tick styling, margins/padding, and related readability settings.
 - Add optional colorbar support.
 - Show the heatmap scale in the rendered heatmap spot and in the overlay/export presentation, likely as a colorbar or compact scale legend.
+- Place rendered heatmap color min/max magnitude controls near the colorbar or scale legend so the visible scale and adjustable bounds are spatially connected.
 - Tune margins with fixed minimums so labels do not get clipped.
 - Re-render the overlay heatmap while the user drags to resize the export overlay, possibly throttled or lower quality if needed.
 - Add preview/export visual parity checks for plot layout, font sizing, axes, and colorbar behavior.
