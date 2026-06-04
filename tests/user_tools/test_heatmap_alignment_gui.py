@@ -582,6 +582,14 @@ def _ancestor_group_titles(widget: QtWidgets.QWidget) -> list[str]:
     return titles
 
 
+def _mapped_widget_rect(
+    widget: QtWidgets.QWidget,
+    *,
+    relative_to: QtWidgets.QWidget,
+) -> QtCore.QRect:
+    return QtCore.QRect(widget.mapTo(relative_to, QtCore.QPoint(0, 0)), widget.size())
+
+
 def test_render_panel_controls_moved_to_visualization_groups(
     qapplication: QApplication,
 ) -> None:
@@ -620,11 +628,22 @@ def test_preview_and_signals_are_vertically_resizable(
     assert horizontal_splitter.widget(0).minimumHeight() > 0
     assert horizontal_splitter.widget(1).minimumHeight() > 0
     assert window.signal_plot.parentWidget().minimumHeight() > 0
+    assert window.camera_view.minimumSize() == QtCore.QSize(100, 40)
+    assert window.viewport_view.minimumSize() == QtCore.QSize(100, 40)
+    assert window.truth_view.minimumSize() == QtCore.QSize(100, 40)
     vertical_splitter.setSizes([80, 560])
     qapplication.processEvents()
     assert vertical_splitter.sizes()[0] >= horizontal_splitter.widget(1).minimumHeight()
     assert window.viewport_view.height() >= window.viewport_view.minimumHeight()
     assert window.truth_view.height() >= window.truth_view.minimumHeight()
+    viewport_rect = _mapped_widget_rect(window.viewport_view, relative_to=window)
+    viewport_controls_rect = _mapped_widget_rect(window.viewport_controls_widget, relative_to=window)
+    truth_rect = _mapped_widget_rect(window.truth_view, relative_to=window)
+    heatmap_controls_rect = _mapped_widget_rect(
+        window.rendered_heatmap_controls_widget, relative_to=window
+    )
+    assert viewport_controls_rect.top() >= viewport_rect.bottom()
+    assert heatmap_controls_rect.top() >= truth_rect.bottom()
 
     timeline_titles = [
         group.title()
