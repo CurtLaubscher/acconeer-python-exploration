@@ -47,6 +47,12 @@ from heatmap_alignment_core import (  # noqa: E402
     session_equivalent_for_pristine,
     validate_alignment_session,
 )
+from sparse_iq_peak_distance_core import (  # noqa: E402
+    STATUS_DETECTED,
+    FramePeakMeasurement,
+    LoadedPeakDistanceDatasource,
+    PeakDistanceMetadata,
+)
 from scipy.io import savemat
 
 
@@ -564,6 +570,77 @@ def test_resources_menu_and_file_menu_actions_exist(qapplication: QApplication) 
     assert "Close Session" in action_texts
     assert "Load Camera Video..." in action_texts
     assert "Unload Camera Video" in action_texts
+
+
+def _ancestor_group_titles(widget: QtWidgets.QWidget) -> list[str]:
+    titles: list[str] = []
+    parent = widget.parentWidget()
+    while parent is not None:
+        if isinstance(parent, QtWidgets.QGroupBox):
+            titles.append(parent.title())
+        parent = parent.parentWidget()
+    return titles
+
+
+def test_render_panel_controls_moved_to_visualization_groups(
+    qapplication: QApplication,
+) -> None:
+    window = HeatmapAlignmentWindow()
+    qapplication.processEvents()
+
+    group_titles = [group.title() for group in window.findChildren(QtWidgets.QGroupBox)]
+    assert "Render" not in group_titles
+    assert "Rendered Heatmap" in _ancestor_group_titles(window.color_min_spin)
+    assert "Rendered Heatmap" in _ancestor_group_titles(window.color_max_spin)
+    assert "Signals" in _ancestor_group_titles(window.leg2_signal_kind_combo)
+
+
+def test_color_min_max_spinboxes_step_by_100(qapplication: QApplication) -> None:
+    window = HeatmapAlignmentWindow()
+    assert window.color_min_spin.singleStep() == pytest.approx(100.0)
+    assert window.color_max_spin.singleStep() == pytest.approx(100.0)
+
+
+def test_color_min_lower_bound_is_zero(qapplication: QApplication) -> None:
+    window = HeatmapAlignmentWindow()
+    assert window.color_min_spin.minimum() == pytest.approx(0.0)
+
+
+def test_loaded_peak_overlay_is_available_by_default(qapplication: QApplication) -> None:
+    window = HeatmapAlignmentWindow()
+    window.peak_distance_datasource = LoadedPeakDistanceDatasource(
+        path=Path("peaks.json"),
+        metadata=PeakDistanceMetadata(
+            source_path="truth.h5",
+            source_name="truth",
+            session_index=0,
+            group_index=0,
+            entry_index=0,
+            sensor_id=1,
+            subsweep_index=0,
+            source_frame_count=1,
+            source_duration_s=0.1,
+            ticks_per_second=1000,
+            threshold=650.0,
+            peak_extraction_method="sum_velocity",
+            zero_velocity_bin_index=3,
+            zero_velocity_m_s=0.0,
+        ),
+        measurements=(
+            FramePeakMeasurement(
+                frame_index=4,
+                source_tick=40,
+                time_s=0.04,
+                absolute_time=None,
+                status=STATUS_DETECTED,
+                peak_distance_m=1.25,
+                candidate_peak_distance_m=1.25,
+                peak_strength=20.0,
+            ),
+        ),
+    )
+
+    assert window._peak_overlay_for_frame(4) == pytest.approx((1.25, 0.0))
 
 
 def test_resources_window_lists_fixed_resource_slots(qapplication: QApplication) -> None:
@@ -1954,13 +2031,6 @@ def test_clear_all_resources_marks_dirty(
 
     assert window._session_dirty is True
 
-
-def test_visibility_toggles_mark_dirty(qapplication: QApplication) -> None:
-    window = HeatmapAlignmentWindow()
-    window.show_peak_marker_checkbox.setEnabled(True)
-    window.show_peak_marker_checkbox.setChecked(not window.session.peak_distance_datasource.visible)
-    qapplication.processEvents()
-    assert window._session_dirty is True
 
 
 def test_save_from_prompt_aborted_when_validation_fails(

@@ -37,7 +37,7 @@ from sparse_iq_peak_distance_core import (
 )
 
 
-SESSION_VERSION = 1
+SESSION_VERSION = 2
 
 H5_TIMELINE_TRACK_COLOR_HEX = "#22c55e"
 CAMERA_TIMELINE_TRACK_COLOR_HEX = "#f97316"
@@ -167,7 +167,6 @@ class SignalPlotViewSettings:
 @dataclass
 class Leg2UltrasonicDatasourceSettings:
     path: str = ""
-    visible: bool = True
     signal_kind: Leg2UltrasonicSignalKind = "raw"
     offset_s: float = 0.0
 
@@ -293,6 +292,21 @@ class AlignmentSession:
     @classmethod
     def from_json_dict(cls, payload: dict[str, Any]) -> AlignmentSession:
         version = payload.get("version")
+
+        if version == 1:
+            # v1 -> v2: strip "visible" from datasource settings blocks.
+            payload = dict(payload)
+            if "peak_distance_datasource" in payload:
+                peak_block = dict(payload["peak_distance_datasource"])
+                peak_block.pop("visible", None)
+                payload["peak_distance_datasource"] = peak_block
+            if "leg2_ultrasonic_datasource" in payload:
+                leg2_block = dict(payload["leg2_ultrasonic_datasource"])
+                leg2_block.pop("visible", None)
+                payload["leg2_ultrasonic_datasource"] = leg2_block
+            payload["version"] = 2
+            version = 2
+
         if version != SESSION_VERSION:
             raise ValueError(
                 f"Unsupported alignment session version {version!r}; "

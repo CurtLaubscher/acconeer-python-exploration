@@ -106,6 +106,7 @@ Possible directions:
 - During playback, target source/native FPS or a configured preview FPS, but skip or coalesce preview work if the previous refresh is still busy so playback does not fall into an inconsistent slow cadence.
 - Avoid rebuilding or refreshing signal plot data on current-time-only updates; moving the current-time indicator should be enough unless plotted data or x/y range state changed.
 - Consider a fast interactive preview path plus a higher-quality settled path, similar to the source-resolution viewport preview direction.
+- Bug: changing the Leg2 ultrasonic signal kind between raw and filtered currently makes the viewport drop to low quality and then return to high quality. Viewport quality invalidation should only be triggered by changes that affect the camera/viewport/heatmap preview; choosing which ultrasonic signal to plot in Signals should not invalidate or refresh viewport quality.
 - Review discrete H5 frame selection semantics for current-time mapping. Users likely expect a nearest-frame relationship: for H5 frame timestamp `t` and frame interval `dt`, the heatmap for that frame should be shown when the playhead is within roughly `t - dt / 2` to `t + dt / 2`. If the current implementation effectively floors to the nearest frame at or before the playhead, that can make the rendered heatmap feel one frame behind the H5 peak plot.
 - Preserve the simple H5-fixed, camera-draggable model unless a broader timeline model is explicitly needed.
 - Move toward a neutral/global timeline reference where H5 has its own offset instead of being the implicit zero-time ground truth. H5 probably should become an offset-bearing track like the other sources so the timeline model does not privilege one loaded resource as the permanent coordinate origin.
@@ -230,6 +231,7 @@ Possible directions:
 - **Derived / “virtual” resources:** support in-memory resources produced from loaded parents (e.g. peaks generated from the current H5) that behave like loaded external files in the UI until the user saves. Provenance: `empty` → `generated` (unsaved) → `external` (path on disk after Save). Capabilities per adapter: `load`, `unload`, `reload`, `generate`, `save` / `save_as` as appropriate. Do not require a separate `generated+path` state; once saved, treat as external with the same slot.
 - **Per-resource dirty (e.g. unsaved peaks):** show unsaved derived data in the Resources row (not the main window `*` unless alignment session is also dirty). On quit / close session / open another session, fold unsaved derived work into the existing unsaved prompt (one dialog): warn that closing loses unsaved peaks and that saving the alignment session does not write peak JSON unless the user saves peaks separately. Avoid chained modal dialogs per dirty type.
 - **Job-ready adapters:** v1 peak generation can run synchronously on the GUI thread when H5 is already in memory; shape adapter APIs so a future background job can call the same `generate()` / `save()` core without rewriting Resources actions.
+- Bug: after loading a saved session, the status bar can keep showing a resource-level message such as `Loaded H5 recording: ...` indefinitely. Session load should end with a session-level status message, such as `Loaded session: ...`, rather than the last resource loaded during reconciliation. The message should also be transient so stale load confirmations do not remain in the status bar as if they describe current state.
 
 ### Render panel control layout cleanup
 
@@ -244,6 +246,7 @@ Related layout direction:
 Follow-up after the Render panel is removed:
 - Keep disabled xcorr/preprocess controls such as blur, downscale, lag window, and sample count out of the main workflow until xcorr or another diagnostic feature is intentionally reintroduced.
 - If xcorr returns, give it a clearly named diagnostic or advanced alignment-assistance surface rather than placing disabled or experimental controls in the primary alignment workflow.
+- Color Min should be constrained to be strictly less than Color Max. Today the spinboxes are independent; entering a Color Min ≥ Color Max produces a degenerate color range. Add a validator or cross-constraint so the user cannot commit a value that inverts or collapses the range (e.g. clamp or warn when Color Min would meet or exceed Color Max). This requires additional change logic and is deferred.
 
 ## Useful But Lower Priority
 
