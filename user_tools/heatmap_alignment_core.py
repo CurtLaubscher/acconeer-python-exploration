@@ -1699,24 +1699,38 @@ class HeatmapPlotRenderer:
         zero_velocity_m_s: float | None,
     ) -> None:
         self._clear_peak_artists()
-        if self._ax is None or peak_distance_m is None or zero_velocity_m_s is None:
+        if self._ax is None or peak_distance_m is None:
             return
-        line = self._ax.axvline(
-            peak_distance_m,
-            color="#ff4040",
-            linewidth=1.5,
-            alpha=0.9,
-        )
+        # Draw downward triangle at peak x, at top of velocity axis
+        y_top = self.extent[3]  # vel_max
         marker = self._ax.plot(
             peak_distance_m,
-            zero_velocity_m_s,
-            marker="o",
-            color="#ffdc40",
-            markersize=6,
-            markeredgecolor="#202020",
+            y_top,
+            marker="v",
+            color="#ff4040",
+            markersize=8,
+            markeredgecolor="#ffffff",
             markeredgewidth=0.5,
+            clip_on=False,
+            zorder=10,
+            transform=self._ax.transData,
         )[0]
-        self._peak_artists = [line, marker]
+        font_size = 7
+        if self._presentation is not None:
+            font_size = max(6, min(10, self._presentation.tick_label_size_pt))
+        label = self._ax.annotate(
+            "{:.3f} m".format(peak_distance_m),
+            xy=(peak_distance_m, y_top),
+            xytext=(0, 8),
+            textcoords="offset points",
+            ha="center",
+            va="bottom",
+            fontsize=font_size,
+            color="#ff4040",
+            clip_on=True,
+            zorder=10,
+        )
+        self._peak_artists = [marker, label]
 
 
 def import_peak_distance_json_for_heatmap(
