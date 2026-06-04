@@ -1237,7 +1237,7 @@ def test_resource_job_manager_stale_success_releases_h5_payload(
     assert manager.take_pending_result("radar_h5", old_generation) is None
 
 
-def test_apply_h5_job_result_clears_peak_datasource_for_different_replacement(
+def test_apply_h5_job_result_preserves_peak_series_for_different_replacement(
     qapplication: QApplication,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2495,3 +2495,311 @@ def test_signal_playhead_scrubbed_handler_updates_session_and_calls_scrub_previe
     assert reanchored == [None]
     assert synced_hints == ["scrub"]
     assert dirty_calls == []
+
+
+# ---------------------------------------------------------------------------
+# Requirements 1-8: must-fix behavior tests
+# ---------------------------------------------------------------------------
+
+
+def test_generate_appends_without_replacing_existing_series(
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Req 1: a second Generate appends a new series, existing series unchanged."""
+    from heatmap_peak_distance_resource import PeakSeriesResource
+    from sparse_iq_peak_distance_core import (
+        FramePeakMeasurement, STATUS_DETECTED, PEAK_EXTRACTION_METHOD_SUM_VELOCITY,
+        PeakDistanceExportResult, PeakDistanceMetadata,
+    )
+
+    window = HeatmapAlignmentWindow()
+    existing = PeakSeriesResource(
+        series_id="existing", display_name="first", provenance="generated",
+        measurements=(), color="#3b82f6", unsaved=False,
+    )
+    window._peak_series_list = [existing]
+
+    class _FakeDialog:
+        def exec(self):
+            return 1
+        algorithm_id = PEAK_EXTRACTION_METHOD_SUM_VELOCITY
+        threshold = 650.0
+        display_name = "second"
+
+    class _FakeH5Source:
+        class record:
+            results = [object()]
+            session_idx = 0; group_idx = 0; entry_idx = 0
+        path = Path("/tmp/x.h5")
+        subsweep_idx = 0
+
+    window.heatmap_source = _FakeH5Source()
+
+    fake_meta = PeakDistanceMetadata(
+        source_path="/tmp/x.h5", source_name="x.h5",
+        session_index=0, group_index=0, entry_index=0, sensor_id=1,
+        subsweep_index=0, source_frame_count=1, source_duration_s=0.1,
+        ticks_per_second=1000, threshold=650.0,
+        peak_extraction_method=PEAK_EXTRACTION_METHOD_SUM_VELOCITY,
+        zero_velocity_bin_index=3, zero_velocity_m_s=0.0,
+    )
+    fake_meas = (FramePeakMeasurement(0, 0, 0.0, None, STATUS_DETECTED, 1.2, 1.2, 700.0),)
+    fake_result = PeakDistanceExportResult(metadata=fake_meta, measurements=fake_meas)
+
+    monkeypatch.setattr("heatmap_alignment_gui.GeneratePeakSeriesDialog", lambda p: _FakeDialog())
+    monkeypatch.setattr("heatmap_alignment_gui.generate_peak_distances_from_heatmap_record", lambda *a, **kw: fake_result)
+    monkeypatch.setattr(window, "_refresh_signal_plot", lambda: None)
+    monkeypatch.setattr(window, "_update_heatmap_peak_selector", lambda: None)
+    monkeypatch.setattr(window, "_refresh_resources_ui", lambda: None)
+
+    window._generate_peak_series()
+
+    assert len(window._peak_series_list) == 2, "Generate must append, not replace"
+    assert window._peak_series_list[0].series_id == "existing"
+    assert window._peak_series_list[1].display_name == "second"
+    assert window._peak_series_list[1].unsaved is True
+
+
+def test_resource_summaries_emits_one_row_per_peak_series(qapplication: QApplication) -> None:
+    """Req 2: resource_summaries returns one ResourceSummary per PeakSeriesResource."""
+    from heatmap_peak_distance_resource import PeakSeriesResource
+    window = HeatmapAlignmentWindow()
+    s1 = PeakSeriesResource(series_id="id1", display_name="Alpha", provenance="generated",
+                            measurements=(), color="#3b82f6", unsaved=True)
+    s2 = PeakSeriesResource(series_id="id2", display_name="Beta", provenance="imported",
+                            measurements=(), color="#f59e0b", json_path=Path("/tmp/b.json"), unsaved=False)
+    window._peak_series_list = [s1, s2]
+    summaries = window.resource_summaries()
+    peak_rows = [s for s in summaries if s.kind == "radar_peak"]
+    assert len(peak_rows) == 2
+    assert peak_rows[0].series_id == "id1"
+    assert peak_rows[0].status_label == "Generated (unsaved)"
+    assert peak_rows[1].series_id == "id2"
+    assert peak_rows[1].status_label == ""
+
+
+def test_invoke_resource_action_save_targets_series_id(qapplication: QApplication) -> None:
+    """Req 2: save must use series_id not a global fallback."""
+    from heatmap_peak_distance_resource import PeakSeriesResource
+    window = HeatmapAlignmentWindow()
+    s1 = PeakSeriesResource(series_id="s1", display_name="A", provenance="generated",
+                            measurements=(), color="#3b82f6", unsaved=True)
+    s2 = PeakSeriesResource(series_id="s2", display_name="B", provenance="generated",
+                            measurements=(), color="#f59e0b", unsaved=True)
+    window._peak_series_list = [s1, s2]
+    saved: list[str] = []
+    window._save_peak_series = lambda sid: saved.append(sid)  # type: ignore
+    window.invoke_resource_action("radar_peak", "save", series_id="s2")
+    assert saved == ["s2"]
+
+
+def test_invoke_resource_action_unload_targets_series_id(qapplication: QApplication) -> None:
+    """Req 2: unload with series_id removes only the target."""
+    from heatmap_peak_distance_resource import PeakSeriesResource
+    window = HeatmapAlignmentWindow()
+    s1 = PeakSeriesResource(series_id="keep", display_name="keep", provenance="imported",
+                            measurements=(), color="#3b82f6")
+    s2 = PeakSeriesResource(series_id="remove", display_name="remove", provenance="imported",
+                            measurements=(), color="#f59e0b")
+    window._peak_series_list = [s1, s2]
+    window.invoke_resource_action("radar_peak", "unload", series_id="remove")
+    assert len(window._peak_series_list) == 1
+    assert window._peak_series_list[0].series_id == "keep"
+
+
+def test_refresh_signal_plot_passes_all_visible_series(qapplication: QApplication) -> None:
+    """Req 3: visible peak series all go to set_plotted_signals; invisible are excluded."""
+    from heatmap_peak_distance_resource import PeakSeriesResource
+    from sparse_iq_peak_distance_core import FramePeakMeasurement, STATUS_DETECTED
+    meas = (FramePeakMeasurement(0, 0, 0.0, None, STATUS_DETECTED, 1.2, 1.2, 700.0),)
+    window = HeatmapAlignmentWindow()
+    s_vis1 = PeakSeriesResource(series_id="v1", display_name="v0 slice", provenance="generated",
+                                measurements=meas, color="#3b82f6", visible=True)
+    s_vis2 = PeakSeriesResource(series_id="v2", display_name="sum v", provenance="generated",
+                                measurements=meas, color="#f59e0b", visible=True)
+    s_hidden = PeakSeriesResource(series_id="h1", display_name="hidden", provenance="generated",
+                                  measurements=meas, color="#ec4899", visible=False)
+    window._peak_series_list = [s_vis1, s_vis2, s_hidden]
+    captured: list = []
+    orig = window.signal_plot.set_plotted_signals
+    def _cap(**kw):
+        captured.append(kw)
+        orig(**kw)
+    window.signal_plot.set_plotted_signals = _cap  # type: ignore
+    window._refresh_signal_plot()
+    assert captured
+    psl = captured[0].get("peak_series_list", [])
+    assert len(psl) == 2
+    names = [n for n, _c, _s in psl]
+    assert "v0 slice" in names and "sum v" in names and "hidden" not in names
+
+
+def test_heatmap_peak_combo_exists(qapplication: QApplication) -> None:
+    """Req 4: _heatmap_peak_combo must exist in the main window layout."""
+    window = HeatmapAlignmentWindow()
+    assert hasattr(window, "_heatmap_peak_combo")
+    assert window._heatmap_peak_combo.count() >= 1
+    assert window._heatmap_peak_combo.itemData(0) is None
+
+
+def test_heatmap_peak_combo_lists_all_series(qapplication: QApplication) -> None:
+    """Req 4: selector shows None + one item per series."""
+    from heatmap_peak_distance_resource import PeakSeriesResource
+    window = HeatmapAlignmentWindow()
+    window._peak_series_list = [
+        PeakSeriesResource(series_id="a", display_name="A", provenance="generated", measurements=(), color="#3b82f6"),
+        PeakSeriesResource(series_id="b", display_name="B", provenance="imported", measurements=(), color="#f59e0b"),
+    ]
+    window._update_heatmap_peak_selector()
+    assert window._heatmap_peak_combo.count() == 3
+    assert window._heatmap_peak_combo.itemData(1) == "a"
+    assert window._heatmap_peak_combo.itemData(2) == "b"
+
+
+def test_heatmap_peak_combo_resets_to_none_when_selected_series_unloaded(qapplication: QApplication) -> None:
+    """Req 4: selector resets to None after the selected series is unloaded."""
+    from heatmap_peak_distance_resource import PeakSeriesResource
+    window = HeatmapAlignmentWindow()
+    s = PeakSeriesResource(series_id="s", display_name="s", provenance="generated", measurements=(), color="#3b82f6")
+    window._peak_series_list = [s]
+    window._heatmap_peak_selector_id = "s"
+    window._update_heatmap_peak_selector()
+    window._unload_peak_series("s", confirm=False)
+    assert window._heatmap_peak_selector_id is None
+    assert window._heatmap_peak_combo.currentData() is None
+
+
+def test_resources_window_has_generate_and_import_buttons(qapplication: QApplication) -> None:
+    """Req 2/8: Resources window must expose Generate Peak Series and Import Peak Series buttons."""
+    window = HeatmapAlignmentWindow()
+    window._show_resources_window()
+    rw = window._resources_window
+    assert hasattr(rw, "generate_peak_series_button")
+    assert hasattr(rw, "import_peak_series_button")
+
+
+def test_import_peak_series_from_path_appends(
+    qapplication: QApplication,
+    tmp_path: Path,
+) -> None:
+    """Req 5/6: _import_peak_series_from_path appends without replacing existing series."""
+    from heatmap_peak_distance_resource import PeakSeriesResource
+    from sparse_iq_peak_distance_core import (
+        PeakDistanceExportResult, PeakDistanceMetadata,
+        FramePeakMeasurement, STATUS_DETECTED, PEAK_EXTRACTION_METHOD_SUM_VELOCITY,
+        write_peak_distance_json,
+    )
+
+    meta = PeakDistanceMetadata(
+        source_path="/tmp/t.h5", source_name="t.h5",
+        session_index=0, group_index=0, entry_index=0, sensor_id=1,
+        subsweep_index=0, source_frame_count=1, source_duration_s=0.1,
+        ticks_per_second=1000, threshold=650.0,
+        peak_extraction_method=PEAK_EXTRACTION_METHOD_SUM_VELOCITY,
+        zero_velocity_bin_index=3, zero_velocity_m_s=0.0,
+    )
+    meas = (FramePeakMeasurement(0, 0, 0.0, None, STATUS_DETECTED, 1.2, 1.2, 700.0),)
+    result = PeakDistanceExportResult(metadata=meta, measurements=meas)
+    json_path = tmp_path / "peaks.json"
+    write_peak_distance_json(result, json_path)
+
+    window = HeatmapAlignmentWindow()
+    pre = PeakSeriesResource(series_id="pre", display_name="pre", provenance="imported",
+                             measurements=(), color="#3b82f6")
+    window._peak_series_list = [pre]
+
+    ok = window._import_peak_series_from_path(json_path, mark_dirty=False)
+
+    assert ok is True
+    assert len(window._peak_series_list) == 2, "Must append, not replace"
+    assert window._peak_series_list[0].series_id == "pre"
+    assert window._peak_series_list[1].json_path == json_path
+
+
+# ---------------------------------------------------------------------------
+# UI polish: Resources window refresh after peak series unload
+# ---------------------------------------------------------------------------
+
+
+def test_resources_window_row_removed_immediately_after_unload(
+    qapplication: QApplication,
+) -> None:
+    """Resources window table must lose the row immediately after _unload_peak_series.
+
+    This tests the fix for the stale-table bug: unload calls _refresh_resources_ui so
+    the row disappears without requiring close/reopen of the Resources window.
+    """
+    from heatmap_peak_distance_resource import PeakSeriesResource
+
+    window = HeatmapAlignmentWindow()
+    s1 = PeakSeriesResource(
+        series_id="row1", display_name="First", provenance="imported",
+        measurements=(), color="#3b82f6",
+    )
+    s2 = PeakSeriesResource(
+        series_id="row2", display_name="Second", provenance="imported",
+        measurements=(), color="#f59e0b",
+    )
+    window._peak_series_list = [s1, s2]
+
+    # Open the Resources window so it will receive refreshes.
+    window._show_resources_window()
+    rw = window._resources_window
+    assert rw is not None
+    # Sync the initial state into the table.
+    window._refresh_resources_ui()
+    peak_rows_before = [
+        rw.table.item(r, 1).text()
+        for r in range(rw.table.rowCount())
+        if rw._summaries[r].kind == "radar_peak" and rw._summaries[r].series_id
+    ]
+    assert "First" in peak_rows_before
+    assert "Second" in peak_rows_before
+
+    # Unload one series — _unload_peak_series must call _refresh_resources_ui().
+    window._unload_peak_series("row1", confirm=False)
+
+    peak_rows_after = [
+        rw.table.item(r, 1).text()
+        for r in range(rw.table.rowCount())
+        if rw._summaries[r].kind == "radar_peak" and rw._summaries[r].series_id
+    ]
+    assert "First" not in peak_rows_after, "Unloaded row must vanish from the table immediately"
+    assert "Second" in peak_rows_after, "Remaining row must still be present"
+
+
+def test_generate_button_disabled_on_peak_series_row(qapplication: QApplication) -> None:
+    """Generate button must be disabled when a peak series row is selected.
+
+    The footer already has a dedicated Generate Peak Series button; the per-row
+    Generate button would imply generation replaces the selected row, which is wrong.
+    """
+    from heatmap_peak_distance_resource import PeakSeriesResource
+
+    window = HeatmapAlignmentWindow()
+    s = PeakSeriesResource(
+        series_id="s1", display_name="A peaks", provenance="generated",
+        measurements=(), color="#3b82f6",
+    )
+    window._peak_series_list = [s]
+    window._show_resources_window()
+    rw = window._resources_window
+    assert rw is not None
+    window._refresh_resources_ui()
+
+    # Select the peak series row.
+    peak_row = next(
+        (r for r in range(rw.table.rowCount()) if rw._summaries[r].series_id == "s1"),
+        None,
+    )
+    assert peak_row is not None
+    rw._select_table_row(peak_row)
+    rw._update_details_for_selection()
+
+    assert not rw.generate_button.isEnabled(), (
+        "Generate button must be disabled for individual peak series rows"
+    )
+    assert not rw.replace_button.isEnabled(), (
+        "Replace button must be disabled for individual peak series rows"
+    )

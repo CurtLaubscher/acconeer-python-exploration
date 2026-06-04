@@ -620,49 +620,17 @@ class SignalPlotWidget(pg.PlotWidget):
         self.showGrid(x=True, y=True, alpha=0.2)
         self._view_settings = SignalPlotViewSettings()
         self._timeline_range_model: TimelineRangeModel | None = None
-        self._peak_series: PeakDistanceSignalSeries | None = None
         self._leg2_series: Leg2UltrasonicSignalSeries | None = None
-        self._peak_visible = False
         self._leg2_visible = False
         self._applying_view = False
         self._stance_patch_items: list[QtWidgets.QGraphicsItem] = []
-        h5_plot_color = derive_signal_plot_color(H5_TIMELINE_TRACK_COLOR_HEX)
+        # Multi-peak series: list of (display_name, detected_curve, candidate_curve)
+        self._peak_curve_groups: list[tuple[str, object, object]] = []
+        self._peak_series_data: list[tuple[str, PeakDistanceSignalSeries]] = []  # (name, series)
         leg2_plot_color = derive_signal_plot_color(LEG2_TIMELINE_TRACK_COLOR_HEX)
-        detected_pen, candidate_pen = _make_h5_signal_plot_pens(h5_plot_color)
         primary_pen, faded_pen = _make_leg2_signal_plot_pens(leg2_plot_color)
         self._leg2_plot_color = leg2_plot_color
         self._leg2_plot_alpha = SIGNAL_PLOT_PRIMARY_SEGMENT_ALPHA
-        self._candidate_curve = self.plot(
-            pen=candidate_pen,
-            connect="finite",
-            name="H5 peak (no detection)",
-        )
-        self._detected_curve = self.plot(
-            pen=detected_pen,
-            connect="finite",
-            name="H5 peak (detected)",
-        )
-        compare_color = "#c084fc"
-        compare_detected_pen = pg.mkPen(
-            compare_color,
-            width=2.0,
-            style=QtCore.Qt.PenStyle.DashLine,
-        )
-        compare_candidate_pen = pg.mkPen(
-            _plot_color_with_alpha(compare_color, SIGNAL_PLOT_NO_DETECTION_ALPHA),
-            width=2.0,
-            style=QtCore.Qt.PenStyle.DashLine,
-        )
-        self._compare_candidate_curve = self.plot(
-            pen=compare_candidate_pen,
-            connect="finite",
-            name="H5 peak v=0 slice (no detection)",
-        )
-        self._compare_detected_curve = self.plot(
-            pen=compare_detected_pen,
-            connect="finite",
-            name="H5 peak v=0 slice (detected)",
-        )
         self._leg2_faded_curve = self.plot(
             pen=faded_pen,
             connect="finite",
@@ -822,29 +790,43 @@ class SignalPlotWidget(pg.PlotWidget):
     def set_plotted_signals(
         self,
         *,
-        peak_series: PeakDistanceSignalSeries | None = None,
-        peak_visible: bool = False,
+        peak_series_list: list | None = None,
         leg2_series: Leg2UltrasonicSignalSeries | None = None,
         leg2_visible: bool = False,
         leg2_legend_name: str = "",
+        # Legacy single-series kwargs kept for test compatibility:
+        peak_series: PeakDistanceSignalSeries | None = None,
+        peak_visible: bool = False,
     ) -> None:
-        self._peak_series = peak_series
+        # Build a normalised list: [(display_name, color, series), ...]
+        # peak_series_list entries are (display_name, color_hex, PeakDistanceSignalSeries).
+        if peak_series_list is not None:
+            named_series = peak_series_list  # already [(name, color, series)]
+        elif peak_series is not None and peak_visible:
+            named_series = [("H5 peak", derive_signal_plot_color(H5_TIMELINE_TRACK_COLOR_HEX), peak_series)]
+        else:
+            named_series = []
+
+        self._peak_series_data = [(name, s) for name, _color, s in named_series]
         self._leg2_series = leg2_series
-        self._peak_visible = peak_visible and peak_series is not None
         self._leg2_visible = leg2_visible and leg2_series is not None
 
-        if self._peak_visible and peak_series is not None:
-            self._detected_curve.setData(
-                peak_series.detected_time_s,
-                peak_series.detected_distance_m,
-            )
-            self._candidate_curve.setData(
-                peak_series.candidate_time_s,
-                peak_series.candidate_distance_m,
-            )
-        else:
-            self._detected_curve.setData([], [])
-            self._candidate_curve.setData([], [])
+        # Remove stale dynamic peak curves from the plot item.
+        plot_item = self.getPlotItem()
+        for _name, det_curve, cand_curve in self._peak_curve_groups:
+            plot_item.removeItem(det_curve)
+            plot_item.removeItem(cand_curve)
+        self._peak_curve_groups = []
+
+        # Create fresh curve pairs for each visible series.
+        for display_name, color_hex, ps in named_series:
+            plot_color = derive_signal_plot_color(color_hex)
+            det_pen, cand_pen = _make_h5_signal_plot_pens(plot_color)
+            det_curve = self.plot(pen=det_pen, connect="finite", name=f"{display_name} (detected)")
+            cand_curve = self.plot(pen=cand_pen, connect="finite", name=f"{display_name} (no detection)")
+            det_curve.setData(ps.detected_time_s, ps.detected_distance_m)
+            cand_curve.setData(ps.candidate_time_s, ps.candidate_distance_m)
+            self._peak_curve_groups.append((display_name, det_curve, cand_curve))
 
         if self._leg2_visible and leg2_series is not None:
             self._leg2_primary_curve.setData(
@@ -873,9 +855,9 @@ class SignalPlotWidget(pg.PlotWidget):
         if legend is None:
             return
         legend.clear()
-        if self._peak_visible:
-            legend.addItem(self._detected_curve, "H5 peak (detected)")
-            legend.addItem(self._candidate_curve, "H5 peak (no detection)")
+        for display_name, det_curve, cand_curve in self._peak_curve_groups:
+            legend.addItem(det_curve, f"{display_name} (detected)")
+            legend.addItem(cand_curve, f"{display_name} (no detection)")
         if self._leg2_visible:
             legend.addItem(
                 self._leg2_primary_curve,
@@ -890,9 +872,7 @@ class SignalPlotWidget(pg.PlotWidget):
             stance_legend_item.setPen(pg.mkPen(None))
             stance_legend_item.setBrush(pg.mkBrush(patch_color))
             legend.addItem(stance_legend_item, "Stance phase")
-        legend.setVisible(
-            self._peak_visible or self._leg2_visible
-        )
+        legend.setVisible(bool(self._peak_curve_groups) or self._leg2_visible)
 
     def _clear_stance_patches(self) -> None:
         """Remove all stance phase patch items from the plot."""
@@ -1094,12 +1074,15 @@ class SignalPlotWidget(pg.PlotWidget):
             self._applying_view = False
 
     def _apply_y_auto_range(self) -> None:
-        if not self._peak_visible and not self._leg2_visible:
+        has_peak = bool(self._peak_series_data)
+        if not has_peak and not self._leg2_visible:
             return
         x_range, _ = self.getViewBox().viewRange()
-        if self._peak_visible and self._peak_series is not None:
+        if has_peak:
+            # Use first visible peak series for y-range computation (multi-series overlap).
+            first_ps = self._peak_series_data[0][1]
             y_range = visible_signal_y_range(
-                self._peak_series,
+                first_ps,
                 x_min_s=float(x_range[0]),
                 x_max_s=float(x_range[1]),
                 leg2_series=self._leg2_series if self._leg2_visible else None,
@@ -2952,6 +2935,16 @@ class ResourcesWindow(QtWidgets.QDialog):
         self.clear_all_button = QtWidgets.QPushButton("Clear All Resources...")
         self.clear_all_button.clicked.connect(self._main_window.clear_all_resources)
         bottom_row.addWidget(self.clear_all_button)
+        self.generate_peak_series_button = QtWidgets.QPushButton("&Generate Peak Series...")
+        self.generate_peak_series_button.clicked.connect(
+            lambda: self._main_window.invoke_resource_action("radar_peak", "generate")
+        )
+        bottom_row.addWidget(self.generate_peak_series_button)
+        self.import_peak_series_button = QtWidgets.QPushButton("&Import Peak Series...")
+        self.import_peak_series_button.clicked.connect(
+            lambda: self._main_window.invoke_resource_action("radar_peak", "load")
+        )
+        bottom_row.addWidget(self.import_peak_series_button)
         bottom_row.addStretch(1)
         self.close_button = QtWidgets.QPushButton("&Close")
         self.close_button.clicked.connect(self._dismiss)
@@ -2959,6 +2952,7 @@ class ResourcesWindow(QtWidgets.QDialog):
         layout.addLayout(bottom_row)
 
         self._summaries: tuple[ResourceSummary, ...] = ()
+        self._selected_series_id: str = ""  # Series id of the selected peak row (if any).
 
     def _dismiss(self) -> None:
         self.hide()
@@ -3000,6 +2994,7 @@ class ResourcesWindow(QtWidgets.QDialog):
             self.session_label.setText(f"Session: {session_path}")
         self._summaries = summaries
         selected_kind = self._selected_kind()
+        prev_series_id = self._selected_series_id
         self.table.blockSignals(True)
         try:
             self.table.setRowCount(len(summaries))
@@ -3032,12 +3027,21 @@ class ResourcesWindow(QtWidgets.QDialog):
                 self._configure_table_item(path_item)
                 self.table.setItem(row_index, 4, path_item)
 
-            if selected_kind is not None:
+            # Restore selection: prefer series_id match for peak rows; fall back to kind match.
+            restored = False
+            if prev_series_id:
                 for row_index, summary in enumerate(summaries):
-                    if summary.kind == selected_kind:
+                    if summary.series_id == prev_series_id:
                         self._select_table_row(row_index)
+                        restored = True
                         break
-            elif summaries:
+            if not restored and selected_kind is not None:
+                for row_index, summary in enumerate(summaries):
+                    if summary.kind == selected_kind and not summary.series_id:
+                        self._select_table_row(row_index)
+                        restored = True
+                        break
+            if not restored and summaries:
                 self._select_table_row(0)
         finally:
             self.table.blockSignals(False)
@@ -3055,6 +3059,7 @@ class ResourcesWindow(QtWidgets.QDialog):
 
     def _update_details_for_selection(self) -> None:
         summary = self._selected_summary()
+        self._selected_series_id = summary.series_id if summary is not None else ""
         if summary is None:
             self.details_identity_label.setText("")
             self.details_status_label.setText("")
@@ -3097,14 +3102,17 @@ class ResourcesWindow(QtWidgets.QDialog):
             self.details_path_widget.setVisible(False)
 
         action_set = set(summary.actions)
+        is_peak_series_row = bool(summary.series_id)
         self.load_button.setEnabled("load" in action_set)
-        self.replace_button.setEnabled("replace" in action_set)
+        # Replace is not supported for individual peak series rows; leave it disabled.
+        self.replace_button.setEnabled("replace" in action_set and not is_peak_series_row)
         self.unload_button.setEnabled("unload" in action_set)
         self.reload_button.setEnabled("reload" in action_set)
         self.reveal_button.setEnabled("reveal" in action_set)
         self.inspect_button.setEnabled("inspect" in action_set)
         self.cancel_button.setEnabled("cancel" in action_set)
-        self.generate_button.setEnabled("generate" in action_set)
+        # Generate is a global append action in the footer; disable it on individual series rows.
+        self.generate_button.setEnabled("generate" in action_set and not is_peak_series_row)
         self.save_peaks_button.setEnabled("save" in action_set)
         self.save_peaks_as_button.setEnabled("save_as" in action_set)
 
@@ -3112,7 +3120,7 @@ class ResourcesWindow(QtWidgets.QDialog):
         summary = self._selected_summary()
         if summary is None:
             return
-        self._main_window.invoke_resource_action(summary.kind, action)
+        self._main_window.invoke_resource_action(summary.kind, action, series_id=summary.series_id)
 
     def _show_row_context_menu(self, position: QtCore.QPoint) -> None:
         index = self.table.indexAt(position)
@@ -3126,8 +3134,8 @@ class ResourcesWindow(QtWidgets.QDialog):
         for action in summary.actions:
             menu_action = menu.addAction(RESOURCE_ACTION_LABELS[action])
             menu_action.triggered.connect(
-                lambda _checked=False, kind=summary.kind, chosen=action: (
-                    self._main_window.invoke_resource_action(kind, chosen)
+                lambda _checked=False, kind=summary.kind, chosen=action, sid=summary.series_id: (
+                    self._main_window.invoke_resource_action(kind, chosen, series_id=sid)
                 )
             )
         menu.exec(self.table.viewport().mapToGlobal(position))
@@ -3353,8 +3361,8 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.load_h5_action.triggered.connect(self._load_h5_recording)
         resources_menu.addAction(self.load_h5_action)
 
-        self.load_peak_action = QtGui.QAction("Load Radar Peak (&JSON)...", self)
-        self.load_peak_action.triggered.connect(self._import_peak_distance_json)
+        self.load_peak_action = QtGui.QAction("Import Peak Series (&JSON)...", self)
+        self.load_peak_action.triggered.connect(self._import_peak_series)
         resources_menu.addAction(self.load_peak_action)
 
         self.load_leg2_action = QtGui.QAction("Load &Leg2 MAT...", self)
@@ -3371,11 +3379,11 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.unload_h5_action.triggered.connect(self.unload_h5_recording)
         resources_menu.addAction(self.unload_h5_action)
 
-        self.unload_peak_action = QtGui.QAction("Clear Radar Peak (&JSON)", self)
-        self.unload_peak_action.triggered.connect(self._clear_peak_distance_datasource)
+        self.unload_peak_action = QtGui.QAction("&Unload Peak Series", self)
+        self.unload_peak_action.triggered.connect(self._unload_last_peak_series)
         resources_menu.addAction(self.unload_peak_action)
 
-        self.unload_leg2_action = QtGui.QAction("Clear &Leg2 MAT", self)
+        self.unload_leg2_action = QtGui.QAction("Unload &Leg2 MAT", self)
         self.unload_leg2_action.triggered.connect(self._clear_leg2_ultrasonic_datasource)
         resources_menu.addAction(self.unload_leg2_action)
 
@@ -3393,7 +3401,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         )
         resources_menu.addAction(self.reload_h5_action)
 
-        self.reload_peak_action = QtGui.QAction("Reload Radar Peak (&JSON)", self)
+        self.reload_peak_action = QtGui.QAction("Reload Peak &Series", self)
         self.reload_peak_action.triggered.connect(
             lambda: self.invoke_resource_action("radar_peak", "reload")
         )
@@ -3445,6 +3453,19 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         rendered_heatmap_color_row.addWidget(self.color_max_spin)
         rendered_heatmap_color_row.addStretch(1)
         rendered_heatmap_layout.addLayout(rendered_heatmap_color_row)
+        # Peak series marker selector.
+        rendered_heatmap_peak_row = QtWidgets.QHBoxLayout()
+        rendered_heatmap_peak_row.addWidget(QtWidgets.QLabel("Peak Marker:"))
+        self._heatmap_peak_combo = QtWidgets.QComboBox()
+        self._heatmap_peak_combo.addItem("None", None)
+        self._heatmap_peak_combo.setToolTip(
+            "Select which peak series to use for the rendered heatmap marker. "
+            "Independent of Signals plot visibility."
+        )
+        self._heatmap_peak_combo.currentIndexChanged.connect(self._on_heatmap_peak_combo_changed)
+        rendered_heatmap_peak_row.addWidget(self._heatmap_peak_combo)
+        rendered_heatmap_peak_row.addStretch(1)
+        rendered_heatmap_layout.addLayout(rendered_heatmap_peak_row)
         right_layout.addWidget(rendered_heatmap_group)
         preview_splitter.addWidget(camera_group)
         preview_splitter.addWidget(right_panel)
@@ -3845,7 +3866,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._set_resource_warnings("radar_peak", ())
         self._sync_previews(camera_access_hint="auto")
         self._refresh_resources_ui()
-        self.statusBar().showMessage("Cleared imported peak-distance datasource.")
+        self.statusBar().showMessage("Peak series cleared.")
 
     def _generate_peak_distances(self) -> None:
         if self.heatmap_source is None:
@@ -4114,6 +4135,14 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             self._peak_series_list.append(series)
             self._set_resource_reload_error("radar_peak", None)
             self.statusBar().showMessage(f"Reloaded peak-distance JSON: {json_path.name}")
+        # Restore heatmap-selected series from persisted heatmap_selected flag.
+        self._heatmap_peak_selector_id = None
+        for s in self._peak_series_list:
+            if s.heatmap_selected:
+                self._heatmap_peak_selector_id = s.series_id
+                break
+        self._update_heatmap_peak_selector()
+        self._refresh_signal_plot()
         self._refresh_resources_ui()
 
     # ------------------------------------------------------------------
@@ -4173,12 +4202,14 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             self.statusBar().showMessage(f"Generated peak series '{series.display_name}'.")
 
     def _import_peak_series(self) -> None:
-        """Open a file picker and import one or more peak-distance JSON files as series."""
-        from sparse_iq_peak_distance_core import load_peak_distance_json
+        """Open a file picker and import one or more peak-distance JSON files as new series.
 
+        Uses the full H5-aware validation path (import_peak_distance_json_for_heatmap)
+        to validate frame counts and metadata against the loaded H5 when present.
+        """
         filenames, _ = QtWidgets.QFileDialog.getOpenFileNames(
             self,
-            "Import peak-distance JSON",
+            "Import Peak Series",
             self._dialog_start_path("last_peak_json_path"),
             "Peak-distance JSON (*.json);;All files (*)",
         )
@@ -4189,14 +4220,20 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         imported_count = 0
         for filename in filenames:
             json_path = Path(filename)
+            if json_path.suffix.lower() == ".csv":
+                QtWidgets.QMessageBox.warning(self, "Import Peak Series", self._peak_csv_rejection_message())
+                continue
             try:
-                datasource = load_peak_distance_json(json_path)
-            except Exception as exc:
-                QtWidgets.QMessageBox.warning(
-                    self,
-                    "Import failed",
-                    f"Could not import '{json_path.name}':\n{exc}",
-                )
+                datasource, warnings = import_peak_distance_json_for_heatmap(json_path, self.heatmap_source)
+            except ValueError as exc:
+                if isinstance(exc, PeakDistanceJsonImportError):
+                    message = exc.user_message()
+                else:
+                    message = str(exc)
+                QtWidgets.QMessageBox.warning(self, "Import failed", message)
+                continue
+            except OSError as exc:
+                QtWidgets.QMessageBox.warning(self, "Import failed", str(exc))
                 continue
 
             display_name = default_imported_name(json_path, existing_names)
@@ -4210,18 +4247,70 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
                 color=assign_peak_series_color(self._peak_series_list),
                 json_path=json_path,
                 unsaved=False,
+                warnings=tuple(warnings),
             )
             self._peak_series_list.append(series)
             imported_count += 1
             self.settings.setValue("last_peak_json_path", str(json_path))
+            if warnings:
+                warning_text = "\n".join(f"- {w}" for w in warnings)
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "Import warnings",
+                    f"Imported '{json_path.name}' with warnings:\n{warning_text}",
+                )
 
         if imported_count > 0:
-            # Select the last imported series
             self._heatmap_peak_selector_id = self._peak_series_list[-1].series_id
             self._refresh_signal_plot()
             self._update_heatmap_peak_selector()
             self._refresh_resources_ui()
             self.statusBar().showMessage(f"Imported {imported_count} peak series.")
+        self._mark_session_dirty()
+
+    def _import_peak_series_from_path(self, json_path: Path, *, mark_dirty: bool = True) -> bool:
+        """Programmatic append of a peak series from a path (no dialog).
+
+        Used by startup args and tests. Returns True if the series was appended.
+        Uses full H5-aware validation when H5 is loaded.
+        """
+        if json_path.suffix.lower() == ".csv":
+            self.statusBar().showMessage(self._peak_csv_rejection_message())
+            return False
+        try:
+            datasource, warnings = import_peak_distance_json_for_heatmap(json_path, self.heatmap_source)
+        except (ValueError, OSError) as exc:
+            status_msg = getattr(exc, "primary_message", str(exc))
+            self.statusBar().showMessage(str(status_msg))
+            self._set_resource_reload_error("radar_peak", str(status_msg))
+            self._refresh_resources_ui()
+            return False
+
+        existing_names = [s.display_name for s in self._peak_series_list]
+        display_name = default_imported_name(json_path, existing_names)
+        series = PeakSeriesResource(
+            series_id=str(uuid.uuid4()),
+            display_name=display_name,
+            provenance="imported",
+            measurements=datasource.measurements,
+            metadata=datasource.metadata,
+            color=assign_peak_series_color(self._peak_series_list),
+            json_path=json_path,
+            unsaved=False,
+            warnings=tuple(warnings),
+        )
+        self._peak_series_list.append(series)
+        self._heatmap_peak_selector_id = series.series_id
+        self._set_resource_reload_error("radar_peak", None)
+        self._set_resource_warnings("radar_peak", tuple(warnings))
+        self._refresh_signal_plot()
+        self._update_heatmap_peak_selector()
+        self._refresh_resources_ui()
+        if mark_dirty:
+            self._mark_session_dirty()
+        self.settings.setValue("last_peak_json_path", str(json_path))
+        self.statusBar().showMessage(f"Imported peak series: {json_path.name}")
+        return True
 
     def _unload_peak_series(self, series_id: str, *, confirm: bool = True) -> None:
         series = next((s for s in self._peak_series_list if s.series_id == series_id), None)
@@ -4241,6 +4330,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             self._heatmap_peak_selector_id = None
         self._refresh_signal_plot()
         self._update_heatmap_peak_selector()
+        self._refresh_resources_ui()
         self._mark_session_dirty()
 
     def _save_peak_series(self, series_id: str) -> None:
@@ -4248,6 +4338,13 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         if series is None or not series.measurements:
             return
         if series.json_path:
+            if series.json_path.exists() and not self._confirm_action_dialog(
+                title="Overwrite peak series",
+                question=f"Overwrite '{series.json_path.name}'?",
+                informative="The existing file will be replaced.",
+                accept_label="Overwrite",
+            ):
+                return
             self._write_peak_series_to_path(series, series.json_path)
         else:
             self._save_peak_series_as(series_id)
@@ -4295,6 +4392,10 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._heatmap_peak_combo.setCurrentIndex(max(0, idx))
         self._heatmap_peak_combo.blockSignals(False)
 
+    def _on_heatmap_peak_combo_changed(self, _index: int) -> None:
+        self._heatmap_peak_selector_id = self._heatmap_peak_combo.currentData()
+        self._sync_previews(camera_access_hint="auto")
+
     def _active_peak_state(self):
         """Return measurements/metadata for the heatmap-selected peak series, or None."""
         if not self._peak_series_list:
@@ -4310,6 +4411,14 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
 
     def _any_peaks_unsaved(self) -> bool:
         return any(s.unsaved for s in self._peak_series_list)
+
+    def _unload_last_peak_series(self) -> None:
+        """Unload action from top-level menu: unload the selected series or the last one."""
+        target = self._active_peak_state()
+        if target is None and self._peak_series_list:
+            target = self._peak_series_list[-1]
+        if target is not None:
+            self._unload_peak_series(target.series_id)
 
     def _peak_overlay_for_frame(self, frame_idx: int) -> tuple[float, float] | None:
         peak_state = self._active_peak_state()
@@ -4377,7 +4486,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
                 "display_name": s.display_name,
                 "color": s.color,
                 "visible": s.visible,
-                "heatmap_selected": s.heatmap_selected,
+                "heatmap_selected": s.series_id == self._heatmap_peak_selector_id,
             }
             for s in self._peak_series_list
             if s.json_path is not None
@@ -4539,14 +4648,17 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         # h5 "keep" — nothing to do
 
         # Per-series peak reconciliation: unload series whose paths are no longer desired,
-        # load series that are desired but not yet loaded.
+        # load series that are desired but not yet loaded, and drop unsaved generated
+        # series that have no saved path (they cannot be represented in the session).
         paths_to_unload = loaded_peak_paths - peak_desired_paths
         paths_to_load = peak_desired_paths - loaded_peak_paths
-        if paths_to_unload:
-            self._peak_series_list = [
-                s for s in self._peak_series_list
-                if s.json_path is None or str(s.json_path) not in paths_to_unload
-            ]
+        # Always filter: drop pathless (unsaved generated) rows and any stale path rows.
+        self._peak_series_list = [
+            s for s in self._peak_series_list
+            if s.json_path is not None and str(s.json_path) not in paths_to_unload
+        ]
+        if self._heatmap_peak_selector_id not in {s.series_id for s in self._peak_series_list}:
+            self._heatmap_peak_selector_id = None
         if paths_to_load:
             if h5_action not in ("load",):
                 self._reload_peak_distance_datasource_from_session()
@@ -4710,8 +4822,10 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._rebuild_overlay_plot_renderer()
         self.settings.setValue("last_h5_path", str(payload.path))
         if not previous_path or previous_path == str(payload.path):
-            # Same H5 identity (initial load or keep): restore any persisted peak series.
-            self._reload_peak_distance_datasource_from_session()
+            # Same H5 identity (initial load or keep): restore persisted peak series only
+            # when there are no live series yet; preserves unsaved generated rows.
+            if not self._peak_series_list:
+                self._reload_peak_distance_datasource_from_session()
         # Different H5: preserve existing peak series as optional signal resources.
         # They remain valid signal data and the user can unload them individually.
         self._h5_replacement_backup = None
@@ -5685,11 +5799,12 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         return "Leg2 raw ultrasonic"
 
     def _refresh_signal_plot(self) -> None:
-        selected = self._active_peak_state()
-        peak_series = None
-        if selected is not None:
-            peak_series = build_peak_distance_signal_series(selected.measurements)
-        peak_visible = selected is not None
+        # Build list of (display_name, color_hex, PeakDistanceSignalSeries) for visible series.
+        peak_series_list = []
+        for ps in self._peak_series_list:
+            if ps.visible:
+                signal_series = build_peak_distance_signal_series(ps.measurements)
+                peak_series_list.append((ps.display_name, ps.color, signal_series))
         leg2_series = None
         if self.leg2_ultrasonic_datasource is not None:
             leg2_series = build_leg2_ultrasonic_signal_series(
@@ -5699,8 +5814,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             )
         leg2_visible = self.leg2_ultrasonic_datasource is not None
         self.signal_plot.set_plotted_signals(
-            peak_series=peak_series,
-            peak_visible=peak_visible,
+            peak_series_list=peak_series_list,
             leg2_series=leg2_series,
             leg2_visible=leg2_visible,
             leg2_legend_name=self._leg2_legend_name(),
@@ -5779,7 +5893,9 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         )
 
     def resource_summaries(self) -> tuple[ResourceSummary, ...]:
-        return build_alignment_resource_summaries(self.session, self._resource_runtime())
+        return build_alignment_resource_summaries(
+            self.session, self._resource_runtime(), peak_series=self._peak_series_list or None
+        )
 
     def _mark_session_dirty(self) -> None:
         if self._session_dirty_guard_depth > 0:
@@ -5920,6 +6036,11 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         summaries = self.resource_summaries()
         if self._resources_window is not None:
             self._resources_window.refresh(summaries, self._current_session_path)
+            # Update generate/import buttons in Resources window footer.
+            self._resources_window.generate_peak_series_button.setEnabled(
+                self.heatmap_source is not None
+            )
+            self._resources_window.import_peak_series_button.setEnabled(True)
 
         has_camera_path = bool(self.session.camera_track.path)
         has_h5_path = bool(self.session.heatmap_track.path)
@@ -5977,7 +6098,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         else:
             self._resource_load_warnings.pop(kind, None)
 
-    def invoke_resource_action(self, kind: ResourceKind, action: ResourceAction) -> None:
+    def invoke_resource_action(self, kind: ResourceKind, action: ResourceAction, *, series_id: str = "") -> None:
         if action == "cancel":
             if kind in ("camera", "radar_h5"):
                 if self._resource_job_manager.cancel_job(kind):
@@ -5985,15 +6106,25 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             return
         if action == "generate":
             if kind == "radar_peak":
-                self._generate_peak_distances()
+                self._generate_peak_series()
             return
         if action == "save":
             if kind == "radar_peak":
-                self._save_peaks()
+                target = (
+                    next((s for s in self._peak_series_list if s.series_id == series_id), None)
+                    if series_id else None
+                ) or self._active_peak_state() or next((s for s in self._peak_series_list if s.unsaved), None)
+                if target is not None:
+                    self._save_peak_series(target.series_id)
             return
         if action == "save_as":
             if kind == "radar_peak":
-                self._save_peaks_as()
+                target = (
+                    next((s for s in self._peak_series_list if s.series_id == series_id), None)
+                    if series_id else None
+                ) or self._active_peak_state() or (self._peak_series_list[-1] if self._peak_series_list else None)
+                if target is not None:
+                    self._save_peak_series_as(target.series_id)
             return
         if action == "load":
             if kind == "camera":
@@ -6001,12 +6132,12 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             elif kind == "radar_h5":
                 self._load_h5_recording()
             elif kind == "radar_peak":
-                self._import_peak_distance_json()
+                self._import_peak_series()
             elif kind == "leg2_mat":
                 self._import_leg2_mat()
             return
         if action == "replace":
-            self.invoke_resource_action(kind, "load")
+            self.invoke_resource_action(kind, "load", series_id=series_id)
             return
         if action == "unload":
             if kind == "camera":
@@ -6014,15 +6145,28 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             elif kind == "radar_h5":
                 self.unload_h5_recording()
             elif kind == "radar_peak":
-                self._clear_peak_distance_datasource()
+                target = (
+                    next((s for s in self._peak_series_list if s.series_id == series_id), None)
+                    if series_id else None
+                ) or self._active_peak_state() or (self._peak_series_list[-1] if self._peak_series_list else None)
+                if target is not None:
+                    self._unload_peak_series(target.series_id)
             elif kind == "leg2_mat":
                 self._clear_leg2_ultrasonic_datasource()
             return
         if action == "reload":
-            self._reload_resource(kind)
+            if kind == "radar_peak" and series_id:
+                self._reload_peak_series(series_id)
+            else:
+                self._reload_resource(kind)
             return
         if action == "reveal":
-            self._reveal_resource_path(kind)
+            if kind == "radar_peak" and series_id:
+                ps = next((s for s in self._peak_series_list if s.series_id == series_id), None)
+                if ps and ps.json_path:
+                    self._reveal_path(ps.json_path)
+            else:
+                self._reveal_resource_path(kind)
             return
         if action == "inspect":
             self._inspect_resource_messages(kind)
@@ -6055,15 +6199,47 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             self.load_h5_from_path(path)
         elif kind == "radar_peak":
             if self._any_peaks_unsaved() and not self._confirm_action_dialog(
-                title="Reload peaks",
-                question="Reload peak data from disk and discard unsaved changes?",
+                title="Reload peak series",
+                question="Reload saved peak series from disk?",
                 informative="Unsaved generated peak data will be lost.",
                 accept_label="Reload",
             ):
                 return
-            self.load_peak_distance_from_path(path, show_dialogs=True, require_heatmap=False)
+            # Reload all session-persisted peak series; drop generated unsaved rows.
+            self._reload_peak_distance_datasource_from_session()
         elif kind == "leg2_mat":
             self.load_leg2_mat_from_path(path, show_dialogs=True)
+
+    def _reload_peak_series(self, series_id: str) -> None:
+        """Reload a specific peak series from its saved JSON path with H5-aware validation."""
+        ps = next((s for s in self._peak_series_list if s.series_id == series_id), None)
+        if ps is None or ps.json_path is None:
+            return
+        if ps.unsaved and not self._confirm_action_dialog(
+            title="Reload peak series",
+            question=f"Reload '{ps.display_name}' from disk?",
+            informative="Unsaved generated data for this series will be lost.",
+            accept_label="Reload",
+        ):
+            return
+        try:
+            datasource, warnings = import_peak_distance_json_for_heatmap(ps.json_path, self.heatmap_source)
+        except (ValueError, OSError) as exc:
+            QtWidgets.QMessageBox.warning(self, "Reload failed", str(exc))
+            return
+        ps.measurements = datasource.measurements
+        ps.metadata = datasource.metadata
+        ps.unsaved = False
+        ps.warnings = tuple(warnings)
+        self._refresh_signal_plot()
+        self._refresh_resources_ui()
+
+    def _reveal_path(self, path: Path) -> None:
+        target = path if path.is_dir() else path.parent
+        if not target.exists():
+            QtWidgets.QMessageBox.warning(self, "Show in File Manager", f"Path does not exist:\n{path}")
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(target.resolve())))
 
     def _reveal_resource_path(self, kind: ResourceKind) -> None:
         path_text = self._resource_path_for_kind(kind)
@@ -6150,7 +6326,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             self,
             "Clear All Resources",
             (
-                "Unload Camera Video, Radar Raw (H5), Radar Peak (JSON), and Leg2 MAT "
+                "Unload Camera Video, Radar Raw (H5), all Peak Series, and Leg2 MAT "
                 f"from this workbench?{peaks_warning}\n\nThe current session path will be kept."
             ),
             QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
@@ -6417,7 +6593,7 @@ def main() -> None:
         def _load_session_on_start() -> None:
             window.load_session_from_path(session_path)
             if peaks_path is not None:
-                window.load_peak_distance_from_path(peaks_path, mark_dirty=False)
+                window._import_peak_series_from_path(peaks_path, mark_dirty=False)
             if mat_path is not None:
                 window.load_leg2_mat_from_path(mat_path, mark_dirty=False)
 
@@ -6429,7 +6605,7 @@ def main() -> None:
             if args.h5 is not None:
                 window.load_h5_from_path(args.h5, mark_dirty=False)
             if args.peaks is not None:
-                window.load_peak_distance_from_path(args.peaks, mark_dirty=False)
+                window._import_peak_series_from_path(args.peaks, mark_dirty=False)
             if args.mat is not None:
                 window.load_leg2_mat_from_path(args.mat, mark_dirty=False)
 

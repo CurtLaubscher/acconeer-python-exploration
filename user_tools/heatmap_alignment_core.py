@@ -2084,6 +2084,7 @@ class ResourceSummary:
     job_detail: str = ""
     job_cancellable: bool = False
     status_label: str = ""
+    series_id: str = ""  # Non-empty for peak series rows to enable row-scoped actions.
 
 
 @dataclass(frozen=True)
@@ -2247,6 +2248,7 @@ def _resource_actions(
 def build_alignment_resource_summaries(
     session: AlignmentSession,
     runtime: AlignmentResourceRuntime,
+    peak_series: list | None = None,
 ) -> tuple[ResourceSummary, ...]:
     """Build fixed-slot resource summaries for the Resources window."""
 
@@ -2367,37 +2369,74 @@ def build_alignment_resource_summaries(
     )
 
     peak_messages = _resource_messages("radar_peak", runtime)
-    peak_actions: list[ResourceAction] = []
-    if runtime.radar_h5_loaded:
-        peak_actions.append("generate")
-    if runtime.radar_peak_loaded:
-        if runtime.peaks_dirty:
-            peak_actions.append("save")
-        peak_actions.append("save_as")
-    peak_status_label = ""
-    peak_details = "No peak distances generated or loaded."
-    if runtime.radar_peak_loaded:
-        detected = runtime.peak_detected_count or 0
-        total = runtime.peak_measurement_count or 0
-        peak_details = f"{detected}/{total} detected frames"
-        if runtime.peaks_dirty:
-            peak_status_label = "Generated (unsaved)"
-            peak_details += " (unsaved)"
-    summaries.append(
-        ResourceSummary(
-            kind="radar_peak",
-            display_name="Radar Peak Distances",
-            role="Optional signal",
-            status="loaded" if runtime.radar_peak_loaded else "unloaded",
-            path="",
-            color_hex=None,
-            color_muted=not runtime.radar_peak_loaded,
-            details=peak_details,
-            messages=peak_messages,
-            actions=tuple(peak_actions),
-            status_label=peak_status_label,
+    if peak_series:
+        # Emit one ResourceSummary per peak series resource.
+        for ps in peak_series:
+            ps_actions: list[ResourceAction] = []
+            if ps.unsaved:
+                ps_actions.append("save")
+            ps_actions.extend(["save_as", "unload"])
+            if ps.json_path:
+                ps_actions.append("reload")
+                ps_actions.append("reveal")
+            ps_status_label = "Generated (unsaved)" if ps.unsaved else ""
+            detected = sum(1 for m in ps.measurements if getattr(m, "status", "") == "detected")
+            total = len(ps.measurements)
+            if ps.unsaved:
+                ps_details = f"{detected}/{total} detected frames (unsaved)"
+            elif ps.json_path:
+                ps_details = f"{detected}/{total} detected frames"
+            else:
+                ps_details = f"{detected}/{total} detected frames"
+            summaries.append(
+                ResourceSummary(
+                    kind="radar_peak",
+                    display_name=ps.display_name,
+                    role="Generated" if ps.provenance == "generated" else "Imported",
+                    status="loaded",
+                    path=str(ps.json_path) if ps.json_path else "",
+                    color_hex=ps.color,
+                    color_muted=False,
+                    details=ps_details,
+                    messages=tuple(ps.warnings) + (peak_messages or ()),
+                    actions=tuple(ps_actions),
+                    status_label=ps_status_label,
+                    series_id=ps.series_id,
+                )
+            )
+    else:
+        # Fallback: one aggregate row for tests and empty-list case.
+        peak_actions: list[ResourceAction] = []
+        if runtime.radar_h5_loaded:
+            peak_actions.append("generate")
+        if runtime.radar_peak_loaded:
+            if runtime.peaks_dirty:
+                peak_actions.append("save")
+            peak_actions.append("save_as")
+        peak_status_label = ""
+        peak_details = "No peak distances generated or loaded."
+        if runtime.radar_peak_loaded:
+            detected = runtime.peak_detected_count or 0
+            total = runtime.peak_measurement_count or 0
+            peak_details = f"{detected}/{total} detected frames"
+            if runtime.peaks_dirty:
+                peak_status_label = "Generated (unsaved)"
+                peak_details += " (unsaved)"
+        summaries.append(
+            ResourceSummary(
+                kind="radar_peak",
+                display_name="Radar Peak Distances",
+                role="Optional signal",
+                status="loaded" if runtime.radar_peak_loaded else "unloaded",
+                path="",
+                color_hex=None,
+                color_muted=not runtime.radar_peak_loaded,
+                details=peak_details,
+                messages=peak_messages,
+                actions=tuple(peak_actions),
+                status_label=peak_status_label,
+            )
         )
-    )
 
     leg2_path = session.leg2_ultrasonic_datasource.path
     leg2_messages = _resource_messages("leg2_mat", runtime)

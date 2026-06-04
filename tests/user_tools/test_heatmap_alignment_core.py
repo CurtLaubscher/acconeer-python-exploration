@@ -1897,3 +1897,34 @@ def test_desired_peak_identities_with_path():
     ids = desired_peak_identities(session)
     assert len(ids) == 1
     assert ids[0].path == "/a.json"
+
+
+# ---------------------------------------------------------------------------
+# Task 6.2 / finding #18 — unsaved generated series omitted from session JSON
+# ---------------------------------------------------------------------------
+
+
+def test_session_serialization_omits_unsaved_generated_series() -> None:
+    """peak_series in session JSON excludes entries with no path (unsaved generated rows)."""
+    session = AlignmentSession()
+    # One saved entry (has path) and one unsaved generated entry (no path).
+    session.peak_series = [
+        {"path": "/tmp/saved.json", "display_name": "saved", "color": "#3b82f6", "visible": True, "heatmap_selected": False},
+        {"path": "", "display_name": "generated unsaved", "color": "#f59e0b", "visible": True, "heatmap_selected": False},
+    ]
+    doc = session.to_json_dict()
+    persisted_series = doc.get("peak_series", [])
+    assert len(persisted_series) == 1, "Unsaved generated series (empty path) must be omitted"
+    assert persisted_series[0]["path"] == "/tmp/saved.json"
+
+
+def test_session_reload_does_not_restore_unsaved_generated_series() -> None:
+    """Reloading a session that had only unsaved generated rows restores nothing."""
+    session = AlignmentSession()
+    # Unsaved generated series have no path — to_json_dict omits them.
+    session.peak_series = [
+        {"path": "", "display_name": "generated", "color": "#3b82f6", "visible": True, "heatmap_selected": False},
+    ]
+    doc = session.to_json_dict()
+    reloaded = AlignmentSession.from_json_dict(doc)
+    assert reloaded.peak_series == []
