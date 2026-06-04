@@ -312,6 +312,9 @@ Follow-up after the Render panel is removed:
 
 Possible directions:
 - **Persist window layout:** remember main-window geometry, splitter sizes, and related dock/panel state across sessions (separate from alignment session JSON unless explicitly desired). Timeline visible-range persistence is already noted under Resources ideas.
+- **Reset workbench layout:** if splitter sizes, dock/panel state, or other app-local layout preferences become persistent, add an explicit action to restore the default workbench layout.
+- **Future dockable panes:** consider a richer Visual Studio-like pane model only if the workbench grows enough independent panels to justify draggable/dockable surfaces; keep the near-term layout simpler.
+- **Timeline scalability:** the near-term resizable Preview/Signals layout can keep Timeline fixed-height while the workbench has a small fixed set of timeline rows. Revisit Timeline as a stretchable, scrollable, or otherwise scalable panel when the tool supports a general number of timeline segments or resources.
 - **Audio playback:** play camera audio during preview when the source file contains an audio track (MVP explicitly omits audio today). Mute control and sync to `current_time_s`; do not block export if audio is unsupported.
 - **Camera video magnifier (loupe):** while dragging viewport corners on the letterboxed Camera Video panel, show a small zoomed patch under the cursor for fine placement without full-panel zoom (complements optional camera zoom/pan if that is added separately).
 
