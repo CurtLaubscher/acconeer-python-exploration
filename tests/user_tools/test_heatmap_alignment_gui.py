@@ -595,6 +595,51 @@ def test_render_panel_controls_moved_to_visualization_groups(
     assert "Signals" in _ancestor_group_titles(window.leg2_signal_kind_combo)
 
 
+def test_preview_and_signals_are_vertically_resizable(
+    qapplication: QApplication,
+) -> None:
+    window = HeatmapAlignmentWindow()
+    window.resize(900, 700)
+    window.show()
+    qapplication.processEvents()
+
+    vertical_splitter = window.preview_signals_splitter
+    horizontal_splitter = window.preview_splitter
+
+    assert vertical_splitter.orientation() == QtCore.Qt.Orientation.Vertical
+    assert vertical_splitter.childrenCollapsible() is False
+    assert vertical_splitter.count() == 2
+    assert vertical_splitter.widget(0) is horizontal_splitter
+    assert vertical_splitter.widget(1) is window.signal_plot.parentWidget()
+    assert vertical_splitter.sizes()[0] > vertical_splitter.sizes()[1]
+    assert "Signals" in _ancestor_group_titles(window.signal_plot)
+
+    assert horizontal_splitter.orientation() == QtCore.Qt.Orientation.Horizontal
+    assert horizontal_splitter.childrenCollapsible() is False
+    assert horizontal_splitter.parentWidget() is vertical_splitter
+    assert horizontal_splitter.widget(0).minimumHeight() > 0
+    assert horizontal_splitter.widget(1).minimumHeight() > 0
+    assert window.signal_plot.parentWidget().minimumHeight() > 0
+    vertical_splitter.setSizes([80, 560])
+    qapplication.processEvents()
+    assert vertical_splitter.sizes()[0] >= horizontal_splitter.widget(1).minimumHeight()
+    assert window.viewport_view.height() >= window.viewport_view.minimumHeight()
+    assert window.truth_view.height() >= window.truth_view.minimumHeight()
+
+    timeline_titles = [
+        group.title()
+        for group in window.findChildren(QtWidgets.QGroupBox)
+        if group.title() == "Timeline"
+    ]
+    assert timeline_titles == ["Timeline"]
+    timeline_group = next(
+        group for group in window.findChildren(QtWidgets.QGroupBox) if group.title() == "Timeline"
+    )
+    assert timeline_group.parentWidget() is not vertical_splitter
+    assert timeline_group.sizePolicy().verticalPolicy() == QtWidgets.QSizePolicy.Policy.Fixed
+    window.close()
+
+
 def test_color_min_max_spinboxes_step_by_100(qapplication: QApplication) -> None:
     window = HeatmapAlignmentWindow()
     assert window.color_min_spin.singleStep() == pytest.approx(100.0)

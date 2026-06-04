@@ -10,6 +10,7 @@ The immediate usability issue is signal readability in small windows. Timeline s
 - Let users vertically resize Preview and Signals in the main workbench.
 - Keep Timeline fixed-height and predictable for the current fixed-resource workflow.
 - Preserve the existing horizontal Preview splitter behavior.
+- Keep Preview pane minimums internally consistent so resizing cannot cause viewport/rendered-heatmap controls to overlap preview content.
 - Keep the change local to workbench layout behavior.
 
 **Non-Goals:**
@@ -29,8 +30,11 @@ Do not persist the new vertical splitter size in this change. The existing horiz
 
 Use sensible stretch factors and minimum sizes in implementation, but do not encode exact pixel values or ratios in the spec. Those values should be tuned during implementation based on how the workbench feels at realistic window sizes.
 
+Keep the viewport and rendered-heatmap preview widgets compact enough for the new vertical splitter, but clamp the overall Preview area before control rows overlap their preview content. This is not the broader render-control layout cleanup; it only prevents the new splitter from exposing the existing overlap bug during normal resizing.
+
 ## Risks / Trade-offs
 
 - Preview or Signals can become too small to use -> Set practical minimum sizes on the resizable panes and keep splitter children non-collapsible.
+- Preview controls can overlap content when the Preview area is over-compressed -> Use consistent child minimums and a Preview minimum that stops before overlap.
 - Users may expect layout choices to persist -> Defer persistence until all layout panes can be handled consistently, and keep the default allocation useful on each launch.
 - Timeline may eventually need more space for arbitrary resources -> Keep that future model out of scope and note it in `ideas.md` for a later Timeline scalability change.

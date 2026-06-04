@@ -7,6 +7,7 @@ The Signals plot can be hard to inspect when the heatmap alignment workbench win
 - Make the Preview and Signals areas vertically resizable in the main workbench.
 - Keep the Timeline at a fixed height for this version because the current workbench has a small fixed set of timeline rows.
 - Preserve the existing horizontal resize behavior between Camera Video and the viewport/rendered-heatmap preview column.
+- Keep the preview area from shrinking into a state where viewport or rendered-heatmap controls overlap their preview content.
 - Do not persist splitter positions in this change; layout persistence should be handled consistently in a future layout-preference pass.
 - Keep render-control layout cleanup, dockable panes, layout reset actions, and Timeline scalability outside this focused change.
 
