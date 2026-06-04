@@ -43,7 +43,7 @@ from heatmap_alignment_core import (  # noqa: E402
     desired_camera_identity,
     desired_h5_identity,
     desired_leg2_identity,
-    desired_peak_identity,
+    desired_peak_identities,
     elide_path_middle,
     build_peak_distance_signal_series,
     compute_xcorr_diagnostics,
@@ -152,7 +152,7 @@ def test_alignment_session_roundtrip(tmp_path: Path) -> None:
     assert loaded.viewport_visibility.gamma == pytest.approx(1.4)
 
 
-def test_alignment_session_roundtrip_with_peak_distance_datasource(tmp_path: Path) -> None:
+def test_alignment_session_roundtrip_with_peak_series(tmp_path: Path) -> None:
     camera_path = tmp_path / "camera.mp4"
     heatmap_path = tmp_path / "truth.h5"
     peak_json_path = tmp_path / "peaks.json"
@@ -163,16 +163,15 @@ def test_alignment_session_roundtrip_with_peak_distance_datasource(tmp_path: Pat
     session = AlignmentSession(
         camera_track=CameraTrack(path=str(camera_path), fps=30.0, duration_s=2.0, frame_count=60),
         heatmap_track=HeatmapTrack(path=str(heatmap_path), duration_s=2.0, fps=10.0),
-        peak_distance_datasource=PeakDistanceDatasourceSettings(
-            path=str(peak_json_path),
-        ),
+        peak_series=[{"path": str(peak_json_path), "display_name": "peaks", "color": "#3b82f6", "visible": True, "heatmap_selected": False}],
     )
 
     session_path = tmp_path / "alignment_with_peaks.json"
     save_alignment_session(session, session_path)
     loaded = load_alignment_session(session_path)
 
-    assert loaded.peak_distance_datasource.path == str(peak_json_path)
+    assert len(loaded.peak_series) == 1
+    assert loaded.peak_series[0]["path"] == str(peak_json_path)
 
 
 def test_alignment_session_roundtrip_with_signal_plot_view_settings(tmp_path: Path) -> None:
@@ -1541,9 +1540,9 @@ def test_desired_h5_identity_captures_all_indices() -> None:
     )
 
 
-def test_desired_peak_identity_returns_none_for_empty_path() -> None:
+def test_desired_peak_identities_returns_empty_for_empty_path() -> None:
     session = AlignmentSession()
-    assert desired_peak_identity(session) is None
+    assert desired_peak_identities(session) == []
 
 
 def test_desired_leg2_identity_returns_none_for_empty_path() -> None:
@@ -1738,9 +1737,9 @@ def test_alignment_session_v1_migration_strips_peak_visibility(tmp_path: Path) -
 
     loaded = load_alignment_session(session_path)
 
-    assert loaded.version == 2
-    assert loaded.peak_distance_datasource.path == str(peak_json_path)
-    assert not hasattr(loaded.peak_distance_datasource, "visible")
+    assert loaded.version == 3
+    assert len(loaded.peak_series) == 1
+    assert loaded.peak_series[0]["path"] == str(peak_json_path)
 
 
 def test_alignment_session_v1_migration_strips_leg2_visibility(tmp_path: Path) -> None:
@@ -1764,7 +1763,7 @@ def test_alignment_session_v1_migration_strips_leg2_visibility(tmp_path: Path) -
 
     loaded = load_alignment_session(session_path)
 
-    assert loaded.version == 2
+    assert loaded.version == 3
     assert loaded.leg2_ultrasonic_datasource.path == str(mat_path)
     assert not hasattr(loaded.leg2_ultrasonic_datasource, "visible")
 
@@ -1785,7 +1784,7 @@ def test_alignment_session_rejects_future_version(tmp_path: Path) -> None:
         load_alignment_session(session_path)
 
 
-def test_alignment_session_v2_save_omits_visibility_fields(tmp_path: Path) -> None:
+def test_alignment_session_v3_save_uses_peak_series(tmp_path: Path) -> None:
     camera_path = tmp_path / "camera.mp4"
     heatmap_path = tmp_path / "truth.h5"
     peak_json_path = tmp_path / "peaks.json"
@@ -1798,17 +1797,19 @@ def test_alignment_session_v2_save_omits_visibility_fields(tmp_path: Path) -> No
     session = AlignmentSession(
         camera_track=CameraTrack(path=str(camera_path), fps=30.0, duration_s=2.0, frame_count=60),
         heatmap_track=HeatmapTrack(path=str(heatmap_path), duration_s=2.0, fps=10.0),
-        peak_distance_datasource=PeakDistanceDatasourceSettings(path=str(peak_json_path)),
+        peak_series=[{"path": str(peak_json_path), "display_name": "peaks", "color": "#3b82f6", "visible": True, "heatmap_selected": False}],
         leg2_ultrasonic_datasource=Leg2UltrasonicDatasourceSettings(path=str(mat_path)),
     )
 
-    session_path = tmp_path / "alignment_v2.json"
+    session_path = tmp_path / "alignment_v3.json"
     save_alignment_session(session, session_path)
 
     raw = json.loads(session_path.read_text(encoding="utf-8"))
 
-    assert raw["version"] == 2
-    assert "visible" not in raw["peak_distance_datasource"]
+    assert raw["version"] == 3
+    assert "peak_series" in raw
+    assert len(raw["peak_series"]) == 1
+    assert raw["peak_series"][0]["path"] == str(peak_json_path)
     assert "visible" not in raw["leg2_ultrasonic_datasource"]
 
 
@@ -1831,7 +1832,7 @@ def test_alignment_session_v1_migration_preserves_preprocess_settings(tmp_path: 
 
     loaded = load_alignment_session(session_path)
 
-    assert loaded.version == 2
+    assert loaded.version == 3
     assert loaded.preprocess.blur_sigma == pytest.approx(1.5)
     assert loaded.preprocess.downscale_factor == pytest.approx(2.0)
     assert loaded.preprocess.lag_window_s == pytest.approx(4.0)
@@ -1851,3 +1852,48 @@ def test_peak_distance_datasource_has_no_visibility_field() -> None:
 def test_leg2_ultrasonic_datasource_settings_has_no_visibility_field() -> None:
     settings = Leg2UltrasonicDatasourceSettings()
     assert not hasattr(settings, "visible")
+
+
+# ---------------------------------------------------------------------------
+# add-multi-peak-series: session v3 and desired_peak_identities
+# ---------------------------------------------------------------------------
+
+def test_session_version_is_3():
+    from heatmap_alignment_core import SESSION_VERSION
+    assert SESSION_VERSION == 3
+
+def test_v2_to_v3_migration_with_peak_path():
+    from heatmap_alignment_core import AlignmentSession
+    v2_payload = {
+        "version": 2,
+        "camera_track": {"path": "", "offset_s": 0.0},
+        "heatmap_track": {"path": "", "session_index": 0, "group_index": 0, "entry_index": 0, "subsweep_index": 0, "color_min": None, "color_max": None},
+        "peak_distance_datasource": {"path": "/some/peaks.json"},
+    }
+    session = AlignmentSession.from_json_dict(v2_payload)
+    assert len(session.peak_series) == 1
+    assert session.peak_series[0]["path"] == "/some/peaks.json"
+
+def test_v2_to_v3_migration_no_peak():
+    from heatmap_alignment_core import AlignmentSession
+    v2_payload = {
+        "version": 2,
+        "camera_track": {"path": "", "offset_s": 0.0},
+        "heatmap_track": {"path": "", "session_index": 0, "group_index": 0, "entry_index": 0, "subsweep_index": 0, "color_min": None, "color_max": None},
+        "peak_distance_datasource": {"path": ""},
+    }
+    session = AlignmentSession.from_json_dict(v2_payload)
+    assert session.peak_series == []
+
+def test_desired_peak_identities_empty():
+    from heatmap_alignment_core import AlignmentSession, desired_peak_identities
+    session = AlignmentSession()
+    assert desired_peak_identities(session) == []
+
+def test_desired_peak_identities_with_path():
+    from heatmap_alignment_core import AlignmentSession, desired_peak_identities
+    session = AlignmentSession()
+    session.peak_series = [{"path": "/a.json", "display_name": "a", "color": "#fff", "visible": True, "heatmap_selected": False}]
+    ids = desired_peak_identities(session)
+    assert len(ids) == 1
+    assert ids[0].path == "/a.json"

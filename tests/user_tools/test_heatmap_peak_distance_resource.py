@@ -359,7 +359,7 @@ class TestGeneratePeakDistancesFromHeatmapRecord:
 
         captured: dict = {}
 
-        def fake_analyze(heatmap_record, *, h5_path, subsweep_idx, frame_indices, threshold):
+        def fake_analyze(heatmap_record, *, h5_path, subsweep_idx, frame_indices, threshold, peak_extraction_method=None):
             captured["frame_indices"] = frame_indices
             captured["threshold"] = threshold
             captured["h5_path"] = h5_path
@@ -398,7 +398,7 @@ class TestGeneratePeakDistancesFromHeatmapRecord:
 
         captured: dict = {}
 
-        def fake_analyze(heatmap_record, *, h5_path, subsweep_idx, frame_indices, threshold):
+        def fake_analyze(heatmap_record, *, h5_path, subsweep_idx, frame_indices, threshold, peak_extraction_method=None):
             captured["threshold"] = threshold
             return _make_export_result()
 
@@ -415,3 +415,139 @@ class TestGeneratePeakDistancesFromHeatmapRecord:
         )
 
         assert captured["threshold"] == 999.0
+
+
+# ---------------------------------------------------------------------------
+# add-multi-peak-series: PeakSeriesResource and helpers
+# ---------------------------------------------------------------------------
+
+class TestPeakSeriesResource:
+    def test_dataclass_defaults(self):
+        from heatmap_peak_distance_resource import PeakSeriesResource
+        s = PeakSeriesResource(
+            series_id="abc", display_name="test", provenance="generated",
+            measurements=(), color="#3b82f6"
+        )
+        assert s.series_id == "abc"
+        assert s.visible is True
+        assert s.unsaved is False
+        assert s.json_path is None
+        assert s.algorithm_id is None
+
+    def test_assign_color_empty_list(self):
+        from heatmap_peak_distance_resource import PeakSeriesResource, PEAK_SERIES_PALETTE, assign_peak_series_color
+        assert assign_peak_series_color([]) == PEAK_SERIES_PALETTE[0]
+
+    def test_assign_color_skips_used(self):
+        from heatmap_peak_distance_resource import PeakSeriesResource, PEAK_SERIES_PALETTE, assign_peak_series_color
+        s1 = PeakSeriesResource(series_id="1", display_name="a", provenance="generated", measurements=(), color=PEAK_SERIES_PALETTE[0])
+        assert assign_peak_series_color([s1]) == PEAK_SERIES_PALETTE[1]
+
+    def test_default_generated_name_sum_velocity(self):
+        from heatmap_peak_distance_resource import default_generated_name
+        name = default_generated_name("sum_velocity", 650.0)
+        assert "sum v" in name
+        assert "650" in name
+
+    def test_default_generated_name_zero_velocity_slice(self):
+        from heatmap_peak_distance_resource import default_generated_name
+        name = default_generated_name("zero_velocity_slice", 650.0)
+        assert "v0 slice" in name
+        assert "650" in name
+
+    def test_default_imported_name_basic(self, tmp_path):
+        from heatmap_peak_distance_resource import default_imported_name
+        p = tmp_path / "my_peaks.json"
+        assert default_imported_name(p, []) == "my_peaks"
+
+    def test_default_imported_name_conflict(self, tmp_path):
+        from heatmap_peak_distance_resource import default_imported_name
+        p = tmp_path / "my_peaks.json"
+        name = default_imported_name(p, ["my_peaks"])
+        assert name != "my_peaks"
+        assert "my_peaks" in name
+
+    def test_assign_color_wraps_around_palette(self):
+        """When all palette colors are used, assignment wraps back to first."""
+        from heatmap_peak_distance_resource import PeakSeriesResource, PEAK_SERIES_PALETTE, assign_peak_series_color
+        existing = [
+            PeakSeriesResource(
+                series_id=str(i), display_name=f"s{i}", provenance="generated",
+                measurements=(), color=PEAK_SERIES_PALETTE[i % len(PEAK_SERIES_PALETTE)]
+            )
+            for i in range(len(PEAK_SERIES_PALETTE))
+        ]
+        color = assign_peak_series_color(existing)
+        assert color == PEAK_SERIES_PALETTE[0]
+
+    def test_palette_excludes_h5_green(self):
+        """H5 green is not in the comparison palette."""
+        from heatmap_peak_distance_resource import PEAK_SERIES_PALETTE
+        assert "#22c55e" not in PEAK_SERIES_PALETTE
+
+    def test_default_generated_name_threshold_integer_display(self):
+        """Threshold is shown as integer when it is a whole number."""
+        from heatmap_peak_distance_resource import default_generated_name
+        name = default_generated_name("sum_velocity", 650.0)
+        assert "650" in name
+        assert "650.0" not in name  # should not show decimal for whole number
+
+
+# ---------------------------------------------------------------------------
+# Task 6.3 – Resource summary tests for multi-peak-series behavior
+# ---------------------------------------------------------------------------
+
+
+def test_peak_series_resource_color_assignment_is_stable():
+    """assign_peak_series_color returns palette colors deterministically."""
+    from heatmap_peak_distance_resource import PeakSeriesResource, PEAK_SERIES_PALETTE, assign_peak_series_color
+    c1 = assign_peak_series_color([])
+    s1 = PeakSeriesResource(series_id="1", display_name="a", provenance="generated", measurements=(), color=c1)
+    c2 = assign_peak_series_color([s1])
+    assert c1 != c2
+    assert c1 == PEAK_SERIES_PALETTE[0]
+    assert c2 == PEAK_SERIES_PALETTE[1]
+
+
+def test_peak_series_unsaved_flag_per_series():
+    """Unsaved state is tracked independently per series."""
+    from heatmap_peak_distance_resource import PeakSeriesResource
+    s1 = PeakSeriesResource(series_id="1", display_name="a", provenance="generated", measurements=(), color="#3b82f6", unsaved=True)
+    s2 = PeakSeriesResource(series_id="2", display_name="b", provenance="imported", measurements=(), color="#f59e0b", unsaved=False)
+    assert s1.unsaved is True
+    assert s2.unsaved is False
+    assert any(s.unsaved for s in [s1, s2])
+    assert not all(s.unsaved for s in [s1, s2])
+
+
+def test_radar_peak_summary_generate_action_requires_h5():
+    """'generate' action only appears when H5 is loaded."""
+    peak_no_h5 = _peak_summary(AlignmentSession(), AlignmentResourceRuntime(
+        radar_h5_loaded=False, radar_peak_loaded=False
+    ))
+    peak_with_h5 = _peak_summary(AlignmentSession(), AlignmentResourceRuntime(
+        radar_h5_loaded=True, radar_peak_loaded=False
+    ))
+    assert "generate" not in peak_no_h5.actions
+    assert "generate" in peak_with_h5.actions
+
+
+def test_radar_peak_summary_multiple_statuses_no_regression():
+    """build_alignment_resource_summaries handles loaded+dirty and loaded+clean correctly."""
+    # Loaded + clean (save should not appear; save_as should)
+    clean = _peak_summary(AlignmentSession(), AlignmentResourceRuntime(
+        radar_peak_loaded=True, peaks_dirty=False,
+        peak_detected_count=5, peak_measurement_count=10,
+    ))
+    assert "save" not in clean.actions
+    assert "save_as" in clean.actions
+    assert clean.status_label == ""  # no unsaved label when clean
+
+    # Loaded + dirty (both save and save_as appear; status_label set)
+    dirty = _peak_summary(AlignmentSession(), AlignmentResourceRuntime(
+        radar_peak_loaded=True, peaks_dirty=True,
+        peak_detected_count=5, peak_measurement_count=10,
+    ))
+    assert "save" in dirty.actions
+    assert "save_as" in dirty.actions
+    assert dirty.status_label == "Generated (unsaved)"

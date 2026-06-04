@@ -250,6 +250,12 @@ def main() -> None:
         default=DEFAULT_PEAK_THRESHOLD,
         help=f"Peak strength threshold. Defaults to {DEFAULT_PEAK_THRESHOLD:g}.",
     )
+    parser.add_argument(
+        "--method",
+        choices=("sum_velocity", "zero_velocity_slice"),
+        default="sum_velocity",
+        help="Peak extraction method. Defaults to sum_velocity.",
+    )
     parser.add_argument("--max-frames", type=int, default=None, help="Limit exported frames")
     parser.add_argument("--every-n", type=int, default=1, help="Export every Nth frame")
     args = parser.parse_args()
@@ -288,6 +294,7 @@ def main() -> None:
                 threshold=args.threshold,
                 every_n=max(args.every_n, 1),
                 max_frames=args.max_frames,
+                peak_extraction_method=args.method,
             )
             result = export_peak_distances(config)
             if export_format == "json":

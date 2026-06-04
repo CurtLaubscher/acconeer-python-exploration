@@ -202,7 +202,7 @@ def test_load_peak_distance_json_defaults_legacy_peak_extraction_method(tmp_path
     output_path.write_text(json.dumps(document), encoding="utf-8")
 
     loaded = load_peak_distance_json(output_path)
-    assert loaded.metadata.peak_extraction_method == PEAK_EXTRACTION_METHOD_ZERO_VELOCITY_SLICE
+    assert loaded.metadata.peak_extraction_method == PEAK_EXTRACTION_METHOD_SUM_VELOCITY
 
 
 def test_reduced_csv_has_only_measurement_columns(tmp_path: Path) -> None:
@@ -299,3 +299,25 @@ def test_load_peak_distance_json_reports_malformed_json_with_user_oriented_messa
 def test_reduced_measurements_to_dataframe_uses_stable_column_order() -> None:
     frame = reduced_measurements_to_dataframe(_sample_export_result())
     assert list(frame.columns) == list(REDUCED_PEAK_DISTANCE_CSV_COLUMNS)
+
+
+# ---------------------------------------------------------------------------
+# add-multi-peak-series: algorithm label constants and config field
+# ---------------------------------------------------------------------------
+
+def test_algorithm_label_constants():
+    from sparse_iq_peak_distance_core import ALGORITHM_LABEL_SUM_VELOCITY, ALGORITHM_LABEL_ZERO_VELOCITY_SLICE
+    assert ALGORITHM_LABEL_SUM_VELOCITY == "sum v"
+    assert ALGORITHM_LABEL_ZERO_VELOCITY_SLICE == "v0 slice"
+
+def test_peak_algorithm_registry():
+    from sparse_iq_peak_distance_core import PEAK_ALGORITHM_REGISTRY, PEAK_EXTRACTION_METHOD_SUM_VELOCITY, PEAK_EXTRACTION_METHOD_ZERO_VELOCITY_SLICE
+    assert PEAK_EXTRACTION_METHOD_SUM_VELOCITY in PEAK_ALGORITHM_REGISTRY
+    assert PEAK_EXTRACTION_METHOD_ZERO_VELOCITY_SLICE in PEAK_ALGORITHM_REGISTRY
+
+def test_export_config_default_method():
+    from sparse_iq_peak_distance_core import PeakDistanceExportConfig, PEAK_EXTRACTION_METHOD_SUM_VELOCITY
+    config = PeakDistanceExportConfig(
+        h5_path=Path("x.h5"), session_idx=0, group_idx=0, entry_idx=0, subsweep_idx=0
+    )
+    assert config.peak_extraction_method == PEAK_EXTRACTION_METHOD_SUM_VELOCITY
