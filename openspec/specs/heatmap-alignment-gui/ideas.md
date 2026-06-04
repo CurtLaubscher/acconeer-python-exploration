@@ -45,6 +45,7 @@ Possible directions:
 - Flicker comparison between the rectified viewport and rendered H5 heatmap in the same panel.
 - Opacity blend (onion skin): superimpose the rectified viewport over the rendered heatmap (or vice versa) with a user-controlled alpha slider so structure and color can be compared in one place without rapid flicker. Useful for judging alignment and color match; distinct from flicker mode and from perspective correction.
 - Matched-scale comparison: ensure the rectified viewport and rendered heatmap previews use a consistent content scale for judgment (e.g. comparable distance extent per screen pixel, or aligned pixel mapping when overlaying), not only the same widget aspect ratio. Without matched scale, side-by-side panels can look plausible in the center but misaligned toward the edges even when the quadrilateral is correct. This is about display scaling of already-rectified content, not fixing lens perspective distortion in the camera frame.
+- Equal-height comparison: when viewport and rendered heatmap previews are stacked, consider keeping their image areas the same height so visual comparison stays balanced even when their control rows have different heights. This is separate from matched-scale content mapping and may fit better with a broader render/control layout cleanup.
 - Sample-based calibration where the user marks low/background, mid, and high colors from the camera-captured heatmap.
 - Better preset defaults for the existing low/high/gamma controls.
 - Keep raw/enhanced toggling fast so transforms remain a comparison aid rather than hidden truth.
@@ -110,6 +111,7 @@ Possible directions:
 - Avoid rebuilding or refreshing signal plot data on current-time-only updates; moving the current-time indicator should be enough unless plotted data or x/y range state changed.
 - Consider a fast interactive preview path plus a higher-quality settled path, similar to the source-resolution viewport preview direction.
 - Bug: changing the Leg2 ultrasonic signal kind between raw and filtered currently makes the viewport drop to low quality and then return to high quality. Viewport quality invalidation should only be triggered by changes that affect the camera/viewport/heatmap preview; choosing which ultrasonic signal to plot in Signals should not invalidate or refresh viewport quality.
+- Bug: resizing splitter handles can sometimes make the viewport preview refresh, drop to low quality, or otherwise behave like viewport-relevant state changed. Layout-only resizing should not invalidate viewport quality or trigger unnecessary source-resolution viewport work unless the displayed preview size genuinely requires a repaint.
 - Review discrete H5 frame selection semantics for current-time mapping. Users likely expect a nearest-frame relationship: for H5 frame timestamp `t` and frame interval `dt`, the heatmap for that frame should be shown when the playhead is within roughly `t - dt / 2` to `t + dt / 2`. If the current implementation effectively floors to the nearest frame at or before the playhead, that can make the rendered heatmap feel one frame behind the H5 peak plot.
 - Preserve the simple H5-fixed, camera-draggable model unless a broader timeline model is explicitly needed.
 - Move toward a neutral/global timeline reference where H5 has its own offset instead of being the implicit zero-time ground truth. H5 probably should become an offset-bearing track like the other sources so the timeline model does not privilege one loaded resource as the permanent coordinate origin.
@@ -312,6 +314,9 @@ Follow-up after the Render panel is removed:
 
 Possible directions:
 - **Persist window layout:** remember main-window geometry, splitter sizes, and related dock/panel state across sessions (separate from alignment session JSON unless explicitly desired). Timeline visible-range persistence is already noted under Resources ideas.
+- **Reset workbench layout:** if splitter sizes, dock/panel state, or other app-local layout preferences become persistent, add an explicit action to restore the default workbench layout.
+- **Future dockable panes:** consider a richer Visual Studio-like pane model only if the workbench grows enough independent panels to justify draggable/dockable surfaces; keep the near-term layout simpler.
+- **Timeline scalability:** the near-term resizable Preview/Signals layout can keep Timeline fixed-height while the workbench has a small fixed set of timeline rows. Revisit Timeline as a stretchable, scrollable, or otherwise scalable panel when the tool supports a general number of timeline segments or resources.
 - **Audio playback:** play camera audio during preview when the source file contains an audio track (MVP explicitly omits audio today). Mute control and sync to `current_time_s`; do not block export if audio is unsupported.
 - **Camera video magnifier (loupe):** while dragging viewport corners on the letterboxed Camera Video panel, show a small zoomed patch under the cursor for fine placement without full-panel zoom (complements optional camera zoom/pan if that is added separately).
 

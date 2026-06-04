@@ -3417,11 +3417,22 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         central = QtWidgets.QWidget(self)
         layout = QtWidgets.QVBoxLayout(central)
 
-        preview_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
+        self.preview_signals_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
+        self.preview_signals_splitter.setObjectName("preview_signals_splitter")
+        self.preview_signals_splitter.setChildrenCollapsible(False)
+
+        self.preview_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
+        self.preview_splitter.setObjectName("preview_splitter")
         self.camera_view = CornerEditorWidget()
+        self.camera_view.setMinimumSize(100, 40)
         self.viewport_view = ViewportEditorWidget("Viewport")
+        self.viewport_view.setMinimumSize(100, 40)
         self.truth_view = ImagePreview("Rendered Heatmap")
+        self.truth_view.setMinimumSize(100, 40)
         camera_group = self._wrap_group("Camera Video", self.camera_view)
+        camera_group.setMinimumHeight(
+            self._stacked_layout_minimum_height(camera_group.layout())
+        )
         viewport_group = QtWidgets.QGroupBox("Viewport")
         viewport_layout = QtWidgets.QVBoxLayout(viewport_group)
         viewport_layout.addWidget(self.viewport_view)
@@ -3436,6 +3447,11 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         rendered_heatmap_group = QtWidgets.QGroupBox("Rendered Heatmap")
         rendered_heatmap_layout = QtWidgets.QVBoxLayout(rendered_heatmap_group)
         rendered_heatmap_layout.addWidget(self.truth_view)
+        self.rendered_heatmap_controls_widget = QtWidgets.QWidget()
+        rendered_heatmap_controls_layout = QtWidgets.QVBoxLayout(
+            self.rendered_heatmap_controls_widget
+        )
+        rendered_heatmap_controls_layout.setContentsMargins(0, 0, 0, 0)
         rendered_heatmap_color_row = QtWidgets.QHBoxLayout()
         self.color_min_spin = QtWidgets.QDoubleSpinBox()
         self.color_min_spin.setRange(0.0, 1_000_000.0)
@@ -3452,7 +3468,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         rendered_heatmap_color_row.addWidget(QtWidgets.QLabel("Color Max"))
         rendered_heatmap_color_row.addWidget(self.color_max_spin)
         rendered_heatmap_color_row.addStretch(1)
-        rendered_heatmap_layout.addLayout(rendered_heatmap_color_row)
+        rendered_heatmap_controls_layout.addLayout(rendered_heatmap_color_row)
         # Peak series marker selector.
         rendered_heatmap_peak_row = QtWidgets.QHBoxLayout()
         rendered_heatmap_peak_row.addWidget(QtWidgets.QLabel("Peak Marker:"))
@@ -3465,16 +3481,17 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._heatmap_peak_combo.currentIndexChanged.connect(self._on_heatmap_peak_combo_changed)
         rendered_heatmap_peak_row.addWidget(self._heatmap_peak_combo)
         rendered_heatmap_peak_row.addStretch(1)
-        rendered_heatmap_layout.addLayout(rendered_heatmap_peak_row)
+        rendered_heatmap_controls_layout.addLayout(rendered_heatmap_peak_row)
+        rendered_heatmap_layout.addWidget(self.rendered_heatmap_controls_widget)
         right_layout.addWidget(rendered_heatmap_group)
-        preview_splitter.addWidget(camera_group)
-        preview_splitter.addWidget(right_panel)
-        preview_splitter.setChildrenCollapsible(False)
-        preview_splitter.setStretchFactor(0, 3)
-        preview_splitter.setStretchFactor(1, 2)
-        layout.addWidget(preview_splitter, stretch=1)
+        self.preview_splitter.addWidget(camera_group)
+        self.preview_splitter.addWidget(right_panel)
+        self.preview_splitter.setChildrenCollapsible(False)
+        self.preview_splitter.setStretchFactor(0, 3)
+        self.preview_splitter.setStretchFactor(1, 2)
 
         signals_group = QtWidgets.QGroupBox("Signals")
+        signals_group.setMinimumHeight(200)
         signals_layout = QtWidgets.QVBoxLayout(signals_group)
         signals_layout.setContentsMargins(9, 9, 9, 9)
         signals_controls_row = QtWidgets.QHBoxLayout()
@@ -3487,9 +3504,17 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.signal_plot = SignalPlotWidget()
         self.signal_plot.setMinimumHeight(160)
         signals_layout.addWidget(self.signal_plot)
-        layout.addWidget(signals_group)
+        self.preview_signals_splitter.addWidget(self.preview_splitter)
+        self.preview_signals_splitter.addWidget(signals_group)
+        self.preview_signals_splitter.setStretchFactor(0, 3)
+        self.preview_signals_splitter.setStretchFactor(1, 2)
+        self.preview_signals_splitter.setSizes([360, 240])
+        layout.addWidget(self.preview_signals_splitter, stretch=1)
 
         timeline_group = QtWidgets.QGroupBox("Timeline")
+        timeline_group.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Preferred, QtWidgets.QSizePolicy.Policy.Fixed
+        )
         timeline_layout = QtWidgets.QVBoxLayout(timeline_group)
         timeline_layout.setContentsMargins(9, 9, 9, 9)
         timeline_controls_layout = QtWidgets.QHBoxLayout()
@@ -3539,6 +3564,11 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         viewport_controls_layout.addWidget(QtWidgets.QLabel("Gamma"), 2, 0)
         viewport_controls_layout.addWidget(self.viewport_gamma_spin, 2, 1)
         viewport_controls_layout.setColumnStretch(2, 1)
+        viewport_group.setMinimumHeight(self._stacked_layout_minimum_height(viewport_layout))
+        rendered_heatmap_group.setMinimumHeight(
+            self._stacked_layout_minimum_height(rendered_heatmap_layout)
+        )
+        right_panel.setMinimumHeight(self._stacked_layout_minimum_height(right_layout))
 
         self.setCentralWidget(central)
 
@@ -3619,6 +3649,37 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         layout = QtWidgets.QVBoxLayout(group)
         layout.addWidget(widget)
         return group
+
+    @staticmethod
+    def _stacked_layout_minimum_height(layout: QtWidgets.QLayout) -> int:
+        """Return the minimum height for this window's vertical stacked layouts."""
+        margins = layout.contentsMargins()
+        height = margins.top() + margins.bottom()
+        visible_items = [
+            layout.itemAt(index)
+            for index in range(layout.count())
+            if layout.itemAt(index) is not None and not HeatmapAlignmentWindow._item_is_hidden(
+                layout.itemAt(index)
+            )
+        ]
+        if visible_items:
+            height += max(0, layout.spacing()) * (len(visible_items) - 1)
+        for item in visible_items:
+            widget = item.widget()
+            if widget is not None:
+                height += max(widget.minimumHeight(), widget.minimumSizeHint().height())
+                continue
+            child_layout = item.layout()
+            if child_layout is not None:
+                height += HeatmapAlignmentWindow._stacked_layout_minimum_height(child_layout)
+                continue
+            height += item.minimumSize().height()
+        return height
+
+    @staticmethod
+    def _item_is_hidden(item: QtWidgets.QLayoutItem) -> bool:
+        widget = item.widget()
+        return widget is not None and widget.isHidden()
 
     def _close_sources(self) -> None:
         self._abandon_resource_jobs()
