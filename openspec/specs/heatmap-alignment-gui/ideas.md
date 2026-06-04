@@ -163,6 +163,7 @@ Possible rendering directions:
 - Add a small time-series plot of peak distance over H5 time for reviewing continuity and dropouts.
 - Keep peak-distance visualization colors consistent with the source track color. The H5 timeline bar is currently green, so the H5-derived peak marker and any H5 peak-distance time-series should use the same green rather than an unrelated yellow.
 - Fix the current rendered-heatmap peak marker scaling: the marker can appear as a large yellow vertical strip in the rendered heatmap preview, which is visually noisy and likely caused by marker/line scaling relative to the preview size. Prefer a bounded marker style that remains legible without dominating the heatmap.
+- Improve rendered-heatmap peak indication so it remains visible without being confused with viridis heatmap colors. Avoid yellow and other palette-adjacent marker colors; consider an indicator above or below the heatmap, a margin marker, or another non-overlay cue if a direct overlay remains visually ambiguous.
 - When adding a time-series plot, align its x-axis with the shared timeline. The plot can span the full available width while automatically updating its x-limits from the timeline view/zoom state so signal features line up with the timeline playhead and duration bars.
 - Add compact markers or a thin strip on the H5 timeline bar to show detection/no-detection regions.
 - For synced video export, optionally render the peak marker on the heatmap overlay before adding a separate time-series visualization.
@@ -175,6 +176,7 @@ Open UX question:
 The first Signals plot implementation may conservatively disable pyqtgraph context-menu actions while the x-axis is in Timeline/match mode if those actions can disturb the shared time-axis contract. A later polish pass could re-enable actions that are safe or can be adapted to preserve the timeline-matched x-axis.
 
 Possible directions:
+- Group detected and no-detection/candidate curve segments for the same peak series into one user-facing legend item so a single legend interaction hides or shows both segments together.
 - Add an optional Signals x-range behavior for keeping the playhead visible while scrubbing. This could live in the Signals right-click menu, a settings menu, or a future range-mode control. Keep current Manual behavior available so users can inspect a fixed x-window even when the playhead moves off screen.
 - Distinguish possible "Follow Playhead" behaviors before implementing: continuous push/scroll when the playhead reaches an edge, versus discrete page/window jumps that advance the x-limits by a fixed period. Each has different predictability and motion tradeoffs.
 - Keep `Log X`, `Invert X`, `Y vs. Y'`, and `Power Spectrum (FFT)` disabled while x Timeline mode is active because they change or invert the physical-time x-axis.

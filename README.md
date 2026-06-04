@@ -209,3 +209,11 @@ Here you find the [disclaimer](https://docs.acconeer.com/en/latest/disclaimer.ht
 ## FAQ and common issues
 
 See the [FAQ at docs.acconeer.com](https://docs.acconeer.com/en/latest/exploration_tool/faq.html).
+
+## Development notes
+
+### Heatmap alignment peak experiments
+
+The heatmap alignment workbench under `user_tools/` is being used to explore peak-finding algorithms as a short-term workflow while the longer-term direction is a more general sync tool. Peak extraction should stay in pure non-GUI code shared by CLI and GUI paths, and generated/imported peak outputs should behave as removable peak series resources rather than hardcoded plot-only overlays.
+
+OpenSpec change artifacts under `openspec/changes/` are the source of truth for accepted implementation plans. Future agents working on peak comparison or resource management should keep peak-specific algorithm code separable from the generic resource, timeline, and signal plotting pieces.
