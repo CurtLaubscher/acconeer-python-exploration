@@ -19,8 +19,8 @@ The system SHALL provide lightweight physical-coordinate context for the rendere
 - **WHEN** the loaded H5 recording or selected heatmap session, group, entry, or subsweep changes
 - **THEN** the system updates the distance and velocity extent labels from the newly selected heatmap axes
 
-### Requirement: Rendered heatmap peak distance label
-The system SHALL label the selected current-frame peak distance on the rendered heatmap preview when a valid peak marker is available for the current frame.
+### Requirement: Heatmap peak distance label
+The system SHALL label the selected current-frame peak distance on the rendered heatmap preview and exported heatmap overlay when a valid peak marker is available for the current frame.
 
 #### Scenario: Show current peak distance label
 - **WHEN** a peak series is selected for the rendered heatmap marker and the current H5 frame has a valid peak distance
@@ -34,17 +34,21 @@ The system SHALL label the selected current-frame peak distance on the rendered 
 - **WHEN** the current peak distance is close to the rendered heatmap distance minimum or maximum
 - **THEN** the system keeps the peak indicator tied to the peak distance position while preventing the peak distance text from colliding with extent labels or leaving the label area
 
+#### Scenario: Prioritize peak cue in narrow label area
+- **WHEN** the rendered heatmap distance-label area is too narrow to show distance extent labels and the current peak distance cue without overlap
+- **THEN** the system prioritizes the current peak distance cue and may hide one or both distance extent labels
+
 #### Scenario: Hide peak indicator outside distance range
 - **WHEN** the selected peak series has a valid peak distance outside the rendered heatmap distance-axis range for the current H5 selection
 - **THEN** the system omits the peak distance label and peak position indicator
 
-#### Scenario: Avoid duplicate in-body peak marker
+#### Scenario: Avoid duplicate in-body preview peak marker
 - **WHEN** the current peak distance label and position indicator are visible
 - **THEN** the rendered heatmap comparison preview body does not also display the legacy in-image peak annotation for the same selected peak
 
-#### Scenario: Preserve export peak annotation behavior
+#### Scenario: Use compact exported peak marker
 - **WHEN** the user exports a synced video with a selected peak series marker
-- **THEN** this coordinate-context change does not remove or suppress the existing exported heatmap overlay peak annotation behavior
+- **THEN** the exported heatmap overlay uses a compact peak distance label and triangle position indicator rather than the legacy in-image peak annotation for the same selected peak
 
 #### Scenario: Omit peak label without valid peak
 - **WHEN** no peak series is selected or the selected peak series has no valid peak for the current H5 frame

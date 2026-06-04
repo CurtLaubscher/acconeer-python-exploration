@@ -12,13 +12,14 @@ The rendered heatmap already has physical distance and velocity axes available t
 - Preserve the comparable rendered heatmap body geometry relative to the rectified viewport.
 - Keep annotations compact enough for live use, avoiding large ticks, axes, and whitespace.
 - Provide a hover readout for distance, velocity, and current-frame magnitude.
+- Replace the legacy in-body selected peak marker style with compact label/triangle markers in both preview and export overlay rendering.
 - Keep layout details tunable during implementation without requiring spec churn.
 
 **Non-Goals:**
 
 - Do not add full axes, tick grids, or Matplotlib plot chrome to the comparison preview.
 - Do not add rendered heatmap colorbar or color scale visibility in this change.
-- Do not change export overlay formatting or preview/export visual parity behavior.
+- Do not change broader export overlay formatting beyond the selected peak marker presentation.
 - Do not change the peak extraction algorithms or selected peak series model.
 
 ## Decisions
@@ -41,9 +42,13 @@ Alternative considered: include labels inside the rendered image itself. That ma
 
 When a selected peak exists for the current frame, show the peak distance text in the same header row as the x extent labels. A small downward triangle indicator sits below the label and directly above the heatmap body. The text clamps within available header space to avoid colliding with extent labels or leaving bounds, while the triangle continues to track the true peak x coordinate when possible.
 
-The header label and indicator should replace the legacy in-image peak annotation for the same selected peak in the rendered heatmap comparison preview. Keeping both would add redundant peak cues and preserve the visually noisy body overlay that this direction is meant to avoid. This is preview-only; export overlay peak annotation behavior should remain unchanged by this change.
+At very narrow widths, it is acceptable to hide the static x extent labels before sacrificing the moving peak label and triangle. If the available width is too small even for the moving label, keep the triangle indicator as the highest-priority peak position cue.
 
-Alternative considered: hide the x extent label near the peak to make room. Keeping extent labels visible preserves the static coordinate context and avoids changing what the user sees as the peak moves.
+The header label and indicator should replace the legacy in-image peak annotation for the same selected peak in the rendered heatmap comparison preview and exported heatmap overlays. Keeping both would add redundant peak cues and preserve the visually noisy body overlay that this direction is meant to avoid.
+
+Export overlays should use an equivalent compact label/triangle treatment where space allows, while preserving existing export overlay layout and avoiding a return to full plot-axis work in this change.
+
+Alternative considered: always keep x extent labels visible and hide the moving peak text near collisions. That preserves static coordinate context, but it is less useful when the user is specifically tracking the current peak position in a constrained preview.
 
 ### Use A Tooltip-Style Hover Readout
 
@@ -55,7 +60,7 @@ Alternative considered: use a fixed readout panel near controls. A fixed panel a
 
 ## Risks / Trade-offs
 
-- Annotation collision near narrow preview widths -> Clamp or omit only the moving peak text while keeping the triangle and extent labels readable.
+- Annotation collision near narrow preview widths -> Clamp labels where practical; at very narrow widths, hide static x extent labels before hiding the moving peak label, and keep the triangle indicator as the fallback position cue.
 - Tooltip obscures heatmap details -> Keep it compact, use normal tooltip styling, and hide it immediately when the pointer leaves the heatmap body.
 - Magnitude readout can become stale during playback -> Store the last hovered heatmap coordinate and refresh the tooltip content on current-frame updates while the pointer remains over the body.
 - Body geometry can drift from the rectified viewport if labels are implemented as plot margins -> Treat annotations as external UI/overlay chrome and verify body dimensions remain matched.

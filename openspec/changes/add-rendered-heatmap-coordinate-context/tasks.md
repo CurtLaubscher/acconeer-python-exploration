@@ -9,9 +9,10 @@
 
 - [ ] 2.1 Add a current peak distance label in the rendered heatmap distance-label area when the selected peak series has a valid current-frame peak.
 - [ ] 2.2 Add a small downward indicator directly above the heatmap body at the current peak distance position.
-- [ ] 2.3 Clamp or otherwise resolve peak label placement near the distance extent labels while keeping the indicator tied to the peak position.
+- [ ] 2.3 Clamp or otherwise resolve peak label placement near the distance extent labels while keeping the indicator tied to the peak position; at very narrow widths, hide x extent labels before hiding the peak cue.
 - [ ] 2.4 Omit the peak label and indicator when no selected peak series has a valid current-frame peak or when the peak distance is outside the rendered heatmap distance-axis range.
-- [ ] 2.5 Suppress the legacy in-image rendered heatmap peak annotation in the rendered heatmap comparison preview when the header peak label and indicator are used for the selected peak; do not change the export overlay path.
+- [ ] 2.5 Suppress the legacy in-image rendered heatmap peak annotation in the rendered heatmap comparison preview when the header peak label and indicator are used for the selected peak.
+- [ ] 2.6 Replace the legacy in-image exported heatmap overlay peak annotation with an equivalent compact peak distance label and triangle indicator for the selected peak.
 
 ## 3. Hover Readout
 
@@ -28,5 +29,5 @@
 - [ ] 4.2 Add or update focused tests for hover coordinate mapping, formatting, hide-on-leave, and magnitude refresh on current-frame changes.
 - [ ] 4.3 Add or update verification that the rendered heatmap painted image rect dimensions remain matched to the rectified viewport painted image rect after the coordinate context UI is added, including a narrow preview case where labels may collide.
 - [ ] 4.4 Verify the preview minimum-height/splitter behavior still prevents rendered heatmap controls and coordinate labels from overlapping preview content.
-- [ ] 4.5 Add or update an export smoke check confirming preview-only legacy marker suppression does not remove exported heatmap overlay peak annotation behavior.
+- [ ] 4.5 Add or update an export smoke check confirming the exported heatmap overlay uses the compact peak label and triangle marker rather than the legacy in-image peak annotation.
 - [ ] 4.6 Run the relevant repo-defined Hatch test or check command from `pyproject.toml` for the changed heatmap alignment GUI behavior.
