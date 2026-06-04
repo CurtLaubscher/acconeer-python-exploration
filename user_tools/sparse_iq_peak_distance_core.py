@@ -116,7 +116,6 @@ class LoadedPeakDistanceDatasource:
 @dataclass
 class PeakDistanceDatasourceSettings:
     path: str = ""
-    visible: bool = True
 
 
 class PeakDistanceJsonImportError(ValueError):

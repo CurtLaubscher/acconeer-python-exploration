@@ -3403,7 +3403,27 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         right_layout.setContentsMargins(0, 0, 0, 0)
         viewport_layout.addWidget(self.viewport_controls_widget)
         right_layout.addWidget(viewport_group)
-        right_layout.addWidget(self._wrap_group("Rendered Heatmap", self.truth_view))
+        rendered_heatmap_group = QtWidgets.QGroupBox("Rendered Heatmap")
+        rendered_heatmap_layout = QtWidgets.QVBoxLayout(rendered_heatmap_group)
+        rendered_heatmap_layout.addWidget(self.truth_view)
+        rendered_heatmap_color_row = QtWidgets.QHBoxLayout()
+        self.color_min_spin = QtWidgets.QDoubleSpinBox()
+        self.color_min_spin.setRange(0.0, 1_000_000.0)
+        self.color_min_spin.setValue(0.0)
+        self.color_min_spin.setDecimals(1)
+        self.color_min_spin.setSingleStep(100.0)
+        self.color_max_spin = QtWidgets.QDoubleSpinBox()
+        self.color_max_spin.setRange(0.0, 1_000_000.0)
+        self.color_max_spin.setValue(3000.0)
+        self.color_max_spin.setDecimals(1)
+        self.color_max_spin.setSingleStep(100.0)
+        rendered_heatmap_color_row.addWidget(QtWidgets.QLabel("Color Min"))
+        rendered_heatmap_color_row.addWidget(self.color_min_spin)
+        rendered_heatmap_color_row.addWidget(QtWidgets.QLabel("Color Max"))
+        rendered_heatmap_color_row.addWidget(self.color_max_spin)
+        rendered_heatmap_color_row.addStretch(1)
+        rendered_heatmap_layout.addLayout(rendered_heatmap_color_row)
+        right_layout.addWidget(rendered_heatmap_group)
         preview_splitter.addWidget(camera_group)
         preview_splitter.addWidget(right_panel)
         preview_splitter.setChildrenCollapsible(False)
@@ -3414,6 +3434,13 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         signals_group = QtWidgets.QGroupBox("Signals")
         signals_layout = QtWidgets.QVBoxLayout(signals_group)
         signals_layout.setContentsMargins(9, 9, 9, 9)
+        signals_controls_row = QtWidgets.QHBoxLayout()
+        self.leg2_signal_kind_combo = QtWidgets.QComboBox()
+        self.leg2_signal_kind_combo.addItem("Raw ultrasonic", "raw")
+        self.leg2_signal_kind_combo.addItem("Filtered ultrasonic", "filtered")
+        signals_controls_row.addWidget(self.leg2_signal_kind_combo)
+        signals_controls_row.addStretch(1)
+        signals_layout.addLayout(signals_controls_row)
         self.signal_plot = SignalPlotWidget()
         self.signal_plot.setMinimumHeight(160)
         signals_layout.addWidget(self.signal_plot)
@@ -3450,33 +3477,6 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         timeline_layout.addWidget(self.current_time_slider)
         layout.addWidget(timeline_group)
 
-        render_group = QtWidgets.QGroupBox("Render")
-        render_layout = QtWidgets.QGridLayout(render_group)
-        self.color_min_spin = QtWidgets.QDoubleSpinBox()
-        self.color_min_spin.setRange(-1_000_000.0, 1_000_000.0)
-        self.color_min_spin.setValue(0.0)
-        self.color_min_spin.setDecimals(1)
-        self.color_max_spin = QtWidgets.QDoubleSpinBox()
-        self.color_max_spin.setRange(0.0, 1_000_000.0)
-        self.color_max_spin.setValue(3000.0)
-        self.color_max_spin.setDecimals(1)
-        self.blur_spin = QtWidgets.QDoubleSpinBox()
-        self.blur_spin.setRange(0.0, 20.0)
-        self.blur_spin.setSingleStep(0.1)
-        self.blur_spin.setEnabled(False)
-        self.downscale_spin = QtWidgets.QDoubleSpinBox()
-        self.downscale_spin.setRange(0.1, 1.0)
-        self.downscale_spin.setSingleStep(0.05)
-        self.downscale_spin.setValue(1.0)
-        self.downscale_spin.setEnabled(False)
-        self.lag_window_spin = QtWidgets.QDoubleSpinBox()
-        self.lag_window_spin.setRange(0.1, 30.0)
-        self.lag_window_spin.setValue(2.0)
-        self.lag_window_spin.setEnabled(False)
-        self.sample_count_spin = QtWidgets.QSpinBox()
-        self.sample_count_spin.setRange(5, 300)
-        self.sample_count_spin.setValue(30)
-        self.sample_count_spin.setEnabled(False)
         self.viewport_enhance_checkbox = QtWidgets.QCheckBox("Enhance Viewport")
         self.viewport_map_to_viridis_checkbox = QtWidgets.QCheckBox("Map to Viridis")
         self.viewport_range_slider = DoubleRangeSlider()
@@ -3487,28 +3487,6 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.viewport_gamma_spin.setSingleStep(0.05)
         self.viewport_gamma_spin.setValue(1.0)
         self.viewport_gamma_spin.setDecimals(2)
-        self.leg2_signal_kind_combo = QtWidgets.QComboBox()
-        self.leg2_signal_kind_combo.addItem("Raw ultrasonic", "raw")
-        self.leg2_signal_kind_combo.addItem("Filtered ultrasonic", "filtered")
-        self.show_peak_marker_checkbox = QtWidgets.QCheckBox("Show Peak Marker")
-        self.show_peak_marker_checkbox.setChecked(True)
-        self.show_leg2_signal_checkbox = QtWidgets.QCheckBox("Show Leg2 Signal")
-        self.show_leg2_signal_checkbox.setChecked(True)
-        render_layout.addWidget(QtWidgets.QLabel("Color Min"), 0, 0)
-        render_layout.addWidget(self.color_min_spin, 0, 1)
-        render_layout.addWidget(QtWidgets.QLabel("Color Max"), 0, 2)
-        render_layout.addWidget(self.color_max_spin, 0, 3)
-        render_layout.addWidget(QtWidgets.QLabel("Blur"), 0, 4)
-        render_layout.addWidget(self.blur_spin, 0, 5)
-        render_layout.addWidget(QtWidgets.QLabel("Downscale"), 0, 6)
-        render_layout.addWidget(self.downscale_spin, 0, 7)
-        render_layout.addWidget(QtWidgets.QLabel("Lag Window (s)"), 1, 0)
-        render_layout.addWidget(self.lag_window_spin, 1, 1)
-        render_layout.addWidget(QtWidgets.QLabel("Sample Count"), 1, 2)
-        render_layout.addWidget(self.sample_count_spin, 1, 3)
-        render_layout.addWidget(self.show_peak_marker_checkbox, 2, 0, 1, 2)
-        render_layout.addWidget(self.leg2_signal_kind_combo, 2, 2)
-        render_layout.addWidget(self.show_leg2_signal_checkbox, 2, 3)
         viewport_controls_layout.addWidget(self.viewport_enhance_checkbox, 0, 0, 1, 2)
         viewport_controls_layout.addWidget(self.viewport_map_to_viridis_checkbox, 0, 2, 1, 2)
         viewport_controls_layout.addWidget(QtWidgets.QLabel("Range"), 1, 0)
@@ -3518,14 +3496,11 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         viewport_controls_layout.addWidget(QtWidgets.QLabel("Gamma"), 2, 0)
         viewport_controls_layout.addWidget(self.viewport_gamma_spin, 2, 1)
         viewport_controls_layout.setColumnStretch(2, 1)
-        layout.addWidget(render_group, stretch=1)
 
         self.setCentralWidget(central)
 
     def _connect_signals(self) -> None:
         self.leg2_signal_kind_combo.currentIndexChanged.connect(self._leg2_signal_kind_changed)
-        self.show_peak_marker_checkbox.toggled.connect(self._peak_marker_visibility_changed)
-        self.show_leg2_signal_checkbox.toggled.connect(self._leg2_signal_visibility_changed)
         self.play_button.clicked.connect(self._toggle_playback)
         self.timeline_view.playhead_changed.connect(self._timeline_playhead_changed)
         self.signal_plot.playhead_scrubbed.connect(self._signal_playhead_scrubbed)
@@ -3547,10 +3522,6 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.viewport_map_to_viridis_checkbox.toggled.connect(self._viewport_visibility_changed)
         self.viewport_range_slider.values_changed.connect(self._viewport_visibility_range_changed)
         self.viewport_gamma_spin.valueChanged.connect(self._viewport_visibility_changed)
-        self.blur_spin.valueChanged.connect(self._preprocess_settings_changed)
-        self.downscale_spin.valueChanged.connect(self._preprocess_settings_changed)
-        self.lag_window_spin.valueChanged.connect(self._preprocess_settings_changed)
-        self.sample_count_spin.valueChanged.connect(self._preprocess_settings_changed)
         self.camera_view.corners_changed.connect(self._corners_changed)
         self.camera_view.export_overlay_changed.connect(self._export_overlay_changed)
         self.camera_view.export_overlay_visibility_changed.connect(
@@ -3763,11 +3734,9 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._peaks_dirty = False
         self.peak_distance_datasource = datasource
         self.session.peak_distance_datasource.path = str(json_path)
-        self.session.peak_distance_datasource.visible = self.show_peak_marker_checkbox.isChecked()
         self.settings.setValue("last_peak_json_path", str(json_path))
         self._set_resource_reload_error("radar_peak", None)
         self._set_resource_warnings("radar_peak", tuple(warnings))
-        self._update_peak_datasource_controls()
         self._sync_previews(camera_access_hint="auto")
 
         if self.heatmap_source is None:
@@ -3851,10 +3820,8 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             self._mark_session_dirty()
         self.peak_distance_datasource = None
         self.session.peak_distance_datasource.path = ""
-        self.session.peak_distance_datasource.visible = True
         self._set_resource_reload_error("radar_peak", None)
         self._set_resource_warnings("radar_peak", ())
-        self._update_peak_datasource_controls()
         self._sync_previews(camera_access_hint="auto")
         self._refresh_resources_ui()
         self.statusBar().showMessage("Cleared imported peak-distance datasource.")
@@ -3892,7 +3859,6 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._peaks_dirty = True
         self._set_resource_reload_error("radar_peak", None)
         self._set_resource_warnings("radar_peak", ())
-        self._update_peak_datasource_controls()
         self._sync_previews(camera_access_hint="auto")
         self._refresh_resources_ui()
         counts = peak_state_detected_counts(result)
@@ -3963,7 +3929,6 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             self._mark_session_dirty()
         self.settings.setValue("last_peak_json_path", str(output_path))
         self._set_resource_reload_error("radar_peak", None)
-        self._update_peak_datasource_controls()
         self._sync_previews(camera_access_hint="auto")
         self._refresh_resources_ui()
         self.statusBar().showMessage(f"Saved peaks: {output_path.name}")
@@ -4006,7 +3971,6 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
 
         self.leg2_ultrasonic_datasource = datasource
         self.session.leg2_ultrasonic_datasource.path = str(mat_path)
-        self.session.leg2_ultrasonic_datasource.visible = self.show_leg2_signal_checkbox.isChecked()
         self.settings.setValue("last_leg2_mat_path", str(mat_path))
         self._set_resource_reload_error("leg2_mat", None)
         self._set_resource_warnings("leg2_mat", ())
@@ -4032,7 +3996,6 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             self._mark_session_dirty()
         self.leg2_ultrasonic_datasource = None
         self.session.leg2_ultrasonic_datasource.path = ""
-        self.session.leg2_ultrasonic_datasource.visible = True
         self.session.leg2_ultrasonic_datasource.offset_s = 0.0
         self._set_resource_reload_error("leg2_mat", None)
         self._set_resource_warnings("leg2_mat", ())
@@ -4074,23 +4037,16 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.session.leg2_ultrasonic_datasource.signal_kind = signal_kind
         self._sync_previews(camera_access_hint="auto")
 
-    def _leg2_signal_visibility_changed(self, visible: bool) -> None:
-        self._mark_session_dirty()
-        self.session.leg2_ultrasonic_datasource.visible = visible
-        self._sync_previews(camera_access_hint="auto")
-
     def _update_leg2_datasource_controls(self) -> None:
         datasource = self.leg2_ultrasonic_datasource
         has_datasource = datasource is not None
         self.leg2_signal_kind_combo.setEnabled(has_datasource)
-        self.show_leg2_signal_checkbox.setEnabled(has_datasource)
         self.timeline_view.update()
 
     def _reload_peak_distance_datasource_from_session(self) -> None:
         self.peak_distance_datasource = None
         json_path_text = self.session.peak_distance_datasource.path
         if not json_path_text:
-            self._update_peak_datasource_controls()
             return
 
         json_path = Path(json_path_text)
@@ -4099,14 +4055,12 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             self.statusBar().showMessage(
                 f"Peak-distance JSON not found and was not loaded: {json_path}"
             )
-            self._update_peak_datasource_controls()
             self._refresh_resources_ui()
             return
 
         if self.heatmap_source is None:
             if self.load_peak_distance_from_path(json_path, show_dialogs=False, mark_dirty=False):
                 return
-            self._update_peak_datasource_controls()
             self._refresh_resources_ui()
             return
 
@@ -4122,7 +4076,6 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
                 message = f"Could not reload peak-distance JSON: {exc}"
             self._set_resource_reload_error("radar_peak", message)
             self.statusBar().showMessage(message)
-            self._update_peak_datasource_controls()
             self._refresh_resources_ui()
             return
 
@@ -4135,17 +4088,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             self.statusBar().showMessage(
                 "Reloaded peak-distance JSON with warnings: " + "; ".join(warnings)
             )
-        self._update_peak_datasource_controls()
         self._refresh_resources_ui()
-
-    def _peak_marker_visibility_changed(self, visible: bool) -> None:
-        self._mark_session_dirty()
-        self.session.peak_distance_datasource.visible = visible
-        self._sync_previews(camera_access_hint="auto")
-
-    def _update_peak_datasource_controls(self) -> None:
-        has_datasource = self._has_peaks_in_memory()
-        self.show_peak_marker_checkbox.setEnabled(has_datasource)
 
     def _active_peak_state(self) -> PeakDistanceResourceState | None:
         """Return whichever peak state is active: generated result or loaded datasource."""
@@ -4158,7 +4101,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
 
     def _peak_overlay_for_frame(self, frame_idx: int) -> tuple[float, float] | None:
         peak_state = self._active_peak_state()
-        if peak_state is None or not self.session.peak_distance_datasource.visible:
+        if peak_state is None:
             return None
         measurements = active_peak_measurements(peak_state)
         if measurements is None:
@@ -4695,10 +4638,6 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.viewport_enhance_checkbox.blockSignals(True)
         self.viewport_map_to_viridis_checkbox.blockSignals(True)
         self.viewport_gamma_spin.blockSignals(True)
-        self.blur_spin.blockSignals(True)
-        self.downscale_spin.blockSignals(True)
-        self.lag_window_spin.blockSignals(True)
-        self.sample_count_spin.blockSignals(True)
         self.color_min_spin.setValue(self.session.render.color_min)
         self.color_max_spin.setValue(self.session.render.color_max or 0.0)
         self.viewport_enhance_checkbox.setChecked(self.session.viewport_visibility.enabled)
@@ -4711,29 +4650,16 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         )
         self.viewport_gamma_spin.setValue(self.session.viewport_visibility.gamma)
         self._update_viewport_visibility_labels()
-        self.blur_spin.setValue(self.session.preprocess.blur_sigma)
-        self.downscale_spin.setValue(self.session.preprocess.downscale_factor)
-        self.lag_window_spin.setValue(self.session.preprocess.lag_window_s)
-        self.sample_count_spin.setValue(self.session.preprocess.sample_count)
         self.color_min_spin.blockSignals(False)
         self.color_max_spin.blockSignals(False)
         self.viewport_enhance_checkbox.blockSignals(False)
         self.viewport_map_to_viridis_checkbox.blockSignals(False)
         self.viewport_gamma_spin.blockSignals(False)
-        self.blur_spin.blockSignals(False)
-        self.downscale_spin.blockSignals(False)
-        self.lag_window_spin.blockSignals(False)
-        self.sample_count_spin.blockSignals(False)
-        self.show_peak_marker_checkbox.blockSignals(True)
-        self.show_peak_marker_checkbox.setChecked(self.session.peak_distance_datasource.visible)
         leg2_kind = self.session.leg2_ultrasonic_datasource.signal_kind
         leg2_kind_index = self.leg2_signal_kind_combo.findData(leg2_kind)
         if leg2_kind_index >= 0:
             self.leg2_signal_kind_combo.setCurrentIndex(leg2_kind_index)
-        self.show_leg2_signal_checkbox.setChecked(self.session.leg2_ultrasonic_datasource.visible)
         self._update_leg2_datasource_controls()
-        self.show_peak_marker_checkbox.blockSignals(False)
-        self._update_peak_datasource_controls()
         self._update_viewport_visibility_controls_enabled()
         self.signal_plot.set_view_settings(self._signal_plot_view_settings_copy())
 
@@ -4928,13 +4854,6 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             )
             self._rebuild_overlay_plot_renderer()
         self._sync_previews(camera_access_hint="auto")
-
-    def _preprocess_settings_changed(self) -> None:
-        self._mark_session_dirty()
-        self.session.preprocess.blur_sigma = self.blur_spin.value()
-        self.session.preprocess.downscale_factor = self.downscale_spin.value()
-        self.session.preprocess.lag_window_s = self.lag_window_spin.value()
-        self.session.preprocess.sample_count = self.sample_count_spin.value()
 
     def _corners_changed(self, corners: list) -> None:
         self._mark_session_dirty()
@@ -5575,10 +5494,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             peak_series = build_peak_distance_signal_series(
                 active_peak_measurements(peak_state)
             )
-        peak_visible = (
-            peak_state is not None
-            and self.session.peak_distance_datasource.visible
-        )
+        peak_visible = peak_state is not None
         peak_compare_series = None
         peak_compare_visible = False
         if TEMPORARY_COMPARE_PEAK_EXTRACTION_ON_SIGNAL_PLOT and self.heatmap_source is not None:
@@ -5590,7 +5506,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
                 peak_series = self._temporary_peak_series_for_method(
                     PEAK_EXTRACTION_METHOD_SUM_VELOCITY,
                 )
-                peak_visible = self.session.peak_distance_datasource.visible
+                peak_visible = peak_compare_series is not None
         leg2_series = None
         if self.leg2_ultrasonic_datasource is not None:
             leg2_series = build_leg2_ultrasonic_signal_series(
@@ -5598,10 +5514,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
                 signal_kind=self.session.leg2_ultrasonic_datasource.signal_kind,
                 offset_s=self.session.leg2_ultrasonic_datasource.offset_s,
             )
-        leg2_visible = (
-            self.leg2_ultrasonic_datasource is not None
-            and self.session.leg2_ultrasonic_datasource.visible
-        )
+        leg2_visible = self.leg2_ultrasonic_datasource is not None
         self.signal_plot.set_plotted_signals(
             peak_series=peak_series,
             peak_visible=peak_visible,
@@ -5637,7 +5550,6 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.nudge_right_small.setEnabled(has_camera)
         self.nudge_left_large.setEnabled(has_camera)
         self.nudge_right_large.setEnabled(has_camera)
-        self._update_peak_datasource_controls()
         self._update_leg2_datasource_controls()
         self._update_viewport_visibility_controls_enabled()
         self._refresh_resources_ui()

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -164,7 +165,6 @@ def test_alignment_session_roundtrip_with_peak_distance_datasource(tmp_path: Pat
         heatmap_track=HeatmapTrack(path=str(heatmap_path), duration_s=2.0, fps=10.0),
         peak_distance_datasource=PeakDistanceDatasourceSettings(
             path=str(peak_json_path),
-            visible=False,
         ),
     )
 
@@ -173,7 +173,6 @@ def test_alignment_session_roundtrip_with_peak_distance_datasource(tmp_path: Pat
     loaded = load_alignment_session(session_path)
 
     assert loaded.peak_distance_datasource.path == str(peak_json_path)
-    assert loaded.peak_distance_datasource.visible is False
 
 
 def test_alignment_session_roundtrip_with_signal_plot_view_settings(tmp_path: Path) -> None:
@@ -1284,7 +1283,6 @@ def test_alignment_session_roundtrip_with_leg2_ultrasonic_datasource(tmp_path: P
         heatmap_track=HeatmapTrack(path=str(heatmap_path), duration_s=2.0, fps=10.0),
         leg2_ultrasonic_datasource=Leg2UltrasonicDatasourceSettings(
             path=str(mat_path),
-            visible=False,
             signal_kind="filtered",
             offset_s=0.25,
         ),
@@ -1295,7 +1293,6 @@ def test_alignment_session_roundtrip_with_leg2_ultrasonic_datasource(tmp_path: P
     loaded = load_alignment_session(session_path)
 
     assert loaded.leg2_ultrasonic_datasource.path == str(mat_path)
-    assert loaded.leg2_ultrasonic_datasource.visible is False
     assert loaded.leg2_ultrasonic_datasource.signal_kind == "filtered"
     assert loaded.leg2_ultrasonic_datasource.offset_s == pytest.approx(0.25)
 
@@ -1344,7 +1341,6 @@ def test_alignment_session_defaults_missing_leg2_ultrasonic_fields(tmp_path: Pat
     loaded = load_alignment_session(session_path)
 
     assert loaded.leg2_ultrasonic_datasource.path == ""
-    assert loaded.leg2_ultrasonic_datasource.visible is True
     assert loaded.leg2_ultrasonic_datasource.signal_kind == "raw"
     assert loaded.leg2_ultrasonic_datasource.offset_s == pytest.approx(0.0)
 
@@ -1679,3 +1675,179 @@ def test_resource_messages_prepends_job_detail_when_not_in_reload_errors() -> No
     messages = _resource_messages("camera", runtime)
 
     assert messages == ("Proxy build failed.",)
+
+
+# ---------------------------------------------------------------------------
+# v1 -> v2 migration tests
+# ---------------------------------------------------------------------------
+
+_V1_BASE_JSON = """\
+{{
+  "version": 1,
+  "camera_track": {{"path": "{camera}", "fps": 30.0, "duration_s": 1.0, "frame_count": 30}},
+  "heatmap_track": {{
+    "path": "{heatmap}",
+    "session_idx": 0,
+    "group_idx": 0,
+    "entry_idx": 0,
+    "subsweep_idx": 0,
+    "duration_s": 1.0,
+    "fps": 10.0
+  }},
+  "viewport": {{
+    "corners": [[0.0, 0.0], [9.0, 0.0], [9.0, 5.0], [0.0, 5.0]],
+    "output_width": 10,
+    "output_height": 6
+  }},
+  "render": {{"color_min": 0.0, "color_max": 3000.0, "fixed_levels": true}},
+  "preprocess": {{
+    "blur_sigma": 0.0,
+    "downscale_factor": 1.0,
+    "lag_window_s": 2.0,
+    "sample_count": 30
+  }},
+  "timeline": {{"current_time_s": 0.0, "offset_s": 0.0}},
+  "export_overlay": {{"visible": true, "preview_enabled": true, "x": 0.0, "y": 0.0, "width": 0.0, "height": 0.0}}
+}}"""
+
+
+def _write_v1_base(tmp_path: Path) -> tuple[Path, Path, Path]:
+    camera_path = tmp_path / "camera.mp4"
+    heatmap_path = tmp_path / "truth.h5"
+    camera_path.write_bytes(b"")
+    heatmap_path.write_bytes(b"")
+    return camera_path, heatmap_path, tmp_path / "alignment.json"
+
+
+def test_alignment_session_v1_migration_strips_peak_visibility(tmp_path: Path) -> None:
+    camera_path, heatmap_path, session_path = _write_v1_base(tmp_path)
+    peak_json_path = tmp_path / "peaks.json"
+    peak_json_path.write_text("{}", encoding="utf-8")
+
+    data = json.loads(
+        _V1_BASE_JSON.format(
+            camera=str(camera_path).replace("\\", "\\\\"),
+            heatmap=str(heatmap_path).replace("\\", "\\\\"),
+        )
+    )
+    data["peak_distance_datasource"] = {
+        "path": str(peak_json_path),
+        "visible": False,
+    }
+    session_path.write_text(json.dumps(data), encoding="utf-8")
+
+    loaded = load_alignment_session(session_path)
+
+    assert loaded.version == 2
+    assert loaded.peak_distance_datasource.path == str(peak_json_path)
+    assert not hasattr(loaded.peak_distance_datasource, "visible")
+
+
+def test_alignment_session_v1_migration_strips_leg2_visibility(tmp_path: Path) -> None:
+    camera_path, heatmap_path, session_path = _write_v1_base(tmp_path)
+    mat_path = tmp_path / "leg2.mat"
+    _write_sample_leg2_mat(mat_path)
+
+    data = json.loads(
+        _V1_BASE_JSON.format(
+            camera=str(camera_path).replace("\\", "\\\\"),
+            heatmap=str(heatmap_path).replace("\\", "\\\\"),
+        )
+    )
+    data["leg2_ultrasonic_datasource"] = {
+        "path": str(mat_path),
+        "visible": True,
+        "signal_kind": "raw",
+        "offset_s": 0.0,
+    }
+    session_path.write_text(json.dumps(data), encoding="utf-8")
+
+    loaded = load_alignment_session(session_path)
+
+    assert loaded.version == 2
+    assert loaded.leg2_ultrasonic_datasource.path == str(mat_path)
+    assert not hasattr(loaded.leg2_ultrasonic_datasource, "visible")
+
+
+def test_alignment_session_rejects_future_version(tmp_path: Path) -> None:
+    camera_path, heatmap_path, session_path = _write_v1_base(tmp_path)
+
+    data = json.loads(
+        _V1_BASE_JSON.format(
+            camera=str(camera_path).replace("\\", "\\\\"),
+            heatmap=str(heatmap_path).replace("\\", "\\\\"),
+        )
+    )
+    data["version"] = 99
+    session_path.write_text(json.dumps(data), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="[Uu]nsupported.*version|[Vv]ersion.*unsupported|99"):
+        load_alignment_session(session_path)
+
+
+def test_alignment_session_v2_save_omits_visibility_fields(tmp_path: Path) -> None:
+    camera_path = tmp_path / "camera.mp4"
+    heatmap_path = tmp_path / "truth.h5"
+    peak_json_path = tmp_path / "peaks.json"
+    mat_path = tmp_path / "leg2.mat"
+    camera_path.write_bytes(b"")
+    heatmap_path.write_bytes(b"")
+    peak_json_path.write_text("{}", encoding="utf-8")
+    _write_sample_leg2_mat(mat_path)
+
+    session = AlignmentSession(
+        camera_track=CameraTrack(path=str(camera_path), fps=30.0, duration_s=2.0, frame_count=60),
+        heatmap_track=HeatmapTrack(path=str(heatmap_path), duration_s=2.0, fps=10.0),
+        peak_distance_datasource=PeakDistanceDatasourceSettings(path=str(peak_json_path)),
+        leg2_ultrasonic_datasource=Leg2UltrasonicDatasourceSettings(path=str(mat_path)),
+    )
+
+    session_path = tmp_path / "alignment_v2.json"
+    save_alignment_session(session, session_path)
+
+    raw = json.loads(session_path.read_text(encoding="utf-8"))
+
+    assert raw["version"] == 2
+    assert "visible" not in raw["peak_distance_datasource"]
+    assert "visible" not in raw["leg2_ultrasonic_datasource"]
+
+
+def test_alignment_session_v1_migration_preserves_preprocess_settings(tmp_path: Path) -> None:
+    camera_path, heatmap_path, session_path = _write_v1_base(tmp_path)
+
+    data = json.loads(
+        _V1_BASE_JSON.format(
+            camera=str(camera_path).replace("\\", "\\\\"),
+            heatmap=str(heatmap_path).replace("\\", "\\\\"),
+        )
+    )
+    data["preprocess"] = {
+        "blur_sigma": 1.5,
+        "downscale_factor": 2.0,
+        "lag_window_s": 4.0,
+        "sample_count": 60,
+    }
+    session_path.write_text(json.dumps(data), encoding="utf-8")
+
+    loaded = load_alignment_session(session_path)
+
+    assert loaded.version == 2
+    assert loaded.preprocess.blur_sigma == pytest.approx(1.5)
+    assert loaded.preprocess.downscale_factor == pytest.approx(2.0)
+    assert loaded.preprocess.lag_window_s == pytest.approx(4.0)
+    assert loaded.preprocess.sample_count == 60
+
+
+# ---------------------------------------------------------------------------
+# Dataclass field absence tests (Task 4.5)
+# ---------------------------------------------------------------------------
+
+
+def test_peak_distance_datasource_has_no_visibility_field() -> None:
+    settings = PeakDistanceDatasourceSettings()
+    assert not hasattr(settings, "visible")
+
+
+def test_leg2_ultrasonic_datasource_settings_has_no_visibility_field() -> None:
+    settings = Leg2UltrasonicDatasourceSettings()
+    assert not hasattr(settings, "visible")
