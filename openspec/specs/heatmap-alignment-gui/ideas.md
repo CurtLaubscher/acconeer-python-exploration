@@ -43,6 +43,8 @@ Possible directions:
 - Auto levels for the rectified viewport, probably percentile-based, as a quick starting point for low/high values.
 - Palette matching using an optimized 3D lookup table that maps camera RGB to nearest viridis colors.
 - Flicker comparison between the rectified viewport and rendered H5 heatmap in the same panel.
+- Opacity blend (onion skin): superimpose the rectified viewport over the rendered heatmap (or vice versa) with a user-controlled alpha slider so structure and color can be compared in one place without rapid flicker. Useful for judging alignment and color match; distinct from flicker mode and from perspective correction.
+- Matched-scale comparison: ensure the rectified viewport and rendered heatmap previews use a consistent content scale for judgment (e.g. comparable distance extent per screen pixel, or aligned pixel mapping when overlaying), not only the same widget aspect ratio. Without matched scale, side-by-side panels can look plausible in the center but misaligned toward the edges even when the quadrilateral is correct. This is about display scaling of already-rectified content, not fixing lens perspective distortion in the camera frame.
 - Sample-based calibration where the user marks low/background, mid, and high colors from the camera-captured heatmap.
 - Better preset defaults for the existing low/high/gamma controls.
 - Keep raw/enhanced toggling fast so transforms remain a comparison aid rather than hidden truth.
@@ -98,7 +100,8 @@ Possible directions:
 - Improve tick density and labels as zoom changes.
 - Clean up the timeline time-axis presentation: move tick labels farther from vertical grid lines so decimal points remain legible, remove the horizontal time-axis line if the grid already communicates scale, and remove the redundant "Time" label.
 - Add frame-by-frame navigation for the H5 track, camera track, or current aligned preview.
-- Add simple keyboard shortcuts for navigating time, such as stepping frames, nudging by small time increments, jumping to start/end, and toggling playback.
+- Jump to alignment events: actions such as next/previous peak detection, next prominent signal feature, or other derived markers, so users can review offsets without long manual scrubs.
+- Add keyboard transport shortcuts for navigating time (see **Keyboard shortcuts and bindings** below). Today only standard Save and Quit are wired; stepping frames, nudging time, jumping to range ends, and toggling playback should be first-class.
 - Improve scrub and playback responsiveness. Timeline playhead drag, Signals playhead drag, slider scrub, and playback all funnel through `_sync_previews(...)`, which currently performs many operations synchronously on each current-time update: camera frame access, camera-corner refresh, timeline range/model updates, slider and timeline state updates, Signals plot refresh, timeline geometry sync scheduling, label updates, H5 truth-frame access and peak annotation, optional overlay-preview rendering, viewport rectification, viewport visibility transforms, and source-resolution viewport scheduling. If any stage is slow or variable, the user sees jitter during scrubbing and playback FPS can fall far below native/source FPS despite the 16 ms play timer.
 - Add lightweight timing instrumentation around `_sync_previews` stages before choosing a solution, so it is clear whether the bottleneck is camera access/seeking, H5 frame access, signal plot refresh, viewport rectification, overlay rendering, layout/paint churn, or something else.
 - Split immediate current-time UI feedback from expensive preview refresh work: playheads, slider, and time label should respond immediately, while camera/viewport/heatmap previews can be coalesced to the latest requested time.
@@ -117,9 +120,38 @@ Possible directions:
 - Consider making existing offset controls apply to the currently selected track or selected linked group instead of being permanently camera-specific.
 - Allow track offsets to be typed directly, possibly by making the offset value shown beside each timeline track bar editable in place.
 
+### Keyboard shortcuts and bindings
+
+The workbench should grow a small default transport set, then later mature into a configurable bindings surface suitable for a general sync tool.
+
+Near-term transport examples (exact keys can change, but aim for NLE-adjacent defaults):
+- Space: play/pause
+- Left/Right arrow: step by one frame or a small time increment on the shared timeline
+- Home/End: jump to the visible or full timeline range start/end
+- `,` / `.`: previous/next frame (or equivalent step) when focus is on the main workbench
+- Consider focus rules so timeline, Signals, and main window agree on which control receives transport when multiple widgets are visible
+
+Longer-term bindings manager (not a short-term goal):
+- A preferences dialog to view and reassign shortcuts, similar to LibreOffice, Office, or Premiere
+- Persist custom bindings in app-local settings with reset-to-defaults
+- Ship **Help → Keyboard shortcuts** as a read-only cheat sheet early; it can list defaults before a full editor exists and should stay in sync once customization lands
+
+### Undo and redo
+
+Alignment edits are easy to overshoot: viewport corners, track offsets, export overlay rectangle, color limits, and related session fields would benefit from undo/redo stacks (or at least undo for the last destructive geometry change).
+
+Possible directions:
+- Start with viewport quadrilateral and timeline offsets if a full stack is too large for v1
+- Clear or branch undo history when loading a different session or replacing a resource
+- Do not undo async job side effects or preview-only view transforms (camera zoom/pan) unless those are explicitly persisted in session state
+
 ### Session lifecycle polish
 
 The current Close Session action asks for confirmation even when the workbench is already an untitled empty session. A future polish pass should detect this no-op state and either disable the action or close/reset silently without showing "Close the current session and return to an untitled empty workbench?".
+
+Possible directions:
+- **Autosave / crash recovery:** periodically or on meaningful edits, write a recovery copy of the alignment session JSON (and clearly distinguish it from explicit Save). On next launch, offer to restore unsaved work. Scope to session fields the tool already persists; unsaved generated peak JSON remains a separate concern (see Resources ideas).
+- **Copy settings from another session:** an explicit action to import selected fields from a saved session JSON without replacing the whole workspace — e.g. viewport corners and output size, viewport enhancement toggles/levels, export overlay geometry, color limits, or timeline offsets. Useful when the camera rig is fixed across trials. Require a clear picker for which fields to copy and whether to mark the current session dirty.
 
 ### Session load responsiveness
 
@@ -186,6 +218,23 @@ Possible directions:
 - Allow `Subtract Mean` if it only changes y-values; if pyqtgraph changes x-limits as a side effect, restore the timeline-matched x-range afterward.
 - Prefer explicit labels for adapted actions so users can tell when an operation is y-only or timeline-preserving.
 
+### Dataset slice and signal selection within loaded files
+
+Several resources are containers with more than one usable slice inside the file. The workbench should let the user choose what to load without silent exporter defaults everywhere.
+
+H5 radar recording:
+- Today loading applies exporter-compatible default session, group, entry, and subsweep indices. Multi-session H5 files need a picker on load or in Resources (reload after change), with labels that match exporter/HDF5 structure.
+- Changing indices should reload heatmap truth, peak validation, and any H5-derived series; warn if an imported peak JSON no longer matches.
+
+Leg2 `.mat` (see also **Leg2 `.mat` ultrasonic datasource**):
+- Today: hard-coded ultrasonic paths plus raw vs filtered signal kind in the UI.
+- Future: generic variable/signal picker for which arrays to plot (already listed under Leg2 future directions).
+
+General pattern:
+- One “what inside this file?” surface per resource type in Resources or a load dialog
+- Persist the chosen slice in session JSON so reopen is stable
+- Keep manual alignment authoritative; changing slice does not auto-adjust offsets
+
 ### Leg2 `.mat` ultrasonic datasource
 
 Import a Leg2 `.mat` log as an additional signal datasource for manual alignment against the H5 radar recording and camera video.
@@ -200,7 +249,7 @@ Initial direction:
 - Keep the first workflow manual: load `.mat`, view the selected ultrasonic signal, drag the `.mat` track offset until signal features align with the H5 peak-distance time-series and video.
 
 Future directions:
-- Add a `.mat` variable picker that lets the user select multiple variables for display instead of relying on hard-coded ultrasonic paths.
+- Add a `.mat` variable picker that lets the user select multiple variables for display instead of relying on hard-coded ultrasonic paths (see **Dataset slice and signal selection within loaded files** for the shared H5/MAT pattern).
 - Allow selected `.mat` variables to be shown/hidden independently and possibly assigned colors or plotted on separate axes when units differ.
 - Add optional 1D signal cross-correlation between compatible time-series sources, such as H5 peak distance and Leg2 ultrasonic distance, as a diagnostic offset suggestion. This is separate from the image/viewport xcorr idea and should still keep manual alignment as the authority.
 - Consider assisted offset suggestions only if many files need to be synced; manual visual alignment should remain the authority unless a later change explicitly adds accepted automated suggestions.
@@ -239,6 +288,8 @@ Possible directions:
 - Row-scoped warning inspection for peak series: imported/generated peak series can have independent validation warnings or load errors. The Resources details pane already surfaces messages, but a future polish pass could make Inspect Warnings explicitly row-scoped and clearer for each peak series.
 - Signals y auto-range for multiple peak series: ensure y auto-range considers all visible peak series, not only the first or selected series, while still preserving useful ranges when many outliers or no-detection candidates are visible.
 - Startup `--peaks` deduplication: if a session already restores a peak series from a path and startup also provides the same `--peaks` path, consider avoiding duplicate rows or reporting that the startup peak series was already present.
+- **Drag-and-drop load:** drop camera video, H5, session JSON, peak JSON, or Leg2 `.mat` onto the main window or onto the relevant Resources row to start the same load path as the menu/file picker.
+- **Reload when files change on disk:** optional detection that a loaded source file was modified externally, with a non-modal prompt to reload. UX needs care — do not interrupt active scrubbing, playback, export, or in-progress edits; defer or batch prompts; per-resource reload should match existing Reload actions.
 
 ### Render panel control layout cleanup
 
@@ -256,6 +307,13 @@ Follow-up after the Render panel is removed:
 - Color Min should be constrained to be strictly less than Color Max. Today the spinboxes are independent; entering a Color Min ≥ Color Max produces a degenerate color range. Add a validator or cross-constraint so the user cannot commit a value that inverts or collapses the range (e.g. clamp or warn when Color Min would meet or exceed Color Max). This requires additional change logic and is deferred.
 
 ## Useful But Lower Priority
+
+### Workbench UI persistence and media polish
+
+Possible directions:
+- **Persist window layout:** remember main-window geometry, splitter sizes, and related dock/panel state across sessions (separate from alignment session JSON unless explicitly desired). Timeline visible-range persistence is already noted under Resources ideas.
+- **Audio playback:** play camera audio during preview when the source file contains an audio track (MVP explicitly omits audio today). Mute control and sync to `current_time_s`; do not block export if audio is unsupported.
+- **Camera video magnifier (loupe):** while dragging viewport corners on the letterboxed Camera Video panel, show a small zoomed patch under the cursor for fine placement without full-panel zoom (complements optional camera zoom/pan if that is added separately).
 
 ### Background and async processing
 
@@ -341,6 +399,7 @@ Possible directions:
 Improve export behavior around unusual files, failures, and partial outputs.
 
 Possible directions:
+- **Cancel export:** allow the user to cancel a long encode from the progress UI; stop the writer, delete partial output, and return the workbench to an idle state without treating cancel as a hard error.
 - Keep deleting partial output files on failure or cancellation.
 - Make export failure messages more specific when camera decode, H5 render, or video writer setup fails.
 - Add focused handling for camera files with unreadable trailing frames or inconsistent reported frame counts.
