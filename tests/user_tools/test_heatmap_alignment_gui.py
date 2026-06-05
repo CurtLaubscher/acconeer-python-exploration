@@ -2727,14 +2727,16 @@ def test_signal_playhead_scrubbed_handler_updates_session_and_calls_scrub_previe
     window = HeatmapAlignmentWindow()
 
     reanchored: list[None] = []
-    synced_hints: list[str] = []
+    synced_calls: list[tuple[str, bool]] = []
     dirty_calls: list[None] = []
 
     monkeypatch.setattr(window, "_reanchor_playback_clock", lambda: reanchored.append(None))
     monkeypatch.setattr(
         window,
         "_sync_previews",
-        lambda *, camera_access_hint="auto", **_kw: synced_hints.append(camera_access_hint),
+        lambda *, camera_access_hint="auto", refresh_signal_data=True, **_kw: synced_calls.append(
+            (camera_access_hint, refresh_signal_data)
+        ),
     )
     monkeypatch.setattr(window, "_mark_session_dirty", lambda: dirty_calls.append(None))
 
@@ -2742,8 +2744,34 @@ def test_signal_playhead_scrubbed_handler_updates_session_and_calls_scrub_previe
 
     assert window.session.timeline.current_time_s == pytest.approx(3.75)
     assert reanchored == [None]
-    assert synced_hints == ["scrub"]
+    assert synced_calls == [("scrub", False)]
     assert dirty_calls == []
+
+
+def test_refresh_signal_plot_can_update_playhead_without_rebuilding_data(
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = HeatmapAlignmentWindow()
+    plotted_calls: list[None] = []
+    current_times: list[float] = []
+
+    monkeypatch.setattr(
+        window.signal_plot,
+        "set_plotted_signals",
+        lambda **_kwargs: plotted_calls.append(None),
+    )
+    monkeypatch.setattr(
+        window.signal_plot,
+        "set_current_time_s",
+        lambda time_s: current_times.append(time_s),
+    )
+
+    window.session.timeline.current_time_s = 4.25
+    window._refresh_signal_plot(refresh_data=False)
+
+    assert plotted_calls == []
+    assert current_times == [pytest.approx(4.25)]
 
 
 # ---------------------------------------------------------------------------

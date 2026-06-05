@@ -5270,17 +5270,17 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             range_start_s if span_s <= 0 else range_start_s + span_s * slider_value / 10000.0
         )
         self._reanchor_playback_clock()
-        self._sync_previews(camera_access_hint="scrub")
+        self._sync_previews(camera_access_hint="scrub", refresh_signal_data=False)
 
     def _timeline_playhead_changed(self, time_s: float) -> None:
         self.session.timeline.current_time_s = time_s
         self._reanchor_playback_clock()
-        self._sync_previews(camera_access_hint="scrub")
+        self._sync_previews(camera_access_hint="scrub", refresh_signal_data=False)
 
     def _signal_playhead_scrubbed(self, time_s: float) -> None:
         self.session.timeline.current_time_s = time_s
         self._reanchor_playback_clock()
-        self._sync_previews(camera_access_hint="scrub")
+        self._sync_previews(camera_access_hint="scrub", refresh_signal_data=False)
 
     def _timeline_camera_offset_changed(self, offset_s: float) -> None:
         self.offset_spin.setValue(offset_s)
@@ -5359,7 +5359,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         next_time = min(self._playback_started_video_time_s + elapsed_s, range_end_s)
         self.session.timeline.current_time_s = next_time
         self._set_slider_from_current_time()
-        self._sync_previews(camera_access_hint="playback")
+        self._sync_previews(camera_access_hint="playback", refresh_signal_data=False)
         if math.isclose(next_time, range_end_s) or next_time >= range_end_s:
             self._set_playback_active(False)
 
@@ -5500,6 +5500,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
                 self._sync_previews(
                     camera_access_hint="auto",
                     invalidate_source_resolution=False,
+                    refresh_signal_data=False,
                 )
 
         if self._pending_source_resolution_request is not None and not self.play_timer.isActive():
@@ -5512,7 +5513,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             self.play_timer.start(self.play_timer_interval_ms)
             self.play_button.setText("Pause")
             if refresh_viewport:
-                self._sync_previews(camera_access_hint="playback")
+                self._sync_previews(camera_access_hint="playback", refresh_signal_data=False)
             return
 
         was_active = self.play_timer.isActive()
@@ -5520,7 +5521,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._playback_started_at_s = None
         self.play_button.setText("Play")
         if refresh_viewport and was_active:
-            self._sync_previews(camera_access_hint="auto")
+            self._sync_previews(camera_access_hint="auto", refresh_signal_data=False)
 
     def _set_slider_from_current_time(self) -> None:
         range_start_s, range_end_s = self.timeline_range_model.visible_range_s()
@@ -5877,24 +5878,43 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         camera_access_hint: str = "auto",
         invalidate_source_resolution: bool = True,
         timeline_visible_range_s: tuple[float, float] | None = None,
+        refresh_signal_data: bool = True,
     ) -> None:
         if invalidate_source_resolution:
             self._invalidate_source_resolution_viewport()
         self._load_current_camera_frame(access_hint=camera_access_hint)
         self._refresh_camera_view_corners()
+        self._sync_timeline_feedback(
+            timeline_visible_range_s=timeline_visible_range_s,
+            refresh_signal_data=refresh_signal_data,
+        )
+        frame_idx, truth_frame = self._sync_heatmap_truth_preview()
+        self._sync_export_overlay_preview(frame_idx=frame_idx, truth_frame=truth_frame)
+        self._sync_viewport_preview(
+            truth_frame=truth_frame,
+            invalidate_source_resolution=invalidate_source_resolution,
+        )
+
+    def _sync_timeline_feedback(
+        self,
+        *,
+        timeline_visible_range_s: tuple[float, float] | None,
+        refresh_signal_data: bool,
+    ) -> None:
         self._update_timeline_range_from_session()
         if timeline_visible_range_s is not None:
             self.timeline_range_model.set_visible_range(*timeline_visible_range_s)
         self._set_slider_from_current_time()
         self._set_timeline_view_state()
-        self._refresh_signal_plot()
+        self._refresh_signal_plot(refresh_data=refresh_signal_data)
         self.schedule_timeline_axis_geometry_sync()
         self.current_time_label.setText(
             f"t = {self.session.timeline.current_time_s:.3f} s | offset = {self.session.timeline.offset_s:.3f} s"
         )
 
-        truth_frame = None
-        frame_idx = None
+    def _sync_heatmap_truth_preview(self) -> tuple[int | None, np.ndarray | None]:
+        truth_frame: np.ndarray | None = None
+        frame_idx: int | None = None
         if self.heatmap_source is not None and (
             0.0
             <= self.session.timeline.current_time_s
@@ -5915,6 +5935,14 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             self._hover_dvm_cache = None
             self._update_heatmap_peak_cue(None)
         self.truth_view.set_frame(truth_frame)
+        return frame_idx, truth_frame
+
+    def _sync_export_overlay_preview(
+        self,
+        *,
+        frame_idx: int | None,
+        truth_frame: np.ndarray | None,
+    ) -> None:
         if (
             not self.session.export_overlay.visible
             or not self.session.export_overlay.preview_enabled
@@ -5927,9 +5955,10 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             and self.session.export_overlay.width > 0.0
             and self.session.export_overlay.height > 0.0
         ):
-            frame_idx, _ = self.heatmap_source.frame_at_seconds(
-                self.session.timeline.current_time_s
-            )
+            if frame_idx is None:
+                frame_idx, _ = self.heatmap_source.frame_at_seconds(
+                    self.session.timeline.current_time_s
+                )
             presentation_source_size = self._overlay_presentation_source_size()
             peak_overlay = self._peak_overlay_for_frame(frame_idx)
             preview_frame = self._overlay_plot_renderer.render_frame(
@@ -5946,6 +5975,12 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         elif not self._freeze_export_overlay_preview:
             self.camera_view.set_export_overlay_preview_frame(None)
 
+    def _sync_viewport_preview(
+        self,
+        *,
+        truth_frame: np.ndarray | None,
+        invalidate_source_resolution: bool,
+    ) -> None:
         viewport_frame = None
         low_resolution_viewport_frame = None
         if (
@@ -5986,7 +6021,10 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             return "Leg2 filtered ultrasonic"
         return "Leg2 raw ultrasonic"
 
-    def _refresh_signal_plot(self) -> None:
+    def _refresh_signal_plot(self, *, refresh_data: bool = True) -> None:
+        if not refresh_data:
+            self.signal_plot.set_current_time_s(self.session.timeline.current_time_s)
+            return
         # Build list of (display_name, color_hex, PeakDistanceSignalSeries) for visible series.
         peak_series_list = []
         for ps in self._peak_series_list:
