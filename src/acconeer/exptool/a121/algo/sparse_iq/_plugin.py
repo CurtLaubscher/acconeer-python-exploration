@@ -65,7 +65,8 @@ class PluginPresetId(Enum):
 
 
 SEMI_TRANSPARENT_BRUSH = pg.mkBrush(color=(0xFF, 0xFF, 0xFF, int(0.8 * 0xFF)))
-DVM_LEVELS = (0.0, 5000.0)
+PLOT_LEVEL_MAX = 5000.0
+DVM_LEVELS = (0.0, PLOT_LEVEL_MAX)
 
 
 class _WheelEventFilter(QtCore.QObject):
@@ -207,8 +208,6 @@ class PlotPlugin(PlotPluginBase):
         if self.ampl_plot is None:
             raise RuntimeError
 
-        max_ = 0.0
-
         for (
             plot_data_items,
             entry_result,
@@ -231,15 +230,11 @@ class PlotPlugin(PlotPluginBase):
             ) in zip(*plot_data_items, entry_result, subsweeps_distances_m):
                 ampls = subsweep_result.amplitudes
                 amplitude_curve.setData(subsweep_distances_m, ampls)
-                max_ = max(max_, np.max(ampls).item())
 
                 phase_curve.setData(subsweep_distances_m, subsweep_result.phases)
 
                 dvm = subsweep_result.distance_velocity_map
                 ft_image.updateImage(dvm.T, autoLevels=False)
-
-        # self.ampl_plot.setYRange(0, self.smooth_max.update(max_))
-        self.ampl_plot.setYRange(0, 5000.0)
 
     def setup(
         self, metadatas: list[dict[int, a121.Metadata]], session_config: a121.SessionConfig
@@ -292,9 +287,11 @@ class PlotPlugin(PlotPluginBase):
 
         self.ampl_plot = self.amplitude_plot_widget.addPlot()
         # self.ampl_plot.setMenuEnabled(False)
+        self.ampl_plot.setMouseEnabled(x=False, y=True)
         self.ampl_plot.showGrid(x=True, y=True)
         self.ampl_plot.setLabel("left", "Amplitude")
         self.ampl_plot.setLabel("bottom", "Distance (m)")
+        self.ampl_plot.setYRange(0, PLOT_LEVEL_MAX)
         if (
             len(session_config.groups) > 1
             or num_unique_sensors > 1
