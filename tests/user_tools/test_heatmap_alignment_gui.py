@@ -23,6 +23,7 @@ from heatmap_alignment_gui import (  # noqa: E402
     HeatmapAlignmentWindow,
     HeatmapDistanceHeader,
     ImagePreview,
+    RecentSessionStore,
     ResourcesWindow,
     SignalPlotWidget,
     TimelineRangeModel,
@@ -61,6 +62,27 @@ from sparse_iq_heatmap_common import HeatmapAxes  # noqa: E402
 from scipy.io import savemat
 
 
+class _FakeSettings:
+    def __init__(self) -> None:
+        self.values: dict[str, object] = {}
+
+    def value(self, key: str, default: object = None) -> object:
+        return self.values.get(key, default)
+
+    def setValue(self, key: str, value: object) -> None:
+        self.values[key] = value
+
+    def remove(self, key: str) -> None:
+        self.values.pop(key, None)
+
+
+def _use_fake_recent_sessions(window: HeatmapAlignmentWindow) -> _FakeSettings:
+    settings = _FakeSettings()
+    window.recent_sessions = RecentSessionStore(settings)  # type: ignore[arg-type]
+    window._refresh_recent_sessions_menu()
+    return settings
+
+
 def _legend_item_labels(legend: object) -> list[str]:
     labels: list[str] = []
     for _sample, label in legend.items:
@@ -89,6 +111,153 @@ def test_build_argument_parser_rejects_legacy_artifact_flag() -> None:
 
     with pytest.raises(SystemExit):
         parser.parse_args(["--artifact", "session.json"])
+
+
+def test_recent_session_store_orders_deduplicates_and_bounds(tmp_path: Path) -> None:
+    settings = _FakeSettings()
+    store = RecentSessionStore(settings)  # type: ignore[arg-type]
+    paths = [tmp_path / f"session_{index}.json" for index in range(12)]
+
+    for path in paths:
+        store.add(path)
+    store.add(paths[3])
+
+    assert store.paths()[0] == paths[3].resolve(strict=False)
+    assert len(store.paths()) == 10
+    assert len(set(store.paths())) == 10
+    assert paths[0].resolve(strict=False) not in store.paths()
+
+
+def test_recent_session_store_handles_malformed_settings(tmp_path: Path) -> None:
+    settings = _FakeSettings()
+    settings.setValue(RecentSessionStore.SETTINGS_KEY, [tmp_path / "bad.json", 5, ""])
+    store = RecentSessionStore(settings)  # type: ignore[arg-type]
+
+    assert store.paths() == ()
+
+    settings.setValue(RecentSessionStore.SETTINGS_KEY, "single.json")
+
+    assert store.paths() == (Path("single.json").resolve(strict=False),)
+
+    store.clear()
+
+    assert store.paths() == ()
+
+
+def test_recent_sessions_menu_empty_state(qapplication: QApplication) -> None:
+    window = HeatmapAlignmentWindow()
+    _use_fake_recent_sessions(window)
+
+    actions = window.recent_sessions_menu.actions()
+
+    assert actions[0].text() == "No Recent Sessions"
+    assert not actions[0].isEnabled()
+    assert actions[-1].text() == "Clear Recent Sessions"
+    assert not actions[-1].isEnabled()
+
+    window.close()
+    qapplication.processEvents()
+
+
+def test_recent_sessions_menu_uses_filename_labels_and_path_hints(
+    tmp_path: Path, qapplication: QApplication
+) -> None:
+    window = HeatmapAlignmentWindow()
+    _use_fake_recent_sessions(window)
+    session_path = tmp_path / "trial.session.json"
+
+    window.recent_sessions.add(session_path)
+    window._refresh_recent_sessions_menu()
+
+    action = window.recent_sessions_menu.actions()[0]
+
+    assert action.text() == "trial.session.json"
+    assert action.toolTip() == str(session_path.resolve(strict=False))
+    assert action.statusTip() == str(session_path.resolve(strict=False))
+
+    window.close()
+    qapplication.processEvents()
+
+
+def test_missing_recent_session_is_removed_without_prompt(
+    tmp_path: Path, qapplication: QApplication, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    window = HeatmapAlignmentWindow()
+    _use_fake_recent_sessions(window)
+    missing_path = tmp_path / "missing.json"
+    window.recent_sessions.add(missing_path)
+    window._session_dirty = True
+
+    def fail_prompt(_action: str) -> str:
+        raise AssertionError("missing recent session should not prompt")
+
+    monkeypatch.setattr(window, "_prompt_save_discard_cancel", fail_prompt)
+
+    window._open_recent_session(missing_path)
+
+    assert window.recent_sessions.paths() == ()
+    assert str(missing_path) in window.statusBar().currentMessage()
+
+    window._session_dirty = False
+    window.close()
+    qapplication.processEvents()
+
+
+def test_recent_session_load_failure_keeps_existing_file(
+    tmp_path: Path, qapplication: QApplication
+) -> None:
+    window = HeatmapAlignmentWindow()
+    _use_fake_recent_sessions(window)
+    invalid_session_path = tmp_path / "invalid.json"
+    invalid_session_path.write_text("{", encoding="utf-8")
+    window.recent_sessions.add(invalid_session_path)
+
+    window._open_recent_session(invalid_session_path)
+
+    assert window.recent_sessions.paths() == (invalid_session_path.resolve(strict=False),)
+
+    window.close()
+    qapplication.processEvents()
+
+
+def test_recent_session_open_respects_cancel_for_unsaved_work(
+    tmp_path: Path, qapplication: QApplication, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    window = HeatmapAlignmentWindow()
+    _use_fake_recent_sessions(window)
+    session_path = tmp_path / "session.json"
+    save_alignment_session(AlignmentSession(), session_path)
+    window.recent_sessions.add(session_path)
+    window._session_dirty = True
+    monkeypatch.setattr(window, "_prompt_save_discard_cancel", lambda _action: "cancel")
+
+    window._open_recent_session(session_path)
+
+    assert window._current_session_path is None
+
+    window._session_dirty = False
+    window.close()
+    qapplication.processEvents()
+
+
+def test_session_load_and_save_record_recent_sessions(
+    tmp_path: Path, qapplication: QApplication
+) -> None:
+    window = HeatmapAlignmentWindow()
+    _use_fake_recent_sessions(window)
+    session_path = tmp_path / "session.json"
+    saved_path = tmp_path / "saved.json"
+    save_alignment_session(AlignmentSession(), session_path)
+
+    window.load_session_from_path(session_path)
+
+    assert window.recent_sessions.paths()[0] == session_path.resolve(strict=False)
+
+    assert window._write_session_to_path(saved_path)
+    assert window.recent_sessions.paths()[0] == saved_path.resolve(strict=False)
+
+    window.close()
+    qapplication.processEvents()
 
 
 def test_timeline_range_model_exposes_independent_leg2_offset() -> None:
