@@ -92,7 +92,7 @@ from heatmap_alignment_core import (
     validate_alignment_session,
     visible_signal_y_range,
 )
-from sparse_iq_heatmap_common import heatmap_axes, select_subsweep
+from sparse_iq_heatmap_common import distance_velocity_map, heatmap_axes, select_subsweep
 from heatmap_alignment_resource_jobs import (
     CameraResourceJobResult,
     LoadedH5ResourcePayload,
@@ -259,6 +259,9 @@ class ImagePreview(QtWidgets.QLabel):
         super().resizeEvent(event)
         self.resized.emit()
         self.update()
+
+    def rendered_image_rect(self) -> QtCore.QRect:
+        return self.contentsRect()
 
     def paintEvent(self, event: QtGui.QPaintEvent) -> None:
         contents_rect = self.contentsRect()
@@ -3209,6 +3212,126 @@ class GeneratePeakSeriesDialog(QtWidgets.QDialog):
         return default_generated_name(self.algorithm_id, self.threshold)
 
 
+class HeatmapDistanceHeader(QtWidgets.QWidget):
+    """Compact header showing distance extent labels and peak distance cue."""
+
+    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._dist_min: float | None = None
+        self._dist_max: float | None = None
+        self._peak_dist_m: float | None = None
+        self.setFixedHeight(20)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
+
+    def set_extent(self, dist_min: float | None, dist_max: float | None) -> None:
+        self._dist_min = dist_min
+        self._dist_max = dist_max
+        self.update()
+
+    def set_peak_distance(self, peak_dist_m: float | None) -> None:
+        self._peak_dist_m = peak_dist_m
+        self.update()
+
+    def paintEvent(self, event: QtGui.QPaintEvent) -> None:
+        del event
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+        try:
+            w = self.width()
+            h = self.height()
+            fg = QtGui.QColor("#d7dde6")
+            painter.setPen(fg)
+
+            font = painter.font()
+            font.setPointSizeF(max(6.0, font.pointSizeF() * 0.85))
+            painter.setFont(font)
+            fm = QtGui.QFontMetrics(font)
+
+            # Reserve the bottom pixels for the triangle so text sits in the upper band.
+            triangle_size = 5
+            text_h = h - triangle_size - 2  # text rect height, clear of the triangle
+
+            # Gap between adjacent labels (pixels).
+            label_gap = 4
+            # Left margin where extent labels are drawn.
+            margin = 4
+
+            has_peak = (
+                self._peak_dist_m is not None
+                and self._dist_min is not None
+                and self._dist_max is not None
+                and self._dist_max != self._dist_min
+            )
+
+            # Measure extent labels when we have the data (regardless of show_extents threshold).
+            left_text = right_text = ""
+            left_w = right_w = 0
+            if self._dist_min is not None and self._dist_max is not None:
+                left_text = "{:.3f} m".format(self._dist_min)
+                right_text = "{:.3f} m".format(self._dist_max)
+                left_w = fm.horizontalAdvance(left_text)
+                right_w = fm.horizontalAdvance(right_text)
+
+            # Measure peak label.
+            peak_text = ""
+            peak_text_w = 0
+            peak_x = 0
+            if has_peak:
+                peak_text = "{:.3f} m".format(self._peak_dist_m)
+                peak_text_w = fm.horizontalAdvance(peak_text)
+                x_frac = (self._peak_dist_m - self._dist_min) / (self._dist_max - self._dist_min)
+                x_frac = max(0.0, min(1.0, x_frac))
+                peak_x = int(x_frac * w)
+
+            # Decide whether extent labels can coexist with the peak label without overlap.
+            # Extent labels sit at [margin, margin+left_w] and [w-margin-right_w, w-margin].
+            # Peak text center is clamped within [peak_left_bound, peak_right_bound].
+            # If the available gap is too small, suppress extent labels to keep peak cue visible.
+            half_peak = peak_text_w // 2
+            if has_peak and w >= 120 and left_w > 0:
+                # Space available for the peak label center, bounded by extent labels.
+                peak_left_bound = margin + left_w + label_gap + half_peak
+                peak_right_bound = w - margin - right_w - label_gap - half_peak
+                show_extents = peak_left_bound <= peak_right_bound
+            else:
+                show_extents = w >= 120 and left_w > 0
+                peak_left_bound = margin + half_peak
+                peak_right_bound = w - margin - half_peak
+
+            if show_extents:
+                painter.drawText(margin, 0, w - 2 * margin, text_h, int(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter), left_text)
+                painter.drawText(margin, 0, w - 2 * margin, text_h, int(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter), right_text)
+
+            if has_peak:
+                # Clamp peak label center to avoid running off the widget edges.
+                text_center = max(
+                    margin + half_peak,
+                    min(w - margin - half_peak, peak_x),
+                )
+                # Further clamp within the measured extent-label bounds when extents are shown.
+                if show_extents:
+                    text_center = max(peak_left_bound, min(peak_right_bound, text_center))
+                text_left = text_center - half_peak
+
+                # Draw peak label text in the same upper band as extent labels.
+                painter.setPen(fg)
+                painter.drawText(text_left, 0, peak_text_w + 2, text_h, int(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter), peak_text)
+
+                # Triangle always tracks true peak_x regardless of label clamping.
+                tri_tip_y = h - 1
+                tri_top_y = tri_tip_y - triangle_size
+                path = QtGui.QPainterPath()
+                path.moveTo(peak_x, tri_tip_y)
+                path.lineTo(peak_x - triangle_size, tri_top_y)
+                path.lineTo(peak_x + triangle_size, tri_top_y)
+                path.closeSubpath()
+                painter.setBrush(fg)
+                painter.setPen(QtCore.Qt.PenStyle.NoPen)
+                painter.drawPath(path)
+        finally:
+            painter.end()
+
+
 class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
     """Main window for the manual alignment workbench."""
 
@@ -3232,6 +3355,9 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._camera_reference_width = 0
         self._camera_reference_height = 0
         self._overlay_plot_renderer: HeatmapPlotRenderer | None = None
+        self._hover_dvm_cache: tuple[int, np.ndarray] | None = None
+        self._hover_last_pos: QtCore.QPoint | None = None
+        self._heatmap_axes = None
         self._peak_series_list: list[PeakSeriesResource] = []
         self._heatmap_peak_selector_id: str | None = None
         self.leg2_ultrasonic_datasource: LoadedLeg2UltrasonicDatasource | None = None
@@ -3446,7 +3572,12 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         right_layout.addWidget(viewport_group)
         rendered_heatmap_group = QtWidgets.QGroupBox("Rendered Heatmap")
         rendered_heatmap_layout = QtWidgets.QVBoxLayout(rendered_heatmap_group)
+        rendered_heatmap_layout.setSpacing(0)
+        self._heatmap_distance_header = HeatmapDistanceHeader()
+        rendered_heatmap_layout.addWidget(self._heatmap_distance_header)
         rendered_heatmap_layout.addWidget(self.truth_view)
+        self.truth_view.setMouseTracking(True)
+        self.truth_view.installEventFilter(self)
         self.rendered_heatmap_controls_widget = QtWidgets.QWidget()
         rendered_heatmap_controls_layout = QtWidgets.QVBoxLayout(
             self.rendered_heatmap_controls_widget
@@ -3468,6 +3599,9 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         rendered_heatmap_color_row.addWidget(QtWidgets.QLabel("Color Max"))
         rendered_heatmap_color_row.addWidget(self.color_max_spin)
         rendered_heatmap_color_row.addStretch(1)
+        self._heatmap_vel_extent_label = QtWidgets.QLabel("")
+        self._heatmap_vel_extent_label.setStyleSheet("color: #d7dde6; font-size: 10px;")
+        rendered_heatmap_color_row.addWidget(self._heatmap_vel_extent_label)
         rendered_heatmap_controls_layout.addLayout(rendered_heatmap_color_row)
         # Peak series marker selector.
         rendered_heatmap_peak_row = QtWidgets.QHBoxLayout()
@@ -4505,22 +4639,78 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         truth_frame: np.ndarray,
         frame_idx: int,
     ) -> np.ndarray:
-        peak_overlay = self._peak_overlay_for_frame(frame_idx)
-        if peak_overlay is None or self.heatmap_source is None:
-            return truth_frame
-        peak_distance_m, zero_velocity_m_s = peak_overlay
+        return truth_frame
+
+    def _update_heatmap_extent_labels(self) -> None:
+        if self.heatmap_source is None:
+            self._heatmap_distance_header.set_extent(None, None)
+            self._heatmap_vel_extent_label.setText("")
+            self._heatmap_axes = None
+            return
         subsweep = select_subsweep(self.heatmap_source.record, self.heatmap_source.subsweep_idx)
-        axes = heatmap_axes(
-            self.heatmap_source.record.metadata,
-            self.heatmap_source.record.sensor_config,
-            subsweep,
+        axes = heatmap_axes(self.heatmap_source.record.metadata, self.heatmap_source.record.sensor_config, subsweep)
+        self._heatmap_axes = axes
+        self._heatmap_distance_header.set_extent(float(axes.distances_m[0]), float(axes.distances_m[-1]))
+        v_limit = max(abs(float(axes.velocities_m_s[0])), abs(float(axes.velocities_m_s[-1])))
+        self._heatmap_vel_extent_label.setText(
+            "Velocity limits: ±{:.3f} m/s".format(v_limit)
         )
-        return annotate_heatmap_rgb_with_peak(
-            truth_frame,
-            axes=axes,
-            peak_distance_m=peak_distance_m,
-            zero_velocity_m_s=zero_velocity_m_s,
-        )
+
+    def _update_heatmap_peak_cue(self, frame_idx: int | None) -> None:
+        if frame_idx is None or self.heatmap_source is None:
+            self._heatmap_distance_header.set_peak_distance(None)
+            return
+        peak_overlay = self._peak_overlay_for_frame(frame_idx)
+        if peak_overlay is None:
+            self._heatmap_distance_header.set_peak_distance(None)
+        else:
+            dist = peak_overlay[0]
+            if self._heatmap_axes is not None:
+                d_min = float(self._heatmap_axes.distances_m[0])
+                d_max = float(self._heatmap_axes.distances_m[-1])
+                if dist < d_min or dist > d_max:
+                    self._heatmap_distance_header.set_peak_distance(None)
+                    return
+            self._heatmap_distance_header.set_peak_distance(dist)
+
+    def eventFilter(self, obj: QtCore.QObject, event: QtCore.QEvent) -> bool:
+        if obj is self.truth_view:
+            etype = event.type()
+            if etype == QtCore.QEvent.Type.MouseMove:
+                self._hover_last_pos = event.position().toPoint()
+                self._refresh_hover_tooltip()
+                return False
+            if etype == QtCore.QEvent.Type.Leave:
+                self._hover_last_pos = None
+                QtWidgets.QToolTip.hideText()
+                return False
+        return super().eventFilter(obj, event)
+
+    def _refresh_hover_tooltip(self) -> None:
+        if self._hover_last_pos is None or self._heatmap_axes is None or self._hover_dvm_cache is None:
+            QtWidgets.QToolTip.hideText()
+            return
+        rect = self.truth_view.rendered_image_rect()
+        pos = self._hover_last_pos
+        if not rect.contains(pos):
+            QtWidgets.QToolTip.hideText()
+            return
+        axes = self._heatmap_axes
+        dist_min = float(axes.distances_m[0])
+        dist_max = float(axes.distances_m[-1])
+        vel_min = float(axes.velocities_m_s[0])
+        vel_max = float(axes.velocities_m_s[-1])
+        x_frac = (pos.x() - rect.left()) / max(1, rect.width())
+        y_frac = (pos.y() - rect.top()) / max(1, rect.height())
+        dist_val = dist_min + x_frac * (dist_max - dist_min)
+        vel_val = vel_min + y_frac * (vel_max - vel_min)
+        dist_idx = int(np.argmin(np.abs(axes.distances_m - dist_val)))
+        vel_idx = int(np.argmin(np.abs(axes.velocities_m_s - vel_val)))
+        dvm = self._hover_dvm_cache[1]
+        magnitude = int(round(float(dvm[vel_idx, dist_idx])))
+        text = "Distance: {:.3f} m\nVelocity: {:.3f} m/s\nMagnitude: {}".format(dist_val, vel_val, magnitude)
+        global_pos = self.truth_view.mapToGlobal(pos)
+        QtWidgets.QToolTip.showText(global_pos, text, self.truth_view)
 
     def _save_session(self) -> None:
         if self._current_session_path is None:
@@ -4891,6 +5081,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         # They remain valid signal data and the user can unload them individually.
         self._h5_replacement_backup = None
         self._inflight_h5_identity = None
+        self._update_heatmap_extent_labels()
         self.statusBar().showMessage(f"Loaded H5 recording: {payload.path.name}")
 
     def _restore_camera_replacement_backup(self) -> None:
@@ -4935,6 +5126,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.session.viewport.output_height = backup.viewport_output_height
         self._rebuild_overlay_plot_renderer()
         self._h5_replacement_backup = None
+        self._update_heatmap_extent_labels()
 
     def _handle_resource_job_state_changed(self) -> None:
         for kind in ("camera", "radar_h5"):
@@ -5778,6 +5970,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         )
 
         truth_frame = None
+        frame_idx = None
         if self.heatmap_source is not None and (
             0.0
             <= self.session.timeline.current_time_s
@@ -5787,6 +5980,16 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
                 self.session.timeline.current_time_s
             )
             truth_frame = self._annotate_truth_frame_with_peak(truth_frame, frame_idx)
+        if self.heatmap_source is not None and frame_idx is not None:
+            if self._hover_dvm_cache is None or self._hover_dvm_cache[0] != frame_idx:
+                subframe = self.heatmap_source.record.results[frame_idx].subframes[self.heatmap_source.subsweep_idx]
+                self._hover_dvm_cache = (frame_idx, distance_velocity_map(subframe))
+            self._update_heatmap_peak_cue(frame_idx)
+            if self._hover_last_pos is not None:
+                self._refresh_hover_tooltip()
+        else:
+            self._hover_dvm_cache = None
+            self._update_heatmap_peak_cue(None)
         self.truth_view.set_frame(truth_frame)
         if (
             not self.session.export_overlay.visible
@@ -6371,6 +6574,10 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._overlay_plot_renderer = None
         self.session.heatmap_track = HeatmapTrack()
         self.truth_view.set_frame(None)
+        self._hover_dvm_cache = None
+        self._hover_last_pos = None
+        QtWidgets.QToolTip.hideText()
+        self._update_heatmap_extent_labels()
         self._set_resource_reload_error("radar_h5", None)
         self._set_resource_warnings("radar_h5", ())
         self._update_controls_enabled_state()

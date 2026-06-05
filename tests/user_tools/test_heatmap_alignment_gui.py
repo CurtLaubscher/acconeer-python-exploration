@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import unittest.mock
 from pathlib import Path
 
 import numpy as np
@@ -20,6 +21,8 @@ from heatmap_alignment_gui import (  # noqa: E402
     AlignmentTimelineWidget,
     CornerEditorWidget,
     HeatmapAlignmentWindow,
+    HeatmapDistanceHeader,
+    ImagePreview,
     ResourcesWindow,
     SignalPlotWidget,
     TimelineRangeModel,
@@ -36,6 +39,7 @@ from heatmap_alignment_core import (  # noqa: E402
     AlignmentSession,
     CameraTrack,
     ExportOverlaySettings,
+    HeatmapPlotRenderer,
     HeatmapTrack,
     Leg2StanceIntervals,
     Leg2UltrasonicDatasourceSettings,
@@ -53,6 +57,7 @@ from sparse_iq_peak_distance_core import (  # noqa: E402
     LoadedPeakDistanceDatasource,
     PeakDistanceMetadata,
 )
+from sparse_iq_heatmap_common import HeatmapAxes  # noqa: E402
 from scipy.io import savemat
 
 
@@ -1321,6 +1326,7 @@ def test_apply_h5_job_result_preserves_peak_series_for_different_replacement(
 
     monkeypatch.setattr(window, "_rebuild_overlay_plot_renderer", lambda: None)
     monkeypatch.setattr(window, "_reload_peak_distance_datasource_from_session", lambda: None)
+    monkeypatch.setattr(window, "_update_heatmap_extent_labels", lambda: None)
 
     class _FakeHeatmapSource:
         def close(self) -> None:
@@ -1385,6 +1391,7 @@ def test_restore_h5_replacement_backup_preserves_peak_datasource(
     )
     window.heatmap_source = _FakeHeatmapSource()
     monkeypatch.setattr(window, "_rebuild_overlay_plot_renderer", lambda: None)
+    monkeypatch.setattr(window, "_update_heatmap_extent_labels", lambda: None)
 
     window._restore_h5_replacement_backup()
 
@@ -2522,6 +2529,7 @@ def test_peak_series_preserve_after_h5_replacement(
     )
     monkeypatch.setattr(window, "_rebuild_overlay_plot_renderer", lambda: None)
     monkeypatch.setattr(window, "_reload_peak_distance_datasource_from_session", lambda: None)
+    monkeypatch.setattr(window, "_update_heatmap_extent_labels", lambda: None)
     monkeypatch.setattr("heatmap_alignment_gui.build_h5_truth_source_from_payload", lambda _: _FakeHeatmapSource())
 
     payload = LoadedH5ResourcePayload(
@@ -2866,4 +2874,572 @@ def test_generate_button_disabled_on_peak_series_row(qapplication: QApplication)
     )
     assert not rw.replace_button.isEnabled(), (
         "Replace button must be disabled for individual peak series rows"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Coordinate context tests (add-rendered-heatmap-coordinate-context)
+# ---------------------------------------------------------------------------
+
+
+def test_image_preview_rendered_image_rect_returns_contents_rect(
+    qapplication: QApplication,
+) -> None:
+    """rendered_image_rect() must equal contentsRect() on a sized widget."""
+    widget = ImagePreview("Test")
+    widget.resize(400, 300)
+    assert widget.rendered_image_rect() == widget.contentsRect()
+
+
+def test_heatmap_distance_header_initial_no_crash(
+    qapplication: QApplication,
+) -> None:
+    """set_extent(None, None) and set_peak_distance(None) must not raise."""
+    header = HeatmapDistanceHeader()
+    header.set_extent(None, None)
+    header.set_peak_distance(None)
+
+
+def test_heatmap_distance_header_stores_extent(
+    qapplication: QApplication,
+) -> None:
+    """set_extent must store _dist_min and _dist_max."""
+    header = HeatmapDistanceHeader()
+    header.set_extent(0.2, 2.5)
+    assert header._dist_min == 0.2
+    assert header._dist_max == 2.5
+
+
+def test_heatmap_distance_header_stores_peak_distance(
+    qapplication: QApplication,
+) -> None:
+    """set_peak_distance must store _peak_dist_m."""
+    header = HeatmapDistanceHeader()
+    header.set_extent(0.2, 2.5)
+    header.set_peak_distance(1.0)
+    assert header._peak_dist_m == 1.0
+
+
+def test_heatmap_distance_header_peak_none_when_cleared(
+    qapplication: QApplication,
+) -> None:
+    """set_peak_distance(None) after a value must set _peak_dist_m to None."""
+    header = HeatmapDistanceHeader()
+    header.set_peak_distance(1.0)
+    header.set_peak_distance(None)
+    assert header._peak_dist_m is None
+
+
+def test_heatmap_distance_header_paint_no_crash_peak_at_left_edge(
+    qapplication: QApplication,
+) -> None:
+    """paintEvent must not raise when peak is at the left limit (collision zone)."""
+    header = HeatmapDistanceHeader()
+    header.resize(300, 20)
+    header.set_extent(0.2, 2.5)
+    header.set_peak_distance(0.2)  # peak == dist_min: far left, collision candidate
+    header.repaint()  # force paintEvent synchronously
+
+
+def test_heatmap_distance_header_paint_no_crash_peak_at_right_edge(
+    qapplication: QApplication,
+) -> None:
+    """paintEvent must not raise when peak is at the right limit (collision zone)."""
+    header = HeatmapDistanceHeader()
+    header.resize(300, 20)
+    header.set_extent(0.2, 2.5)
+    header.set_peak_distance(2.5)  # peak == dist_max: far right, collision candidate
+    header.repaint()
+
+
+def test_heatmap_distance_header_paint_no_crash_narrow_with_peak(
+    qapplication: QApplication,
+) -> None:
+    """paintEvent must not raise at a very narrow width with a peak set."""
+    header = HeatmapDistanceHeader()
+    header.resize(80, 20)  # below the 120px show_extents threshold
+    header.set_extent(0.2, 2.5)
+    header.set_peak_distance(1.0)
+    header.repaint()
+
+
+def test_heatmap_alignment_window_has_distance_header(
+    qapplication: QApplication,
+) -> None:
+    """HeatmapAlignmentWindow must expose _heatmap_distance_header."""
+    window = HeatmapAlignmentWindow()
+    assert hasattr(window, "_heatmap_distance_header")
+
+
+def test_heatmap_alignment_window_has_vel_extent_label(
+    qapplication: QApplication,
+) -> None:
+    """HeatmapAlignmentWindow must expose _heatmap_vel_extent_label."""
+    window = HeatmapAlignmentWindow()
+    assert hasattr(window, "_heatmap_vel_extent_label")
+
+
+def test_heatmap_alignment_window_has_heatmap_axes_attribute(
+    qapplication: QApplication,
+) -> None:
+    """_heatmap_axes must exist and be None before any H5 is loaded."""
+    window = HeatmapAlignmentWindow()
+    assert hasattr(window, "_heatmap_axes")
+    assert window._heatmap_axes is None
+
+
+def test_annotate_truth_frame_returns_frame_unchanged(
+    qapplication: QApplication,
+) -> None:
+    """_annotate_truth_frame_with_peak must return the frame identity (no H5 loaded)."""
+    window = HeatmapAlignmentWindow()
+    frame = np.zeros((100, 100, 3), dtype=np.uint8)
+    result = window._annotate_truth_frame_with_peak(frame, 0)
+    assert result is frame or np.array_equal(result, frame)
+
+
+def test_hover_dvm_cache_initialized_none(
+    qapplication: QApplication,
+) -> None:
+    """_hover_dvm_cache must be None on construction."""
+    window = HeatmapAlignmentWindow()
+    assert window._hover_dvm_cache is None
+
+
+def test_hover_last_pos_initialized_none(
+    qapplication: QApplication,
+) -> None:
+    """_hover_last_pos must be None on construction."""
+    window = HeatmapAlignmentWindow()
+    assert window._hover_last_pos is None
+
+
+def test_refresh_hover_tooltip_no_crash_without_state(
+    qapplication: QApplication,
+) -> None:
+    """_refresh_hover_tooltip must not raise when no H5 is loaded."""
+    window = HeatmapAlignmentWindow()
+    window._refresh_hover_tooltip()
+
+
+def test_truth_view_has_mouse_tracking(
+    qapplication: QApplication,
+) -> None:
+    """truth_view must have mouse tracking enabled."""
+    window = HeatmapAlignmentWindow()
+    assert window.truth_view.hasMouseTracking() is True
+
+
+# ---------------------------------------------------------------------------
+# Task 4.2 — Hover coordinate mapping, formatting, hide-on-leave, magnitude
+# ---------------------------------------------------------------------------
+
+
+def _make_hover_axes() -> HeatmapAxes:
+    """Return a small synthetic HeatmapAxes for hover mapping tests."""
+    distances_m = np.linspace(0.5, 1.5, 5)  # 5 distance bins
+    velocities_m_s = np.linspace(-1.0, 1.0, 4)  # 4 velocity bins (vel_min=-1.0, vel_max=1.0)
+    return HeatmapAxes(
+        distances_m=distances_m,
+        velocities_m_s=velocities_m_s,
+        velocity_resolution=0.5,
+    )
+
+
+def _inject_hover_state(
+    window: HeatmapAlignmentWindow,
+    axes: HeatmapAxes,
+    dvm: np.ndarray,
+) -> None:
+    """Inject axes and DVM cache directly into window hover state."""
+    window._heatmap_axes = axes
+    window._hover_dvm_cache = (0, dvm)
+
+
+def test_hover_tooltip_top_left_maps_to_dist_min_and_vel_min(
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hovering the top-left corner must report dist_min and vel_min.
+
+    truth_view renders DVM row 0 at the top of the image (no vertical flip).
+    After fftshift, row 0 corresponds to vel_min, so screen-top == vel_min.
+    """
+    window = HeatmapAlignmentWindow()
+    axes = _make_hover_axes()
+    n_vel, n_dist = len(axes.velocities_m_s), len(axes.distances_m)
+    dvm = np.arange(n_vel * n_dist, dtype=np.float32).reshape(n_vel, n_dist)
+    _inject_hover_state(window, axes, dvm)
+
+    window.truth_view.resize(200, 100)
+    rect = window.truth_view.rendered_image_rect()
+
+    # Position at the exact top-left corner of the rendered rect
+    pos = QtCore.QPoint(rect.left(), rect.top())
+    window._hover_last_pos = pos
+
+    captured: list[str] = []
+
+    def fake_show_text(global_pos: QtCore.QPoint, text: str, widget: QtWidgets.QWidget) -> None:
+        captured.append(text)
+
+    monkeypatch.setattr(QtWidgets.QToolTip, "showText", fake_show_text)
+
+    window._refresh_hover_tooltip()
+
+    assert len(captured) == 1
+    text = captured[0]
+    dist_min = float(axes.distances_m[0])
+    vel_min = float(axes.velocities_m_s[0])
+    assert "Distance: {:.3f} m".format(dist_min) in text
+    assert "Velocity: {:.3f} m/s".format(vel_min) in text
+    assert "Magnitude:" in text
+
+
+def test_hover_tooltip_bottom_right_maps_to_near_dist_max_and_vel_max(
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hovering near the bottom-right must report distance and velocity near their maxima.
+
+    Qt's rect.right() == rect.left() + rect.width() - 1 (last included pixel),
+    so x_frac and y_frac are slightly below 1.0; reported values are close to
+    dist_max and vel_max but not exactly equal.  The test verifies the formula
+    direction: bottom → high velocity (positive), right → high distance.
+    """
+    window = HeatmapAlignmentWindow()
+    axes = _make_hover_axes()
+    n_vel, n_dist = len(axes.velocities_m_s), len(axes.distances_m)
+    dvm = np.zeros((n_vel, n_dist), dtype=np.float32)
+    _inject_hover_state(window, axes, dvm)
+
+    window.truth_view.resize(200, 100)
+    rect = window.truth_view.rendered_image_rect()
+
+    # Position at the last included pixel inside the bottom-right corner
+    pos = QtCore.QPoint(rect.right(), rect.bottom())
+    window._hover_last_pos = pos
+
+    captured: list[str] = []
+
+    def fake_show_text(global_pos: QtCore.QPoint, text: str, widget: QtWidgets.QWidget) -> None:
+        captured.append(text)
+
+    monkeypatch.setattr(QtWidgets.QToolTip, "showText", fake_show_text)
+
+    window._refresh_hover_tooltip()
+
+    assert len(captured) == 1
+    text = captured[0]
+
+    # Parse reported values and verify they are in the upper half of each axis range
+    dist_mid = (float(axes.distances_m[0]) + float(axes.distances_m[-1])) / 2.0
+    vel_mid = (float(axes.velocities_m_s[0]) + float(axes.velocities_m_s[-1])) / 2.0
+    import re
+    dist_match = re.search(r"Distance: ([\d.]+) m", text)
+    vel_match = re.search(r"Velocity: (-?[\d.]+) m/s", text)
+    assert dist_match is not None
+    assert vel_match is not None
+    reported_dist = float(dist_match.group(1))
+    reported_vel = float(vel_match.group(1))
+    assert reported_dist > dist_mid, f"Expected dist > {dist_mid:.3f}, got {reported_dist:.3f}"
+    assert reported_vel > vel_mid, f"Expected vel > {vel_mid:.3f}, got {reported_vel:.3f}"
+
+
+def test_hover_tooltip_magnitude_matches_dvm_lookup(
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reported magnitude must equal dvm[vel_idx, dist_idx] for the hovered cell."""
+    window = HeatmapAlignmentWindow()
+    axes = _make_hover_axes()
+    n_vel, n_dist = len(axes.velocities_m_s), len(axes.distances_m)
+    # Fill DVM with unique values so we can identify which cell was looked up
+    dvm = np.arange(n_vel * n_dist, dtype=np.float32).reshape(n_vel, n_dist) * 100.0
+    _inject_hover_state(window, axes, dvm)
+
+    window.truth_view.resize(200, 100)
+    rect = window.truth_view.rendered_image_rect()
+
+    # Hover at the top-left (vel_min = row 0, dist_min = col 0)
+    pos = QtCore.QPoint(rect.left(), rect.top())
+    window._hover_last_pos = pos
+
+    captured: list[str] = []
+
+    def fake_show_text(global_pos: QtCore.QPoint, text: str, widget: QtWidgets.QWidget) -> None:
+        captured.append(text)
+
+    monkeypatch.setattr(QtWidgets.QToolTip, "showText", fake_show_text)
+
+    window._refresh_hover_tooltip()
+
+    assert len(captured) == 1
+    # dvm[0, 0] == 0 * 100 == 0; magnitude line should say "Magnitude: 0"
+    assert "Magnitude: 0" in captured[0]
+
+
+def test_hover_tooltip_hides_on_leave_event(
+    qapplication: QApplication,
+) -> None:
+    """A Leave event from truth_view must clear _hover_last_pos."""
+    window = HeatmapAlignmentWindow()
+    axes = _make_hover_axes()
+    n_vel, n_dist = len(axes.velocities_m_s), len(axes.distances_m)
+    dvm = np.zeros((n_vel, n_dist), dtype=np.float32)
+    _inject_hover_state(window, axes, dvm)
+
+    window.truth_view.resize(200, 100)
+    rect = window.truth_view.rendered_image_rect()
+    window._hover_last_pos = QtCore.QPoint(rect.center())
+
+    leave_event = QtCore.QEvent(QtCore.QEvent.Type.Leave)
+    window.eventFilter(window.truth_view, leave_event)
+
+    assert window._hover_last_pos is None
+
+
+def test_hover_tooltip_magnitude_updates_on_dvm_cache_change(
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Updating _hover_dvm_cache and calling _refresh_hover_tooltip must report new magnitude."""
+    window = HeatmapAlignmentWindow()
+    axes = _make_hover_axes()
+    n_vel, n_dist = len(axes.velocities_m_s), len(axes.distances_m)
+
+    dvm_frame0 = np.zeros((n_vel, n_dist), dtype=np.float32)
+    dvm_frame1 = np.full((n_vel, n_dist), 999.0, dtype=np.float32)
+
+    window._heatmap_axes = axes
+    window._hover_dvm_cache = (0, dvm_frame0)
+
+    window.truth_view.resize(200, 100)
+    rect = window.truth_view.rendered_image_rect()
+    window._hover_last_pos = QtCore.QPoint(rect.left(), rect.top())
+
+    captured: list[str] = []
+
+    def fake_show_text(global_pos: QtCore.QPoint, text: str, widget: QtWidgets.QWidget) -> None:
+        captured.append(text)
+
+    monkeypatch.setattr(QtWidgets.QToolTip, "showText", fake_show_text)
+
+    # First readout: magnitude 0
+    window._refresh_hover_tooltip()
+    assert "Magnitude: 0" in captured[-1]
+
+    # Simulate frame change: update DVM cache to frame 1
+    window._hover_dvm_cache = (1, dvm_frame1)
+    window._refresh_hover_tooltip()
+    assert "Magnitude: 999" in captured[-1]
+
+
+# ---------------------------------------------------------------------------
+# Task 4.3 — rendered_image_rect dimensions vs. viewport_view after header
+# ---------------------------------------------------------------------------
+
+
+def test_truth_view_rendered_image_rect_equals_contents_rect_after_resize(
+    qapplication: QApplication,
+) -> None:
+    """truth_view.rendered_image_rect() must equal contentsRect() at any size."""
+    window = HeatmapAlignmentWindow()
+    window.truth_view.resize(320, 240)
+    assert window.truth_view.rendered_image_rect() == window.truth_view.contentsRect()
+
+
+def test_viewport_view_rendered_image_rect_equals_contents_rect_after_resize(
+    qapplication: QApplication,
+) -> None:
+    """viewport_view.rendered_image_rect() must equal contentsRect() at any size."""
+    window = HeatmapAlignmentWindow()
+    window.viewport_view.resize(320, 240)
+    assert window.viewport_view.rendered_image_rect() == window.viewport_view.contentsRect()
+
+
+def test_truth_view_and_viewport_view_rendered_image_rect_same_when_same_size(
+    qapplication: QApplication,
+) -> None:
+    """Both preview panes must report the same rendered_image_rect dimensions when sized equally.
+
+    The HeatmapDistanceHeader sits outside truth_view, so truth_view.contentsRect()
+    must not shrink relative to viewport_view when both are set to the same pixel size.
+    """
+    window = HeatmapAlignmentWindow()
+    target_size = QtCore.QSize(320, 240)
+    window.truth_view.resize(target_size)
+    window.viewport_view.resize(target_size)
+    truth_rect = window.truth_view.rendered_image_rect()
+    viewport_rect = window.viewport_view.rendered_image_rect()
+    assert truth_rect.size() == viewport_rect.size()
+
+
+def test_truth_view_rendered_image_rect_narrow_width(
+    qapplication: QApplication,
+) -> None:
+    """At narrow width (<120 px) truth_view.rendered_image_rect() still equals contentsRect().
+
+    This is the case where HeatmapDistanceHeader hides its extent labels; the
+    truth_view geometry must remain unaffected (no overlap from labels).
+    """
+    window = HeatmapAlignmentWindow()
+    window.truth_view.resize(80, 100)
+    assert window.truth_view.rendered_image_rect() == window.truth_view.contentsRect()
+
+
+# ---------------------------------------------------------------------------
+# Task 4.5 — Export smoke check: compact peak marker vs. legacy annotation
+# ---------------------------------------------------------------------------
+
+
+def _make_minimal_plot_renderer() -> HeatmapPlotRenderer:
+    """Return a HeatmapPlotRenderer with a live matplotlib axes, bypassing H5 loading."""
+    from matplotlib.figure import Figure
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+
+    renderer = object.__new__(HeatmapPlotRenderer)
+    # Minimal attributes expected by _rebuild_canvas / _draw_peak_marker
+    renderer.extent = (0.5, 1.5, -1.0, 1.0)  # (dist_min, dist_max, vel_min, vel_max)
+    mock_source = unittest.mock.MagicMock()
+    mock_source.color_min = 0.0
+    mock_source.color_max = 3000.0
+    renderer.heatmap_source = mock_source
+    renderer._peak_artists = []
+    renderer._output_size = (0, 0)
+    renderer._presentation = None
+    renderer._figure = None
+    renderer._canvas = None
+    renderer._ax = None
+    renderer._image = None
+
+    # Build a minimal canvas so _ax is populated
+    width, height = 120, 90
+    dpi = 100.0
+    figure = Figure(figsize=(width / dpi, height / dpi), dpi=dpi)
+    FigureCanvasAgg(figure)
+    ax = figure.add_subplot(111)
+    renderer._ax = ax
+    renderer._figure = figure
+
+    return renderer
+
+
+def test_draw_peak_marker_creates_two_artists_for_valid_peak() -> None:
+    """_draw_peak_marker with a valid peak_distance_m must add exactly 2 artists (marker + label)."""
+    renderer = _make_minimal_plot_renderer()
+    renderer._draw_peak_marker(1.0, None)
+    assert len(renderer._peak_artists) == 2
+
+
+def test_draw_peak_marker_creates_no_artists_when_peak_is_none() -> None:
+    """_draw_peak_marker(None, ...) must leave _peak_artists empty."""
+    renderer = _make_minimal_plot_renderer()
+    renderer._draw_peak_marker(None, None)
+    assert len(renderer._peak_artists) == 0
+
+
+def test_draw_peak_marker_clears_previous_artists_on_new_call() -> None:
+    """Calling _draw_peak_marker twice must not accumulate stale artists."""
+    renderer = _make_minimal_plot_renderer()
+    renderer._draw_peak_marker(1.0, None)
+    first_artists = list(renderer._peak_artists)
+    renderer._draw_peak_marker(1.2, None)
+    assert len(renderer._peak_artists) == 2
+    # Artists from the second call must differ from the first call
+    assert renderer._peak_artists != first_artists
+
+
+def test_annotate_truth_frame_returns_frame_unchanged_with_nonzero_frame_idx(
+    qapplication: QApplication,
+) -> None:
+    """_annotate_truth_frame_with_peak must return frame unchanged for any frame_idx (no H5)."""
+    window = HeatmapAlignmentWindow()
+    frame = np.ones((50, 80, 3), dtype=np.uint8) * 128
+    for idx in (0, 1, 5, 99):
+        result = window._annotate_truth_frame_with_peak(frame, idx)
+        assert np.array_equal(result, frame), f"Frame was modified for frame_idx={idx}"
+
+
+# ---------------------------------------------------------------------------
+# Task 4.4: Minimum-height / splitter overlap prevention
+# ---------------------------------------------------------------------------
+
+
+def test_rendered_heatmap_group_minimum_height_includes_distance_header(
+    qapplication: QApplication,
+) -> None:
+    """Task 4.4: rendered_heatmap_group minimum height must account for the HeatmapDistanceHeader.
+
+    _stacked_layout_minimum_height is called with rendered_heatmap_layout to set the group's
+    minimumHeight.  HeatmapDistanceHeader has setFixedHeight(20), so the group minimum must be
+    at least truth_view.minimumHeight() + header.minimumHeight() (plus layout spacing/margins).
+    This confirms the splitter overlap-prevention logic still accounts for the new header row.
+    """
+    window = HeatmapAlignmentWindow()
+
+    header = window._heatmap_distance_header
+    truth_view = window.truth_view
+
+    # Both components must contribute a positive minimum height.
+    assert header.minimumHeight() > 0, "HeatmapDistanceHeader must have positive minimumHeight"
+    assert truth_view.minimumHeight() > 0, "truth_view must have positive minimumHeight"
+
+    # The rendered heatmap group minimum height must be at least the sum of the two main
+    # content widgets' minimum heights (header + preview image).
+    # This is the structural guarantee that adding the header cannot shrink the group
+    # below the point where controls would overlap preview content.
+    from PySide6 import QtWidgets
+
+    # Find the rendered heatmap group box (parent of truth_view is the group).
+    rendered_heatmap_group = None
+    parent = truth_view.parent()
+    while parent is not None:
+        if isinstance(parent, QtWidgets.QGroupBox) and parent.title() == "Rendered Heatmap":
+            rendered_heatmap_group = parent
+            break
+        parent = parent.parent()
+
+    assert rendered_heatmap_group is not None, "Could not find 'Rendered Heatmap' QGroupBox"
+
+    group_min_h = rendered_heatmap_group.minimumHeight()
+    assert group_min_h >= header.minimumHeight() + truth_view.minimumHeight(), (
+        f"rendered_heatmap_group minimumHeight ({group_min_h}) must be >= "
+        f"header ({header.minimumHeight()}) + truth_view ({truth_view.minimumHeight()})"
+    )
+
+
+def test_rendered_heatmap_group_minimum_height_exceeds_no_header_baseline(
+    qapplication: QApplication,
+) -> None:
+    """Task 4.4: the group minimum height must exceed truth_view alone by at least the header height.
+
+    Before this change truth_view (200px) was the dominant content widget.  Adding the 20px
+    HeatmapDistanceHeader above it must increase the computed minimum height so the splitter
+    guard prevents the header from overlapping the preview area.
+    """
+    window = HeatmapAlignmentWindow()
+
+    header = window._heatmap_distance_header
+    truth_view = window.truth_view
+
+    from PySide6 import QtWidgets
+
+    rendered_heatmap_group = None
+    parent = truth_view.parent()
+    while parent is not None:
+        if isinstance(parent, QtWidgets.QGroupBox) and parent.title() == "Rendered Heatmap":
+            rendered_heatmap_group = parent
+            break
+        parent = parent.parent()
+
+    assert rendered_heatmap_group is not None
+
+    group_min_h = rendered_heatmap_group.minimumHeight()
+    # The group minimum must exceed truth_view alone (pre-change baseline), confirming
+    # that the header's fixed height was included in the minimum-height calculation.
+    assert group_min_h > truth_view.minimumHeight(), (
+        f"rendered_heatmap_group minimumHeight ({group_min_h}) must exceed "
+        f"truth_view alone ({truth_view.minimumHeight()}); "
+        f"header height {header.minimumHeight()} must be counted"
     )
