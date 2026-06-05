@@ -14,6 +14,7 @@ import numpy.typing as npt
 from PySide6 import QtCore
 from PySide6.QtGui import QTransform
 from PySide6.QtWidgets import (
+    QSplitter,
     QVBoxLayout,
 )
 
@@ -64,6 +65,18 @@ class PluginPresetId(Enum):
 
 
 SEMI_TRANSPARENT_BRUSH = pg.mkBrush(color=(0xFF, 0xFF, 0xFF, int(0.8 * 0xFF)))
+PLOT_LEVEL_MAX = 5000.0
+MIN_PLOT_LEVEL_MAX = 1.0
+DVM_LEVELS = (0.0, PLOT_LEVEL_MAX)
+
+
+class _WheelEventFilter(QtCore.QObject):
+    def eventFilter(self, watched: QtCore.QObject, event: QtCore.QEvent) -> bool:
+        if event.type() == QtCore.QEvent.Type.Wheel:
+            event.accept()
+            return True
+
+        return super().eventFilter(watched, event)
 
 
 class BackendPlugin(ExtendedProcessorBackendPluginBase[ProcessorConfig, ProcessorResult]):
@@ -143,6 +156,8 @@ class PlotPlugin(PlotPluginBase):
         self._plot_job: Optional[ProcessorResult] = None
         self._is_setup = False
         self.ampl_plot: Optional[pg.PlotItem] = None
+        self._wheel_event_filters: list[_WheelEventFilter] = []
+        self._dvm_color_items: list[tuple[pg.ImageItem, pg.ColorBarItem]] = []
 
         self.ampl_curves: _Extended[list[pg.PlotDataItem]] = []
         self.subsweeps_distances_m: _Extended[list[npt.NDArray[np.float64]]] = []
@@ -153,8 +168,13 @@ class PlotPlugin(PlotPluginBase):
 
         self.tab_widget = TabPGWidget()
 
-        layout.addWidget(self.amplitude_plot_widget, stretch=1)
-        layout.addWidget(self.tab_widget, stretch=2)
+        self.main_splitter = QSplitter(QtCore.Qt.Orientation.Vertical)
+        self.main_splitter.addWidget(self.amplitude_plot_widget)
+        self.main_splitter.addWidget(self.tab_widget)
+        self.main_splitter.setStretchFactor(0, 1)
+        self.main_splitter.setStretchFactor(1, 2)
+
+        layout.addWidget(self.main_splitter)
 
         self.setLayout(layout)
         self.tab_widget.setVisible(False)
@@ -190,8 +210,6 @@ class PlotPlugin(PlotPluginBase):
         if self.ampl_plot is None:
             raise RuntimeError
 
-        max_ = 0.0
-
         for (
             plot_data_items,
             entry_result,
@@ -214,22 +232,19 @@ class PlotPlugin(PlotPluginBase):
             ) in zip(*plot_data_items, entry_result, subsweeps_distances_m):
                 ampls = subsweep_result.amplitudes
                 amplitude_curve.setData(subsweep_distances_m, ampls)
-                max_ = max(max_, np.max(ampls).item())
 
                 phase_curve.setData(subsweep_distances_m, subsweep_result.phases)
 
                 dvm = subsweep_result.distance_velocity_map
-                # ft_image.updateImage(dvm.T, levels=(0, 1.05 * np.max(dvm)))
-                ft_image.updateImage(dvm.T, levels=(0, np.float64(5000.0)))
-
-        # self.ampl_plot.setYRange(0, self.smooth_max.update(max_))
-        self.ampl_plot.setYRange(0, 5000.0)
+                ft_image.updateImage(dvm.T, autoLevels=False)
 
     def setup(
         self, metadatas: list[dict[int, a121.Metadata]], session_config: a121.SessionConfig
     ) -> None:
         self.amplitude_plot_widget.ci.clear()
         self.tab_widget.clear()
+        self._wheel_event_filters.clear()
+        self._dvm_color_items.clear()
 
         self.subsweeps_distances_m = core_utils.map_over_extended_structure(
             lambda args: self._get_distances_m(*args),
@@ -238,6 +253,19 @@ class PlotPlugin(PlotPluginBase):
 
         self._setup_amplitude(session_config)
         self._setup_phase_and_dvm(session_config, metadatas)
+        self._sync_dvm_levels_to_amplitude_y_range()
+
+    def _sync_dvm_levels_to_amplitude_y_range(self) -> None:
+        if self.ampl_plot is None:
+            return
+
+        _, y_range = self.ampl_plot.viewRange()
+        color_max = max(float(y_range[1]), MIN_PLOT_LEVEL_MAX)
+        levels = (0.0, color_max)
+
+        for image, color_bar in self._dvm_color_items:
+            image.setLevels(levels)
+            color_bar.setLevels(levels)
 
     @staticmethod
     def _get_distances_m(
@@ -275,9 +303,14 @@ class PlotPlugin(PlotPluginBase):
 
         self.ampl_plot = self.amplitude_plot_widget.addPlot()
         # self.ampl_plot.setMenuEnabled(False)
+        self.ampl_plot.setMouseEnabled(x=False, y=True)
         self.ampl_plot.showGrid(x=True, y=True)
         self.ampl_plot.setLabel("left", "Amplitude")
         self.ampl_plot.setLabel("bottom", "Distance (m)")
+        self.ampl_plot.setYRange(0, PLOT_LEVEL_MAX)
+        self.ampl_plot.getViewBox().sigYRangeChanged.connect(
+            lambda *_: self._sync_dvm_levels_to_amplitude_y_range()
+        )
         if (
             len(session_config.groups) > 1
             or num_unique_sensors > 1
@@ -366,10 +399,24 @@ class PlotPlugin(PlotPluginBase):
         for group_idx, sensor_id, sensor_config in core_utils.iterate_extended_structure(
             session_config.groups
         ):
-            plot_widget = self.tab_widget.newPlotWidget(f"G{group_idx}:S{sensor_id}")
+            tab_splitter = QSplitter(QtCore.Qt.Orientation.Vertical)
+            phase_plot_widget = pg.GraphicsLayoutWidget()
+            dvm_plot_widget = pg.GraphicsLayoutWidget()
 
-            phase_plot = plot_widget.addPlot(colspan=sensor_config.num_subsweeps)
+            for plot_widget in (phase_plot_widget, dvm_plot_widget):
+                wheel_event_filter = _WheelEventFilter(plot_widget)
+                plot_widget.viewport().installEventFilter(wheel_event_filter)
+                self._wheel_event_filters.append(wheel_event_filter)
+
+            tab_splitter.addWidget(phase_plot_widget)
+            tab_splitter.addWidget(dvm_plot_widget)
+            tab_splitter.setStretchFactor(0, 1)
+            tab_splitter.setStretchFactor(1, 2)
+            self.tab_widget.newTab(tab_splitter, f"G{group_idx}:S{sensor_id}")
+
+            phase_plot = phase_plot_widget.addPlot()
             # phase_plot.setMenuEnabled(False)
+            phase_plot.setMouseEnabled(x=False, y=False)
             phase_plot.showGrid(x=True, y=True)
             phase_plot.setLabel("left", "Phase")
             phase_plot.setYRange(-np.pi, np.pi)
@@ -401,8 +448,6 @@ class PlotPlugin(PlotPluginBase):
             for phase_curve in subsweep_phase_curves:
                 phase_plot.addItem(phase_curve)
 
-            plot_widget.nextRow()
-
             subsweeps_distances_m = self.subsweeps_distances_m[group_idx][sensor_id]
 
             metadata = metadatas[group_idx][sensor_id]
@@ -410,8 +455,9 @@ class PlotPlugin(PlotPluginBase):
             images = []
             for subsweep_index, subsweep_distances_m in enumerate(subsweeps_distances_m):
                 step_length = sensor_config.subsweeps[subsweep_index].step_length
-                plot = plot_widget.addPlot()
+                plot = dvm_plot_widget.addPlot(row=0, col=subsweep_index)
                 # plot.setMenuEnabled(False)
+                plot.setMouseEnabled(x=False, y=False)
                 plot.setLabel("bottom", "Distance (m)")
                 plot.setLabel("left", "Velocity (m/s)")
 
@@ -424,9 +470,18 @@ class PlotPlugin(PlotPluginBase):
 
                 image = pg.ImageItem(autoDownsample=True)
                 image.setLookupTable(et.utils.pg_mpl_cmap("viridis"))
+                image.setLevels(DVM_LEVELS)
                 image.setTransform(transform)
 
                 plot.addItem(image)
+                color_bar = pg.ColorBarItem(
+                    values=DVM_LEVELS,
+                    colorMap=pg.colormap.get("viridis"),
+                    interactive=False,
+                    colorMapMenu=False,
+                )
+                color_bar.setImageItem(image, insert_in=plot)
+                self._dvm_color_items.append((image, color_bar))
                 images.append(image)
 
             dvm_images.append((group_idx, sensor_id, images))

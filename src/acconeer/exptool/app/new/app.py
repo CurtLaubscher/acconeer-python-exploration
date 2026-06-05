@@ -139,7 +139,8 @@ def main() -> None:
 
     pg.setConfigOption("background", "w")
     pg.setConfigOption("foreground", "k")
-    pg.setConfigOption("leftButtonPan", False)
+    # Keep pyqtgraph's default left-button behavior so passive colorbars do not rectangle-zoom.
+    # pg.setConfigOption("leftButtonPan", False)
     pg.setConfigOptions(antialias=True)
 
     with as_file(files(resources) / "icon.png") as path:
