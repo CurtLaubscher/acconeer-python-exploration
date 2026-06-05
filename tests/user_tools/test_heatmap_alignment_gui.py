@@ -2799,6 +2799,90 @@ def test_refresh_signal_plot_can_update_playhead_without_rebuilding_data(
     assert current_times == [pytest.approx(4.25)]
 
 
+def test_advance_playback_uses_fast_signal_playhead_refresh(
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = HeatmapAlignmentWindow()
+    synced_calls: list[tuple[str, bool]] = []
+    slider_updates: list[None] = []
+
+    monkeypatch.setattr("heatmap_alignment_gui.time.perf_counter", lambda: 1.0)
+    monkeypatch.setattr(window, "_max_duration_s", lambda: 10.0)
+    monkeypatch.setattr(window, "_timeline_bounds_s", lambda: (0.0, 10.0))
+    monkeypatch.setattr(window, "_set_slider_from_current_time", lambda: slider_updates.append(None))
+    monkeypatch.setattr(
+        window,
+        "_sync_previews",
+        lambda *, camera_access_hint="auto", refresh_signal_data=True, **_kw: synced_calls.append(
+            (camera_access_hint, refresh_signal_data)
+        ),
+    )
+    window._playback_started_at_s = 0.0
+    window._playback_started_video_time_s = 0.0
+
+    window._advance_playback()
+
+    assert window.session.timeline.current_time_s == pytest.approx(1.0)
+    assert slider_updates == [None]
+    assert synced_calls == [("playback", False)]
+
+
+def test_sync_previews_runs_named_stages_in_order(
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = HeatmapAlignmentWindow()
+    calls: list[str] = []
+    truth_frame = np.zeros((2, 2, 3), dtype=np.uint8)
+
+    monkeypatch.setattr(window, "_invalidate_source_resolution_viewport", lambda: calls.append("invalidate"))
+    monkeypatch.setattr(
+        window,
+        "_load_current_camera_frame",
+        lambda *, access_hint="auto": calls.append(f"camera:{access_hint}"),
+    )
+    monkeypatch.setattr(window, "_refresh_camera_view_corners", lambda: calls.append("corners"))
+
+    def _timeline_stage(*, timeline_visible_range_s, refresh_signal_data):
+        calls.append(f"timeline:{timeline_visible_range_s}:{refresh_signal_data}")
+
+    monkeypatch.setattr(window, "_sync_timeline_feedback", _timeline_stage)
+    monkeypatch.setattr(
+        window,
+        "_sync_heatmap_truth_preview",
+        lambda: calls.append("truth") or (7, truth_frame),
+    )
+    monkeypatch.setattr(
+        window,
+        "_sync_export_overlay_preview",
+        lambda *, frame_idx, truth_frame: calls.append(f"overlay:{frame_idx}:{truth_frame is not None}"),
+    )
+    monkeypatch.setattr(
+        window,
+        "_sync_viewport_preview",
+        lambda *, truth_frame, invalidate_source_resolution: calls.append(
+            f"viewport:{truth_frame is not None}:{invalidate_source_resolution}"
+        ),
+    )
+
+    window._sync_previews(
+        camera_access_hint="scrub",
+        timeline_visible_range_s=(1.0, 2.0),
+        refresh_signal_data=False,
+    )
+
+    assert calls == [
+        "invalidate",
+        "camera:scrub",
+        "corners",
+        "timeline:(1.0, 2.0):False",
+        "truth",
+        "overlay:7:True",
+        "viewport:True:True",
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Requirements 1-8: must-fix behavior tests
 # ---------------------------------------------------------------------------
