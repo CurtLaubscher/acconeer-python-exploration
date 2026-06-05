@@ -24,6 +24,7 @@ Startup file arguments are supported, for example:
 
 import argparse
 import math
+import os
 import sys
 import time
 import uuid
@@ -500,6 +501,79 @@ def track_offset_label_rect(
         label_width_px,
         track_rect.height(),
     )
+
+
+class RecentSessionStore:
+    """Persist the Heatmap Alignment Workbench recent-session list."""
+
+    SETTINGS_KEY = "recent_session_paths"
+    LIMIT = 10
+
+    def __init__(self, settings: QtCore.QSettings) -> None:
+        self._settings = settings
+
+    @staticmethod
+    def normalized_path(path: Path | str) -> str:
+        return str(Path(path).expanduser().resolve(strict=False))
+
+    @staticmethod
+    def _dedupe_key(path: str) -> str:
+        return os.path.normcase(path)
+
+    def paths(self) -> tuple[Path, ...]:
+        return tuple(Path(path) for path in self._read_path_strings())
+
+    def add(self, path: Path | str) -> None:
+        normalized = self.normalized_path(path)
+        new_key = self._dedupe_key(normalized)
+        remaining = [
+            existing
+            for existing in self._read_path_strings()
+            if self._dedupe_key(existing) != new_key
+        ]
+        self._write_path_strings([normalized, *remaining][: self.LIMIT])
+
+    def remove(self, path: Path | str) -> None:
+        normalized = self.normalized_path(path)
+        remove_key = self._dedupe_key(normalized)
+        self._write_path_strings(
+            [
+                existing
+                for existing in self._read_path_strings()
+                if self._dedupe_key(existing) != remove_key
+            ]
+        )
+
+    def clear(self) -> None:
+        self._settings.remove(self.SETTINGS_KEY)
+
+    def _read_path_strings(self) -> list[str]:
+        raw_value = self._settings.value(self.SETTINGS_KEY, [])
+        if isinstance(raw_value, str):
+            candidates = [raw_value]
+        elif isinstance(raw_value, (list, tuple)):
+            candidates = [value for value in raw_value if isinstance(value, str)]
+        else:
+            candidates = []
+
+        result: list[str] = []
+        seen: set[str] = set()
+        for candidate in candidates:
+            candidate = candidate.strip()
+            if not candidate:
+                continue
+            normalized = self.normalized_path(candidate)
+            key = self._dedupe_key(normalized)
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append(normalized)
+            if len(result) == self.LIMIT:
+                break
+        return result
+
+    def _write_path_strings(self, paths: list[str]) -> None:
+        self._settings.setValue(self.SETTINGS_KEY, paths[: self.LIMIT])
 
 
 @dataclass(frozen=True)
@@ -3375,6 +3449,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._resource_job_manager.job_state_changed.connect(
             self._handle_resource_job_state_changed
         )
+        self.recent_sessions = RecentSessionStore(self.settings)
         self._camera_replacement_backup: _CameraResourceBackup | None = None
         self._h5_replacement_backup: _H5ResourceBackup | None = None
         self._inflight_h5_identity: H5SlotIdentity | None = None
@@ -3453,6 +3528,8 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.save_session_as_action.triggered.connect(self._save_session_as)
         file_menu.addAction(self.save_session_as_action)
 
+        self.recent_sessions_menu = file_menu.addMenu("Recent Sessions")
+
         self.close_session_action = QtGui.QAction("Close Session", self)
         self.close_session_action.triggered.connect(self._close_session)
         file_menu.addAction(self.close_session_action)
@@ -3494,6 +3571,8 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.load_leg2_action = QtGui.QAction("Load &Leg2 MAT...", self)
         self.load_leg2_action.triggered.connect(self._import_leg2_mat)
         resources_menu.addAction(self.load_leg2_action)
+
+        self._refresh_recent_sessions_menu()
 
         resources_menu.addSeparator()
 
@@ -3538,6 +3617,66 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             lambda: self.invoke_resource_action("leg2_mat", "reload")
         )
         resources_menu.addAction(self.reload_leg2_action)
+
+    def _refresh_recent_sessions_menu(self) -> None:
+        self.recent_sessions_menu.clear()
+        recent_paths = self.recent_sessions.paths()
+        if recent_paths:
+            for session_path in recent_paths:
+                action = QtGui.QAction(session_path.name, self)
+                action.setToolTip(str(session_path))
+                action.setStatusTip(str(session_path))
+                action.triggered.connect(
+                    lambda _checked=False, path=session_path: self._open_recent_session(path)
+                )
+                self.recent_sessions_menu.addAction(action)
+        else:
+            empty_action = QtGui.QAction("No Recent Sessions", self)
+            empty_action.setEnabled(False)
+            self.recent_sessions_menu.addAction(empty_action)
+
+        self.recent_sessions_menu.addSeparator()
+        clear_action = QtGui.QAction("Clear Recent Sessions", self)
+        clear_action.setEnabled(bool(recent_paths))
+        clear_action.triggered.connect(self._clear_recent_sessions)
+        self.recent_sessions_menu.addAction(clear_action)
+
+    def _record_recent_session(self, session_path: Path) -> None:
+        self.recent_sessions.add(session_path)
+        self._refresh_recent_sessions_menu()
+
+    def _clear_recent_sessions(self) -> None:
+        self.recent_sessions.clear()
+        self._refresh_recent_sessions_menu()
+
+    def _open_recent_session(self, session_path: Path) -> None:
+        if not session_path.exists():
+            message = f"Session file no longer exists: {session_path}"
+            self.statusBar().showMessage(message)
+            self.recent_sessions.remove(session_path)
+            self._refresh_recent_sessions_menu()
+            return
+
+        self._open_session_from_path(session_path, prompt_for_unsaved=True)
+
+    def _open_session_from_path(
+        self, session_path: Path, *, prompt_for_unsaved: bool
+    ) -> bool:
+        if prompt_for_unsaved and (self._session_dirty or self._any_peaks_unsaved()):
+            choice = self._prompt_save_discard_cancel("open")
+            if choice == "cancel":
+                return False
+            if choice == "save" and not self._save_session_for_prompt():
+                return False
+
+        try:
+            self.load_session_from_path(session_path)
+        except (OSError, ValueError) as exc:
+            QtWidgets.QMessageBox.warning(self, "Open session failed", str(exc))
+            self.statusBar().showMessage(f"Could not open session: {session_path}")
+            return False
+
+        return True
 
     def _build_ui(self) -> None:
         central = QtWidgets.QWidget(self)
@@ -4770,6 +4909,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._clear_session_dirty()
         self._refresh_session_title()
         self._refresh_resources_ui()
+        self._record_recent_session(session_path)
         self.statusBar().showMessage(f"Saved session: {session_path}")
         return True
 
@@ -4801,7 +4941,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             "JSON files (*.json);;All files (*)",
         )
         if filename:
-            self.load_session_from_path(Path(filename))
+            self._open_session_from_path(Path(filename), prompt_for_unsaved=False)
 
     def _loaded_h5_identity(self) -> H5SlotIdentity | None:
         """Return identity of the currently loaded H5 source, or None."""
@@ -4955,6 +5095,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             if self.session.heatmap_track.path:
                 self.settings.setValue("last_h5_path", self.session.heatmap_track.path)
             self._refresh_resources_ui()
+            self._record_recent_session(session_path)
             self.statusBar().showMessage(f"Loaded session: {session_path}")
         self._clear_session_dirty()
 
