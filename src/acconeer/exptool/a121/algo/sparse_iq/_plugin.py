@@ -14,6 +14,7 @@ import numpy.typing as npt
 from PySide6 import QtCore
 from PySide6.QtGui import QTransform
 from PySide6.QtWidgets import (
+    QSplitter,
     QVBoxLayout,
 )
 
@@ -164,8 +165,13 @@ class PlotPlugin(PlotPluginBase):
 
         self.tab_widget = TabPGWidget()
 
-        layout.addWidget(self.amplitude_plot_widget, stretch=1)
-        layout.addWidget(self.tab_widget, stretch=2)
+        self.main_splitter = QSplitter(QtCore.Qt.Orientation.Vertical)
+        self.main_splitter.addWidget(self.amplitude_plot_widget)
+        self.main_splitter.addWidget(self.tab_widget)
+        self.main_splitter.setStretchFactor(0, 1)
+        self.main_splitter.setStretchFactor(1, 2)
+
+        layout.addWidget(self.main_splitter)
 
         self.setLayout(layout)
         self.tab_widget.setVisible(False)
@@ -377,12 +383,22 @@ class PlotPlugin(PlotPluginBase):
         for group_idx, sensor_id, sensor_config in core_utils.iterate_extended_structure(
             session_config.groups
         ):
-            plot_widget = self.tab_widget.newPlotWidget(f"G{group_idx}:S{sensor_id}")
-            wheel_event_filter = _WheelEventFilter(plot_widget)
-            plot_widget.viewport().installEventFilter(wheel_event_filter)
-            self._wheel_event_filters.append(wheel_event_filter)
+            tab_splitter = QSplitter(QtCore.Qt.Orientation.Vertical)
+            phase_plot_widget = pg.GraphicsLayoutWidget()
+            dvm_plot_widget = pg.GraphicsLayoutWidget()
 
-            phase_plot = plot_widget.addPlot(colspan=sensor_config.num_subsweeps)
+            for plot_widget in (phase_plot_widget, dvm_plot_widget):
+                wheel_event_filter = _WheelEventFilter(plot_widget)
+                plot_widget.viewport().installEventFilter(wheel_event_filter)
+                self._wheel_event_filters.append(wheel_event_filter)
+
+            tab_splitter.addWidget(phase_plot_widget)
+            tab_splitter.addWidget(dvm_plot_widget)
+            tab_splitter.setStretchFactor(0, 1)
+            tab_splitter.setStretchFactor(1, 2)
+            self.tab_widget.newTab(tab_splitter, f"G{group_idx}:S{sensor_id}")
+
+            phase_plot = phase_plot_widget.addPlot()
             # phase_plot.setMenuEnabled(False)
             phase_plot.setMouseEnabled(x=False, y=False)
             phase_plot.showGrid(x=True, y=True)
@@ -416,8 +432,6 @@ class PlotPlugin(PlotPluginBase):
             for phase_curve in subsweep_phase_curves:
                 phase_plot.addItem(phase_curve)
 
-            plot_widget.nextRow()
-
             subsweeps_distances_m = self.subsweeps_distances_m[group_idx][sensor_id]
 
             metadata = metadatas[group_idx][sensor_id]
@@ -425,7 +439,7 @@ class PlotPlugin(PlotPluginBase):
             images = []
             for subsweep_index, subsweep_distances_m in enumerate(subsweeps_distances_m):
                 step_length = sensor_config.subsweeps[subsweep_index].step_length
-                plot = plot_widget.addPlot()
+                plot = dvm_plot_widget.addPlot(row=0, col=subsweep_index)
                 # plot.setMenuEnabled(False)
                 plot.setMouseEnabled(x=False, y=False)
                 plot.setLabel("bottom", "Distance (m)")
