@@ -26,6 +26,7 @@ import argparse
 import math
 import os
 import sys
+import threading
 import time
 import uuid
 from contextlib import contextmanager
@@ -2508,10 +2509,10 @@ class _ResourceJobRunnable(QtCore.QRunnable):
         try:
             result = self._worker()
         except Exception as exc:
-            if not self._manager._abandoned:
+            if not self._manager._is_abandoned():
                 self._manager._dispatch_job_failure(self._kind, self._generation, exc)
             return
-        if self._manager._abandoned:
+        if self._manager._is_abandoned():
             self._manager._release_abandoned_worker_result(
                 self._kind,
                 self._generation,
@@ -2525,6 +2526,7 @@ class ResourceJobManager(QtCore.QObject):
     """Schedules camera and H5 resource jobs off the GUI thread."""
 
     job_state_changed = QtCore.Signal()
+    job_progress = QtCore.Signal(str, int, str, str)
     job_succeeded = QtCore.Signal(str, int, object)
     job_failed = QtCore.Signal(str, int, str)
 
@@ -2532,12 +2534,14 @@ class ResourceJobManager(QtCore.QObject):
         super().__init__(parent)
         self._board = ResourceJobBoard()
         self._thread_pool = QtCore.QThreadPool.globalInstance()
+        self._worker_state_lock = threading.Lock()
         self._proxy_active = False
         self._h5_active = False
         self._proxy_processes: dict[int, object] = {}
         self._pending_results: dict[tuple[ResourceJobKind, int], object] = {}
         self._cancelled_generations: set[tuple[ResourceJobKind, int]] = set()
         self._abandoned = False
+        self.job_progress.connect(self._handle_job_progress)
         self.job_succeeded.connect(self._handle_job_success)
         self.job_failed.connect(self._handle_job_failure)
 
@@ -2553,22 +2557,82 @@ class ResourceJobManager(QtCore.QObject):
     def blocks_export(self) -> bool:
         return resource_job_blocks_export(self._board)
 
+    def _is_abandoned(self) -> bool:
+        with self._worker_state_lock:
+            return self._abandoned
+
+    def _set_abandoned(self, abandoned: bool) -> None:
+        with self._worker_state_lock:
+            self._abandoned = abandoned
+
     def _generation_cancelled(self, kind: ResourceJobKind, generation: int) -> bool:
-        return (kind, generation) in self._cancelled_generations
+        with self._worker_state_lock:
+            return (kind, generation) in self._cancelled_generations
 
     def _cancel_generation(self, kind: ResourceJobKind, generation: int) -> None:
         if generation <= 0:
             return
-        self._cancelled_generations.add((kind, generation))
-        if kind != "camera":
-            return
-        process = self._proxy_processes.pop(generation, None)
+        with self._worker_state_lock:
+            self._cancelled_generations.add((kind, generation))
+            process = self._proxy_processes.pop(generation, None) if kind == "camera" else None
         if process is None:
             return
         try:
             process.terminate()
         except OSError:
             pass
+
+    def _discard_cancelled_generation(self, kind: ResourceJobKind, generation: int) -> None:
+        with self._worker_state_lock:
+            self._cancelled_generations.discard((kind, generation))
+
+    def _emit_job_progress(
+        self,
+        kind: ResourceJobKind,
+        generation: int,
+        phase: str,
+        message: str,
+    ) -> None:
+        try:
+            self.job_progress.emit(kind, generation, phase, message)
+        except RuntimeError as exc:
+            if "Internal C++ object" not in str(exc):
+                raise
+
+    def _acquire_worker_slot(self, kind: ResourceJobKind, generation: int, waiting_message: str) -> None:
+        waiting_reported = False
+        while True:
+            with self._worker_state_lock:
+                if (kind, generation) in self._cancelled_generations:
+                    raise ResourceJobError(
+                        "Camera load cancelled." if kind == "camera" else "H5 load cancelled."
+                    )
+                active = self._proxy_active if kind == "camera" else self._h5_active
+                if not active:
+                    if kind == "camera":
+                        self._proxy_active = True
+                    else:
+                        self._h5_active = True
+                    return
+            if not waiting_reported:
+                self._emit_job_progress(kind, generation, "waiting", waiting_message)
+                waiting_reported = True
+            QtCore.QThread.msleep(25)
+
+    def _release_worker_slot(self, kind: ResourceJobKind) -> None:
+        with self._worker_state_lock:
+            if kind == "camera":
+                self._proxy_active = False
+            else:
+                self._h5_active = False
+
+    def _register_proxy_process(self, generation: int, process: object) -> None:
+        with self._worker_state_lock:
+            self._proxy_processes[generation] = process
+
+    def _unregister_proxy_process(self, generation: int) -> None:
+        with self._worker_state_lock:
+            self._proxy_processes.pop(generation, None)
 
     def _release_job_result(self, kind: ResourceJobKind, generation: int, result: object) -> None:
         release_resource_job_result(kind, result)
@@ -2579,7 +2643,7 @@ class ResourceJobManager(QtCore.QObject):
             self._release_job_result(kind, generation, result)
 
     def abandon_all_jobs(self) -> None:
-        self._abandoned = True
+        self._set_abandoned(True)
         for kind in ("camera", "radar_h5"):
             slot = self._board.slot(kind)
             if slot.phase not in ("idle", "failed"):
@@ -2603,7 +2667,7 @@ class ResourceJobManager(QtCore.QObject):
         replaces_active: bool,
         cache_root: Path | None = None,
     ) -> int:
-        self._abandoned = False
+        self._set_abandoned(False)
         slot = self._board.camera
         if slot.phase not in ("idle", "failed"):
             self._cancel_generation("camera", slot.generation)
@@ -2632,7 +2696,7 @@ class ResourceJobManager(QtCore.QObject):
         color_max: float | None,
         fixed_levels: bool,
     ) -> int:
-        self._abandoned = False
+        self._set_abandoned(False)
         slot = self._board.radar_h5
         if slot.phase not in ("idle", "failed"):
             self._cancel_generation("radar_h5", slot.generation)
@@ -2678,47 +2742,25 @@ class ResourceJobManager(QtCore.QObject):
         *,
         cache_root: Path | None,
     ) -> None:
-        def _wait_for_proxy_slot() -> None:
-            if self._proxy_active:
-                mark_resource_job_phase(
-                    self._board,
-                    "camera",
-                    generation,
-                    "waiting",
-                    message=f"Waiting to build preview proxy for {camera_path.name}...",
-                )
-                QtCore.QMetaObject.invokeMethod(
-                    self,
-                    "_emit_job_state_changed",
-                    QtCore.Qt.ConnectionType.QueuedConnection,
-                )
-            while self._proxy_active:
-                if self._generation_cancelled("camera", generation):
-                    raise ResourceJobError("Camera load cancelled.")
-                QtCore.QThread.msleep(25)
-
         def _worker() -> CameraResourceJobResult:
-            _wait_for_proxy_slot()
-            if self._generation_cancelled("camera", generation):
-                raise ResourceJobError("Camera load cancelled.")
-            self._proxy_active = True
-            mark_resource_job_phase(
-                self._board,
+            self._acquire_worker_slot(
                 "camera",
                 generation,
-                "building",
-                message=f"Building preview proxy for {camera_path.name}...",
+                f"Waiting to build preview proxy for {camera_path.name}...",
             )
-            QtCore.QMetaObject.invokeMethod(
-                self,
-                "_emit_job_state_changed",
-                QtCore.Qt.ConnectionType.QueuedConnection,
-            )
-
-            def _process_hook(process: object) -> None:
-                self._proxy_processes[generation] = process
-
             try:
+                if self._generation_cancelled("camera", generation):
+                    raise ResourceJobError("Camera load cancelled.")
+                self._emit_job_progress(
+                    "camera",
+                    generation,
+                    "building",
+                    f"Building preview proxy for {camera_path.name}...",
+                )
+
+                def _process_hook(process: object) -> None:
+                    self._register_proxy_process(generation, process)
+
                 return run_camera_resource_job(
                     camera_path,
                     cache_root=cache_root,
@@ -2726,9 +2768,9 @@ class ResourceJobManager(QtCore.QObject):
                     process_hook=_process_hook,
                 )
             finally:
-                self._proxy_active = False
-                self._proxy_processes.pop(generation, None)
-                self._cancelled_generations.discard(("camera", generation))
+                self._release_worker_slot("camera")
+                self._unregister_proxy_process(generation)
+                self._discard_cancelled_generation("camera", generation)
 
         runnable = _ResourceJobRunnable(self, "camera", generation, _worker)
         self._thread_pool.start(runnable, priority=0)
@@ -2746,31 +2788,21 @@ class ResourceJobManager(QtCore.QObject):
         color_max: float | None,
         fixed_levels: bool,
     ) -> None:
-        def _wait_for_h5_slot() -> None:
-            if self._h5_active:
-                mark_resource_job_phase(
-                    self._board,
-                    "radar_h5",
-                    generation,
-                    "waiting",
-                    message=f"Waiting to load {h5_path.name}...",
-                )
-                QtCore.QMetaObject.invokeMethod(
-                    self,
-                    "_emit_job_state_changed",
-                    QtCore.Qt.ConnectionType.QueuedConnection,
-                )
-            while self._h5_active:
+        def _worker() -> LoadedH5ResourcePayload:
+            self._acquire_worker_slot(
+                "radar_h5",
+                generation,
+                f"Waiting to load {h5_path.name}...",
+            )
+            try:
                 if self._generation_cancelled("radar_h5", generation):
                     raise ResourceJobError("H5 load cancelled.")
-                QtCore.QThread.msleep(25)
-
-        def _worker() -> LoadedH5ResourcePayload:
-            _wait_for_h5_slot()
-            if self._generation_cancelled("radar_h5", generation):
-                raise ResourceJobError("H5 load cancelled.")
-            self._h5_active = True
-            try:
+                self._emit_job_progress(
+                    "radar_h5",
+                    generation,
+                    "loading",
+                    f"Loading {h5_path.name}...",
+                )
                 return load_h5_resource_payload(
                     h5_path,
                     session_idx=session_idx,
@@ -2783,15 +2815,11 @@ class ResourceJobManager(QtCore.QObject):
                     cancel_check=lambda: self._generation_cancelled("radar_h5", generation),
                 )
             finally:
-                self._h5_active = False
-                self._cancelled_generations.discard(("radar_h5", generation))
+                self._release_worker_slot("radar_h5")
+                self._discard_cancelled_generation("radar_h5", generation)
 
         runnable = _ResourceJobRunnable(self, "radar_h5", generation, _worker)
         self._thread_pool.start(runnable, priority=0)
-
-    @QtCore.Slot()
-    def _emit_job_state_changed(self) -> None:
-        self.job_state_changed.emit()
 
     def _dispatch_job_success(
         self,
@@ -2818,6 +2846,22 @@ class ResourceJobManager(QtCore.QObject):
             if "Internal C++ object" not in str(exc):
                 raise
             return
+
+    def _handle_job_progress(
+        self,
+        kind: ResourceJobKind,
+        generation: int,
+        phase: str,
+        message: str,
+    ) -> None:
+        mark_resource_job_phase(
+            self._board,
+            kind,
+            generation,
+            phase,
+            message=message,
+        )
+        self.job_state_changed.emit()
 
     def _handle_job_success(
         self,

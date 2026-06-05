@@ -1292,6 +1292,31 @@ def test_resource_job_manager_cancel_before_success_discards_payload(
     assert manager.board().radar_h5.phase == "idle"
 
 
+def test_resource_job_manager_progress_updates_job_board(
+    qapplication: QApplication,
+) -> None:
+    from heatmap_alignment_gui import ResourceJobManager
+    from heatmap_alignment_resource_jobs import begin_resource_job
+
+    manager = ResourceJobManager()
+    generation = begin_resource_job(
+        manager.board(),
+        "radar_h5",
+        target_path=Path("/tmp/trial.h5"),
+        replaces_active=False,
+    )
+
+    manager._handle_job_progress(
+        "radar_h5",
+        generation,
+        "waiting",
+        "Waiting to load trial.h5...",
+    )
+
+    assert manager.board().radar_h5.phase == "waiting"
+    assert manager.board().radar_h5.message == "Waiting to load trial.h5..."
+
+
 def test_resource_job_manager_abandon_rejects_late_dispatch(
     qapplication: QApplication,
 ) -> None:
