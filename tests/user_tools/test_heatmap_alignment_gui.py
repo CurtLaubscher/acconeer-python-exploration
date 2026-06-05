@@ -45,6 +45,7 @@ from heatmap_alignment_core import (  # noqa: E402
     Leg2StanceIntervals,
     Leg2UltrasonicDatasourceSettings,
     Leg2UltrasonicSignalSeries,
+    PeakDistanceSignalSeries,
     ResourceJobPresentation,
     SignalPlotViewSettings,
     build_alignment_resource_summaries,
@@ -55,7 +56,6 @@ from heatmap_alignment_core import (  # noqa: E402
 from sparse_iq_peak_distance_core import (  # noqa: E402
     STATUS_DETECTED,
     FramePeakMeasurement,
-    LoadedPeakDistanceDatasource,
     PeakDistanceMetadata,
 )
 from sparse_iq_heatmap_common import HeatmapAxes  # noqa: E402
@@ -1494,7 +1494,7 @@ def test_apply_h5_job_result_preserves_peak_series_for_different_replacement(
     window._peak_series_list = [dummy_series]
 
     monkeypatch.setattr(window, "_rebuild_overlay_plot_renderer", lambda: None)
-    monkeypatch.setattr(window, "_reload_peak_distance_datasource_from_session", lambda: None)
+    monkeypatch.setattr(window, "_reload_peak_series_from_session", lambda: None)
     monkeypatch.setattr(window, "_update_heatmap_extent_labels", lambda: None)
 
     class _FakeHeatmapSource:
@@ -1539,13 +1539,21 @@ def test_apply_h5_job_result_preserves_peak_series_for_different_replacement(
     assert window.session.heatmap_track.path == "/tmp/new.h5"
 
 
-def test_restore_h5_replacement_backup_preserves_peak_datasource(
+def test_restore_h5_replacement_backup_preserves_peak_series(
     qapplication: QApplication,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from heatmap_peak_distance_resource import PeakSeriesResource
+
     window = HeatmapAlignmentWindow()
-    peak_marker = object()
-    window.peak_distance_datasource = peak_marker
+    peak_series = PeakSeriesResource(
+        series_id="peak",
+        display_name="peak",
+        provenance="imported",
+        measurements=(),
+        color="#3b82f6",
+    )
+    window._peak_series_list = [peak_series]
 
     class _FakeHeatmapSource:
         def close(self) -> None:
@@ -1565,7 +1573,7 @@ def test_restore_h5_replacement_backup_preserves_peak_datasource(
     window._restore_h5_replacement_backup()
 
     assert window.heatmap_source is backup_source
-    assert window.peak_distance_datasource is peak_marker
+    assert window._peak_series_list == [peak_series]
 
 
 def test_abandon_resource_jobs_clears_replacement_backups(
@@ -1898,12 +1906,12 @@ def test_reconcile_leg2_and_peak_unload_when_session_omits_paths(
 
     monkeypatch.setattr(window, "_clear_leg2_ultrasonic_datasource", _track_clear_leg2)
     # Prevent real reload calls.
-    monkeypatch.setattr(window, "_reload_peak_distance_datasource_from_session", lambda: None)
+    monkeypatch.setattr(window, "_reload_peak_series_from_session", lambda: None)
     monkeypatch.setattr(window, "_reload_leg2_ultrasonic_datasource_from_session", lambda: None)
 
     window.load_session_from_path(session_path)
 
-    # Peak series are cleared directly (not via _clear_peak_distance_datasource).
+    # Peak series are cleared directly (not via _clear_peak_series).
     assert window._peak_series_list == []
     assert "leg2" in cleared
 
@@ -1964,7 +1972,7 @@ def test_reconcile_session_fields_applied_after_h5_keep(
     window._inflight_h5_identity = None
 
     monkeypatch.setattr(window, "load_h5_from_path", lambda p, **kwargs: None)
-    monkeypatch.setattr(window, "_reload_peak_distance_datasource_from_session", lambda: None)
+    monkeypatch.setattr(window, "_reload_peak_series_from_session", lambda: None)
     monkeypatch.setattr(window, "_sync_previews", lambda **kwargs: None)
 
     window.load_session_from_path(session_path)
@@ -2284,7 +2292,7 @@ def test_clear_all_resources_marks_dirty(
     )
     monkeypatch.setattr(window, "unload_camera_video", lambda **kwargs: None)
     monkeypatch.setattr(window, "unload_h5_recording", lambda **kwargs: None)
-    monkeypatch.setattr(window, "_clear_peak_distance_datasource", lambda **kwargs: None)
+    monkeypatch.setattr(window, "_clear_peak_series", lambda **kwargs: None)
     monkeypatch.setattr(window, "_clear_leg2_ultrasonic_datasource", lambda **kwargs: None)
 
     window.clear_all_resources()
@@ -2697,7 +2705,7 @@ def test_peak_series_preserve_after_h5_replacement(
         viewport_output_width=10, viewport_output_height=10,
     )
     monkeypatch.setattr(window, "_rebuild_overlay_plot_renderer", lambda: None)
-    monkeypatch.setattr(window, "_reload_peak_distance_datasource_from_session", lambda: None)
+    monkeypatch.setattr(window, "_reload_peak_series_from_session", lambda: None)
     monkeypatch.setattr(window, "_update_heatmap_extent_labels", lambda: None)
     monkeypatch.setattr("heatmap_alignment_gui.build_h5_truth_source_from_payload", lambda _: _FakeHeatmapSource())
 
@@ -2874,6 +2882,44 @@ def test_refresh_signal_plot_passes_all_visible_series(qapplication: QApplicatio
     assert len(psl) == 2
     names = [n for n, _c, _s in psl]
     assert "v0 slice" in names and "sum v" in names and "hidden" not in names
+
+
+def test_signal_plot_y_auto_range_uses_all_visible_peak_series(
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = PeakDistanceSignalSeries(
+        detected_time_s=np.array([0.0], dtype=np.float64),
+        detected_distance_m=np.array([1.0], dtype=np.float64),
+        candidate_time_s=np.array([], dtype=np.float64),
+        candidate_distance_m=np.array([], dtype=np.float64),
+    )
+    second = PeakDistanceSignalSeries(
+        detected_time_s=np.array([0.0], dtype=np.float64),
+        detected_distance_m=np.array([10.0], dtype=np.float64),
+        candidate_time_s=np.array([], dtype=np.float64),
+        candidate_distance_m=np.array([], dtype=np.float64),
+    )
+    captured_counts: list[int] = []
+
+    def _capture_range(series_list, **_kwargs):
+        captured_counts.append(len(series_list))
+        return (0.0, 10.0)
+
+    monkeypatch.setattr(
+        "heatmap_alignment_gui.visible_signal_y_range_for_series",
+        _capture_range,
+    )
+
+    plot = SignalPlotWidget()
+    plot.set_plotted_signals(
+        peak_series_list=[
+            ("first", "#3b82f6", first),
+            ("second", "#f59e0b", second),
+        ],
+    )
+
+    assert captured_counts == [2]
 
 
 def test_heatmap_peak_combo_exists(qapplication: QApplication) -> None:

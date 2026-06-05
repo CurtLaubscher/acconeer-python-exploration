@@ -65,6 +65,7 @@ from heatmap_alignment_core import (  # noqa: E402
     timeline_view_bounds_s,
     validate_alignment_session,
     visible_signal_y_range,
+    visible_signal_y_range_for_series,
 )
 from sparse_iq_peak_distance_core import (  # noqa: E402
     DEFAULT_PEAK_THRESHOLD,
@@ -330,6 +331,47 @@ def test_visible_signal_y_range_uses_active_x_window_and_includes_zero() -> None
     assert y_range is not None
     assert y_range[0] == pytest.approx(-0.05)
     assert y_range[1] == pytest.approx(1.05)
+
+
+def test_visible_signal_y_range_for_series_uses_all_series() -> None:
+    near_series = build_peak_distance_signal_series(
+        (
+            FramePeakMeasurement(
+                frame_index=0,
+                source_tick=0,
+                time_s=0.0,
+                absolute_time=None,
+                status=STATUS_DETECTED,
+                peak_distance_m=1.0,
+                candidate_peak_distance_m=1.0,
+                peak_strength=1.0,
+            ),
+        )
+    )
+    far_series = build_peak_distance_signal_series(
+        (
+            FramePeakMeasurement(
+                frame_index=1,
+                source_tick=1,
+                time_s=0.0,
+                absolute_time=None,
+                status=STATUS_DETECTED,
+                peak_distance_m=10.0,
+                candidate_peak_distance_m=10.0,
+                peak_strength=1.0,
+            ),
+        )
+    )
+
+    y_range = visible_signal_y_range_for_series(
+        (near_series, far_series),
+        x_min_s=-0.1,
+        x_max_s=0.5,
+    )
+
+    assert y_range is not None
+    assert y_range[0] == pytest.approx(-0.5)
+    assert y_range[1] == pytest.approx(10.5)
 
 
 def test_derive_h5_signal_plot_color_lightens_on_dark_background() -> None:
