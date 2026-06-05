@@ -2854,6 +2854,15 @@ class ResourceJobManager(QtCore.QObject):
         phase: str,
         message: str,
     ) -> None:
+        slot = self._board.slot(kind)
+        if (
+            self._is_abandoned()
+            or self._generation_cancelled(kind, generation)
+            or generation != slot.generation
+            or slot.phase in ("idle", "failed", "superseded", "cancelling")
+            or slot.cancel_requested
+        ):
+            return
         mark_resource_job_phase(
             self._board,
             kind,
