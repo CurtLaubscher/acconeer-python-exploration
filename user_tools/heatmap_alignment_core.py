@@ -902,34 +902,12 @@ def visible_signal_y_range(
     x_max_s: float,
     leg2_series: Leg2UltrasonicSignalSeries | None = None,
 ) -> tuple[float, float] | None:
-    if x_max_s < x_min_s:
-        x_min_s, x_max_s = x_max_s, x_min_s
-
-    time_distance_pairs: tuple[tuple[np.ndarray, np.ndarray], ...] = (
-        (series.detected_time_s, series.detected_distance_m),
-        (series.candidate_time_s, series.candidate_distance_m),
-    )
-    if leg2_series is not None:
-        time_distance_pairs = (
-            *time_distance_pairs,
-            (leg2_series.primary_time_s, leg2_series.primary_distance_m),
-            (leg2_series.faded_time_s, leg2_series.faded_distance_m),
-        )
-    visible_values = _visible_distance_values_in_x_range(
-        time_distance_pairs,
+    return visible_signal_y_range_for_series(
+        (series,),
         x_min_s=x_min_s,
         x_max_s=x_max_s,
+        leg2_series=leg2_series,
     )
-
-    if not visible_values:
-        return None
-    y_min = min(0.0, min(visible_values))
-    y_max = max(visible_values)
-    if math.isclose(y_min, y_max):
-        padding = max(abs(y_min) * 0.05, 0.05)
-        return y_min - padding, y_max + padding
-    padding = (y_max - y_min) * 0.05
-    return y_min - padding, y_max + padding
 
 
 def visible_signal_y_range_for_series(

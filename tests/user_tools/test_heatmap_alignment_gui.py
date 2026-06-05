@@ -3057,6 +3057,50 @@ def test_import_peak_series_from_path_appends(
     assert window._peak_series_list[1].json_path == json_path
 
 
+def test_reload_peak_series_from_session_restores_persisted_fields(
+    qapplication: QApplication,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    json_path = tmp_path / "session_peaks.json"
+    json_path.write_text("{}", encoding="utf-8")
+    metadata = object()
+
+    class _FakeDatasource:
+        measurements = ()
+
+    _FakeDatasource.metadata = metadata
+
+    window = HeatmapAlignmentWindow()
+    window.session.peak_series = [
+        {
+            "path": str(json_path),
+            "display_name": "restored peaks",
+            "color": "#f59e0b",
+            "visible": False,
+            "heatmap_selected": True,
+        }
+    ]
+    monkeypatch.setattr(
+        "sparse_iq_peak_distance_core.load_peak_distance_json",
+        lambda path: _FakeDatasource(),
+    )
+    monkeypatch.setattr(window, "_refresh_signal_plot", lambda: None)
+    monkeypatch.setattr(window, "_refresh_resources_ui", lambda: None)
+    monkeypatch.setattr(window, "_update_heatmap_peak_selector", lambda: None)
+
+    window._reload_peak_series_from_session()
+
+    assert len(window._peak_series_list) == 1
+    restored = window._peak_series_list[0]
+    assert restored.display_name == "restored peaks"
+    assert restored.color == "#f59e0b"
+    assert restored.visible is False
+    assert restored.heatmap_selected is True
+    assert restored.json_path == json_path
+    assert window._heatmap_peak_selector_id == restored.series_id
+
+
 # ---------------------------------------------------------------------------
 # UI polish: Resources window refresh after peak series unload
 # ---------------------------------------------------------------------------
