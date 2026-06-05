@@ -66,6 +66,7 @@ class PluginPresetId(Enum):
 
 SEMI_TRANSPARENT_BRUSH = pg.mkBrush(color=(0xFF, 0xFF, 0xFF, int(0.8 * 0xFF)))
 PLOT_LEVEL_MAX = 5000.0
+MIN_PLOT_LEVEL_MAX = 1.0
 DVM_LEVELS = (0.0, PLOT_LEVEL_MAX)
 
 
@@ -156,6 +157,7 @@ class PlotPlugin(PlotPluginBase):
         self._is_setup = False
         self.ampl_plot: Optional[pg.PlotItem] = None
         self._wheel_event_filters: list[_WheelEventFilter] = []
+        self._dvm_color_items: list[tuple[pg.ImageItem, pg.ColorBarItem]] = []
 
         self.ampl_curves: _Extended[list[pg.PlotDataItem]] = []
         self.subsweeps_distances_m: _Extended[list[npt.NDArray[np.float64]]] = []
@@ -242,6 +244,7 @@ class PlotPlugin(PlotPluginBase):
         self.amplitude_plot_widget.ci.clear()
         self.tab_widget.clear()
         self._wheel_event_filters.clear()
+        self._dvm_color_items.clear()
 
         self.subsweeps_distances_m = core_utils.map_over_extended_structure(
             lambda args: self._get_distances_m(*args),
@@ -250,6 +253,19 @@ class PlotPlugin(PlotPluginBase):
 
         self._setup_amplitude(session_config)
         self._setup_phase_and_dvm(session_config, metadatas)
+        self._sync_dvm_levels_to_amplitude_y_range()
+
+    def _sync_dvm_levels_to_amplitude_y_range(self) -> None:
+        if self.ampl_plot is None:
+            return
+
+        _, y_range = self.ampl_plot.viewRange()
+        color_max = max(float(y_range[1]), MIN_PLOT_LEVEL_MAX)
+        levels = (0.0, color_max)
+
+        for image, color_bar in self._dvm_color_items:
+            image.setLevels(levels)
+            color_bar.setLevels(levels)
 
     @staticmethod
     def _get_distances_m(
@@ -292,6 +308,9 @@ class PlotPlugin(PlotPluginBase):
         self.ampl_plot.setLabel("left", "Amplitude")
         self.ampl_plot.setLabel("bottom", "Distance (m)")
         self.ampl_plot.setYRange(0, PLOT_LEVEL_MAX)
+        self.ampl_plot.getViewBox().sigYRangeChanged.connect(
+            lambda *_: self._sync_dvm_levels_to_amplitude_y_range()
+        )
         if (
             len(session_config.groups) > 1
             or num_unique_sensors > 1
@@ -462,6 +481,7 @@ class PlotPlugin(PlotPluginBase):
                     colorMapMenu=False,
                 )
                 color_bar.setImageItem(image, insert_in=plot)
+                self._dvm_color_items.append((image, color_bar))
                 images.append(image)
 
             dvm_images.append((group_idx, sensor_id, images))
