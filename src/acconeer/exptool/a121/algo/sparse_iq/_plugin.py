@@ -64,6 +64,16 @@ class PluginPresetId(Enum):
 
 
 SEMI_TRANSPARENT_BRUSH = pg.mkBrush(color=(0xFF, 0xFF, 0xFF, int(0.8 * 0xFF)))
+DVM_LEVELS = (0.0, 5000.0)
+
+
+class _WheelEventFilter(QtCore.QObject):
+    def eventFilter(self, watched: QtCore.QObject, event: QtCore.QEvent) -> bool:
+        if event.type() == QtCore.QEvent.Type.Wheel:
+            event.accept()
+            return True
+
+        return super().eventFilter(watched, event)
 
 
 class BackendPlugin(ExtendedProcessorBackendPluginBase[ProcessorConfig, ProcessorResult]):
@@ -143,6 +153,7 @@ class PlotPlugin(PlotPluginBase):
         self._plot_job: Optional[ProcessorResult] = None
         self._is_setup = False
         self.ampl_plot: Optional[pg.PlotItem] = None
+        self._wheel_event_filters: list[_WheelEventFilter] = []
 
         self.ampl_curves: _Extended[list[pg.PlotDataItem]] = []
         self.subsweeps_distances_m: _Extended[list[npt.NDArray[np.float64]]] = []
@@ -219,8 +230,7 @@ class PlotPlugin(PlotPluginBase):
                 phase_curve.setData(subsweep_distances_m, subsweep_result.phases)
 
                 dvm = subsweep_result.distance_velocity_map
-                # ft_image.updateImage(dvm.T, levels=(0, 1.05 * np.max(dvm)))
-                ft_image.updateImage(dvm.T, levels=(0, np.float64(5000.0)))
+                ft_image.updateImage(dvm.T, autoLevels=False)
 
         # self.ampl_plot.setYRange(0, self.smooth_max.update(max_))
         self.ampl_plot.setYRange(0, 5000.0)
@@ -230,6 +240,7 @@ class PlotPlugin(PlotPluginBase):
     ) -> None:
         self.amplitude_plot_widget.ci.clear()
         self.tab_widget.clear()
+        self._wheel_event_filters.clear()
 
         self.subsweeps_distances_m = core_utils.map_over_extended_structure(
             lambda args: self._get_distances_m(*args),
@@ -367,9 +378,13 @@ class PlotPlugin(PlotPluginBase):
             session_config.groups
         ):
             plot_widget = self.tab_widget.newPlotWidget(f"G{group_idx}:S{sensor_id}")
+            wheel_event_filter = _WheelEventFilter(plot_widget)
+            plot_widget.viewport().installEventFilter(wheel_event_filter)
+            self._wheel_event_filters.append(wheel_event_filter)
 
             phase_plot = plot_widget.addPlot(colspan=sensor_config.num_subsweeps)
             # phase_plot.setMenuEnabled(False)
+            phase_plot.setMouseEnabled(x=False, y=False)
             phase_plot.showGrid(x=True, y=True)
             phase_plot.setLabel("left", "Phase")
             phase_plot.setYRange(-np.pi, np.pi)
@@ -412,6 +427,7 @@ class PlotPlugin(PlotPluginBase):
                 step_length = sensor_config.subsweeps[subsweep_index].step_length
                 plot = plot_widget.addPlot()
                 # plot.setMenuEnabled(False)
+                plot.setMouseEnabled(x=False, y=False)
                 plot.setLabel("bottom", "Distance (m)")
                 plot.setLabel("left", "Velocity (m/s)")
 
@@ -424,9 +440,17 @@ class PlotPlugin(PlotPluginBase):
 
                 image = pg.ImageItem(autoDownsample=True)
                 image.setLookupTable(et.utils.pg_mpl_cmap("viridis"))
+                image.setLevels(DVM_LEVELS)
                 image.setTransform(transform)
 
                 plot.addItem(image)
+                color_bar = pg.ColorBarItem(
+                    values=DVM_LEVELS,
+                    colorMap=pg.colormap.get("viridis"),
+                    interactive=False,
+                    colorMapMenu=False,
+                )
+                color_bar.setImageItem(image, insert_in=plot)
                 images.append(image)
 
             dvm_images.append((group_idx, sensor_id, images))
