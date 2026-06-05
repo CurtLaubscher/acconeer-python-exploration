@@ -2930,6 +2930,39 @@ def test_heatmap_distance_header_peak_none_when_cleared(
     assert header._peak_dist_m is None
 
 
+def test_heatmap_distance_header_paint_no_crash_peak_at_left_edge(
+    qapplication: QApplication,
+) -> None:
+    """paintEvent must not raise when peak is at the left limit (collision zone)."""
+    header = HeatmapDistanceHeader()
+    header.resize(300, 20)
+    header.set_extent(0.2, 2.5)
+    header.set_peak_distance(0.2)  # peak == dist_min: far left, collision candidate
+    header.repaint()  # force paintEvent synchronously
+
+
+def test_heatmap_distance_header_paint_no_crash_peak_at_right_edge(
+    qapplication: QApplication,
+) -> None:
+    """paintEvent must not raise when peak is at the right limit (collision zone)."""
+    header = HeatmapDistanceHeader()
+    header.resize(300, 20)
+    header.set_extent(0.2, 2.5)
+    header.set_peak_distance(2.5)  # peak == dist_max: far right, collision candidate
+    header.repaint()
+
+
+def test_heatmap_distance_header_paint_no_crash_narrow_with_peak(
+    qapplication: QApplication,
+) -> None:
+    """paintEvent must not raise at a very narrow width with a peak set."""
+    header = HeatmapDistanceHeader()
+    header.resize(80, 20)  # below the 120px show_extents threshold
+    header.set_extent(0.2, 2.5)
+    header.set_peak_distance(1.0)
+    header.repaint()
+
+
 def test_heatmap_alignment_window_has_distance_header(
     qapplication: QApplication,
 ) -> None:

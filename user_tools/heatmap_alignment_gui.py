@@ -3221,7 +3221,7 @@ class HeatmapDistanceHeader(QtWidgets.QWidget):
         self._dist_max: float | None = None
         self._peak_dist_m: float | None = None
         self.setFixedHeight(20)
-        self.setStyleSheet("background: #0f1720;")
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
 
     def set_extent(self, dist_min: float | None, dist_max: float | None) -> None:
         self._dist_min = dist_min
@@ -3239,46 +3239,85 @@ class HeatmapDistanceHeader(QtWidgets.QWidget):
         try:
             w = self.width()
             h = self.height()
-            painter.fillRect(0, 0, w, h, QtGui.QColor("#0f1720"))
-            painter.setPen(QtGui.QColor("#d7dde6"))
+            fg = QtGui.QColor("#d7dde6")
+            painter.setPen(fg)
 
             font = painter.font()
             font.setPointSizeF(max(6.0, font.pointSizeF() * 0.85))
             painter.setFont(font)
             fm = QtGui.QFontMetrics(font)
 
-            show_extents = w >= 120 and self._dist_min is not None and self._dist_max is not None
+            # Reserve the bottom pixels for the triangle so text sits in the upper band.
+            triangle_size = 5
+            text_h = h - triangle_size - 2  # text rect height, clear of the triangle
 
-            if show_extents:
-                left_text = "{:.3f} m".format(self._dist_min)
-                right_text = "{:.3f} m".format(self._dist_max)
-                painter.drawText(4, 0, w - 8, h, int(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter), left_text)
-                painter.drawText(4, 0, w - 8, h, int(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter), right_text)
+            # Gap between adjacent labels (pixels).
+            label_gap = 4
+            # Left margin where extent labels are drawn.
+            margin = 4
 
-            if (
+            has_peak = (
                 self._peak_dist_m is not None
                 and self._dist_min is not None
                 and self._dist_max is not None
                 and self._dist_max != self._dist_min
-            ):
+            )
+
+            # Measure extent labels when we have the data (regardless of show_extents threshold).
+            left_text = right_text = ""
+            left_w = right_w = 0
+            if self._dist_min is not None and self._dist_max is not None:
+                left_text = "{:.3f} m".format(self._dist_min)
+                right_text = "{:.3f} m".format(self._dist_max)
+                left_w = fm.horizontalAdvance(left_text)
+                right_w = fm.horizontalAdvance(right_text)
+
+            # Measure peak label.
+            peak_text = ""
+            peak_text_w = 0
+            peak_x = 0
+            if has_peak:
+                peak_text = "{:.3f} m".format(self._peak_dist_m)
+                peak_text_w = fm.horizontalAdvance(peak_text)
                 x_frac = (self._peak_dist_m - self._dist_min) / (self._dist_max - self._dist_min)
                 x_frac = max(0.0, min(1.0, x_frac))
                 peak_x = int(x_frac * w)
 
-                peak_text = "{:.3f} m".format(self._peak_dist_m)
-                text_w = fm.horizontalAdvance(peak_text)
-                half_text = text_w // 2
+            # Decide whether extent labels can coexist with the peak label without overlap.
+            # Extent labels sit at [margin, margin+left_w] and [w-margin-right_w, w-margin].
+            # Peak text center is clamped within [peak_left_bound, peak_right_bound].
+            # If the available gap is too small, suppress extent labels to keep peak cue visible.
+            half_peak = peak_text_w // 2
+            if has_peak and w >= 120 and left_w > 0:
+                # Space available for the peak label center, bounded by extent labels.
+                peak_left_bound = margin + left_w + label_gap + half_peak
+                peak_right_bound = w - margin - right_w - label_gap - half_peak
+                show_extents = peak_left_bound <= peak_right_bound
+            else:
+                show_extents = w >= 120 and left_w > 0
+                peak_left_bound = margin + half_peak
+                peak_right_bound = w - margin - half_peak
 
-                # Clamp text center between 30 and w-30
-                text_center = max(30, min(w - 30, peak_x))
-                text_left = text_center - half_text
+            if show_extents:
+                painter.drawText(margin, 0, w - 2 * margin, text_h, int(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter), left_text)
+                painter.drawText(margin, 0, w - 2 * margin, text_h, int(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter), right_text)
 
-                # Draw peak label text
-                painter.setPen(QtGui.QColor("#ff8080"))
-                painter.drawText(text_left, 0, text_w + 2, h - 4, int(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter), peak_text)
+            if has_peak:
+                # Clamp peak label center to avoid running off the widget edges.
+                text_center = max(
+                    margin + half_peak,
+                    min(w - margin - half_peak, peak_x),
+                )
+                # Further clamp within the measured extent-label bounds when extents are shown.
+                if show_extents:
+                    text_center = max(peak_left_bound, min(peak_right_bound, text_center))
+                text_left = text_center - half_peak
 
-                # Draw small downward triangle at peak_x, bottom of widget
-                triangle_size = 5
+                # Draw peak label text in the same upper band as extent labels.
+                painter.setPen(fg)
+                painter.drawText(text_left, 0, peak_text_w + 2, text_h, int(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter), peak_text)
+
+                # Triangle always tracks true peak_x regardless of label clamping.
                 tri_tip_y = h - 1
                 tri_top_y = tri_tip_y - triangle_size
                 path = QtGui.QPainterPath()
@@ -3286,7 +3325,7 @@ class HeatmapDistanceHeader(QtWidgets.QWidget):
                 path.lineTo(peak_x - triangle_size, tri_top_y)
                 path.lineTo(peak_x + triangle_size, tri_top_y)
                 path.closeSubpath()
-                painter.setBrush(QtGui.QColor("#ff8080"))
+                painter.setBrush(fg)
                 painter.setPen(QtCore.Qt.PenStyle.NoPen)
                 painter.drawPath(path)
         finally:
@@ -3533,6 +3572,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         right_layout.addWidget(viewport_group)
         rendered_heatmap_group = QtWidgets.QGroupBox("Rendered Heatmap")
         rendered_heatmap_layout = QtWidgets.QVBoxLayout(rendered_heatmap_group)
+        rendered_heatmap_layout.setSpacing(0)
         self._heatmap_distance_header = HeatmapDistanceHeader()
         rendered_heatmap_layout.addWidget(self._heatmap_distance_header)
         rendered_heatmap_layout.addWidget(self.truth_view)
@@ -4611,8 +4651,9 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         axes = heatmap_axes(self.heatmap_source.record.metadata, self.heatmap_source.record.sensor_config, subsweep)
         self._heatmap_axes = axes
         self._heatmap_distance_header.set_extent(float(axes.distances_m[0]), float(axes.distances_m[-1]))
+        v_limit = max(abs(float(axes.velocities_m_s[0])), abs(float(axes.velocities_m_s[-1])))
         self._heatmap_vel_extent_label.setText(
-            "Vel: {:.3f}..{:.3f} m/s".format(float(axes.velocities_m_s[0]), float(axes.velocities_m_s[-1]))
+            "Velocity limits: ±{:.3f} m/s".format(v_limit)
         )
 
     def _update_heatmap_peak_cue(self, frame_idx: int | None) -> None:
@@ -4636,7 +4677,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         if obj is self.truth_view:
             etype = event.type()
             if etype == QtCore.QEvent.Type.MouseMove:
-                self._hover_last_pos = event.pos()
+                self._hover_last_pos = event.position().toPoint()
                 self._refresh_hover_tooltip()
                 return False
             if etype == QtCore.QEvent.Type.Leave:

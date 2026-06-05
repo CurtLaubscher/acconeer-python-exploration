@@ -160,6 +160,8 @@ Possible directions:
 
 Opening a saved alignment session can freeze the GUI when the session references many files or when startup loading performs a long chain of synchronous work on the main thread (camera/H5 open, proxy preparation, optional peak JSON and Leg2 `.mat` validation, preview sync, and related refresh).
 
+Observed bug candidate, needs reproduction: after the rendered heatmap coordinate-context work, loading at least one saved session froze the UI completely until the video appeared. In one observed sequence, some resources appeared not to load, possibly peak resources, and trying to load the same session again froze at that point. The freeze did not obviously look like a small label or tooltip cost. Current suspicion is an existing synchronous session-load segment rather than the coordinate header itself: possible culprits include camera/proxy readiness, synchronous peak JSON or Leg2 MAT validation, preview sync/frame access during restore, resource reconciliation after a partial/failed load, or a burst of UI refresh work before the background resource jobs have settled. Source-resolution/HQ viewport rendering is expected to run on its worker thread; if that path blocks the UI during session open, treat it as a bug. A future investigation should reproduce with a known session, add lightweight timing around session load/resource reconciliation/preview sync stages, and separate assertion-level GUI behavior from known Windows Qt teardown noise.
+
 Possible directions:
 - Show the main window quickly with a clear loading/busy state before heavy resource work begins.
 - Load session JSON first, then load or reload each resource incrementally with per-resource progress and cancellable work where practical.
