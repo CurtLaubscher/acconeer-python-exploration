@@ -74,7 +74,6 @@ from heatmap_alignment_core import (
     reconcile_sync_slot_action,
     rectify_viewport,
     save_alignment_session,
-    session_equivalent_for_pristine,
     scale_viewport_corners,
     TimelineH5DragSnapshot,
     apply_timeline_h5_alignment_drag,
@@ -138,6 +137,7 @@ from heatmap_peak_distance_resource import (
     peak_state_detected_counts,
 )
 from heatmap_leg2_resource import Leg2ResourceAdapter
+from heatmap_alignment_session_lifecycle import SessionLifecycleState
 
 from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtCore import QUrl
@@ -3462,9 +3462,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.resize(1600, 980)
 
         self.session = AlignmentSession()
-        self._session_dirty = False
-        self._session_dirty_guard_depth = 0
-        self._current_session_path: Path | None = None
+        self._session_lifecycle = SessionLifecycleState()
         self._resources_window: ResourcesWindow | None = None
         self._resource_reload_errors: dict[ResourceKind, str] = {}
         self._resource_load_warnings: dict[ResourceKind, tuple[str, ...]] = {}
@@ -4556,6 +4554,22 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             self.session.leg2_ultrasonic_datasource,
             self.leg2_ultrasonic_datasource,
         )
+
+    @property
+    def _session_dirty(self) -> bool:
+        return self._session_lifecycle.dirty
+
+    @_session_dirty.setter
+    def _session_dirty(self, value: bool) -> None:
+        self._session_lifecycle.dirty = value
+
+    @property
+    def _current_session_path(self) -> Path | None:
+        return self._session_lifecycle.current_path
+
+    @_current_session_path.setter
+    def _current_session_path(self, value: Path | None) -> None:
+        self._session_lifecycle.current_path = value
 
     def _resolve_peak_series_target(
         self,
@@ -6158,36 +6172,26 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         )
 
     def _mark_session_dirty(self) -> None:
-        if self._session_dirty_guard_depth > 0:
-            return
-        if not self._session_dirty:
-            self._session_dirty = True
+        if self._session_lifecycle.mark_dirty():
             self._refresh_session_title()
 
     def _clear_session_dirty(self) -> None:
-        if self._session_dirty:
-            self._session_dirty = False
+        if self._session_lifecycle.clear_dirty():
             self._refresh_session_title()
 
     @contextmanager
     def _session_dirty_guard(self) -> Iterator[None]:
-        self._session_dirty_guard_depth += 1
-        try:
+        with self._session_lifecycle.dirty_guard():
             yield
-        finally:
-            self._session_dirty_guard_depth -= 1
 
     def workbench_is_pristine(self) -> bool:
-        if self._current_session_path is not None:
-            return False
-        if self.camera_source is not None or self.heatmap_source is not None:
-            return False
-        if (
-            self._has_peaks_in_memory()
-            or self.leg2_ultrasonic_datasource is not None
-        ):
-            return False
-        return session_equivalent_for_pristine(self.session, AlignmentSession())
+        return self._session_lifecycle.is_pristine(
+            self.session,
+            has_camera=self.camera_source is not None,
+            has_h5=self.heatmap_source is not None,
+            has_peaks=self._has_peaks_in_memory(),
+            has_leg2=self.leg2_ultrasonic_datasource is not None,
+        )
 
     def _prompt_save_discard_cancel(
         self,
