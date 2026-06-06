@@ -15,6 +15,7 @@ from heatmap_alignment_core import (
     session_equivalent_for_pristine,
     validate_alignment_session,
 )
+from heatmap_alignment_session_coordinator import ClosedSessionReset
 
 
 SessionPromptAction = Literal["open", "close", "quit"]
@@ -110,6 +111,13 @@ class SessionLifecycleState:
             return False
         self.current_path = None
         return True
+
+    def reset_after_close(self) -> ClosedSessionReset:
+        """Produce a fresh session document and clear the remembered file path."""
+        return ClosedSessionReset(
+            session=AlignmentSession(),
+            path_cleared=self.clear_current_path(),
+        )
 
     def window_title(self) -> str:
         """Return the main window title from current path and dirty state."""

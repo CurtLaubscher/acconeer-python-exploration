@@ -255,6 +255,26 @@ def test_lifecycle_clear_current_path_reports_change(tmp_path: Path) -> None:
     assert lifecycle.clear_current_path() is False
 
 
+def test_reset_after_close_clears_path_and_returns_fresh_session(tmp_path: Path) -> None:
+    lifecycle = SessionLifecycleState(current_path=tmp_path / "session.json")
+
+    reset = lifecycle.reset_after_close()
+
+    assert lifecycle.current_path is None
+    assert reset.path_cleared is True
+    assert reset.session == AlignmentSession()
+
+
+def test_reset_after_close_without_path_reports_path_not_cleared() -> None:
+    lifecycle = SessionLifecycleState()
+
+    reset = lifecycle.reset_after_close()
+
+    assert lifecycle.current_path is None
+    assert reset.path_cleared is False
+    assert reset.session == AlignmentSession()
+
+
 def test_session_transition_guard_prompt_values() -> None:
     assert SessionTransitionGuard(prompt="none").prompt == "none"
     assert SessionTransitionGuard(prompt="save_discard_cancel").prompt == "save_discard_cancel"
