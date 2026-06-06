@@ -9,8 +9,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from collections.abc import Sequence
 from uuid import uuid4
 
+from heatmap_alignment_core import PeakSeriesSessionEntry
 from sparse_iq_peak_distance_core import (
     DEFAULT_PEAK_THRESHOLD,
     PEAK_ALGORITHM_REGISTRY,
@@ -52,6 +54,65 @@ class PeakSeriesResource:
     unsaved: bool = False
     warnings: tuple = ()
     heatmap_selected: bool = False
+
+
+@dataclass(frozen=True)
+class PeakSeriesResourceAdapter:
+    """Qt-free adapter for peak-series rows and selection semantics."""
+
+    series: Sequence[PeakSeriesResource]
+    selected_series_id: str = ""
+
+    def active(self) -> PeakSeriesResource | None:
+        if not self.selected_series_id:
+            return None
+        return next((s for s in self.series if s.series_id == self.selected_series_id), None)
+
+    def resolve_target(
+        self,
+        series_id: str = "",
+        *,
+        prefer_unsaved: bool = False,
+        fallback_last: bool = False,
+        fallback_active: bool = True,
+    ) -> PeakSeriesResource | None:
+        """Resolve a row-scoped action target from id, selection, or fallback policy."""
+        if series_id:
+            target = next((s for s in self.series if s.series_id == series_id), None)
+            if target is not None:
+                return target
+            # Preserve GUI behavior: stale row ids are non-fatal and may fall
+            # through to the current selection or action-specific default.
+        if fallback_active:
+            target = self.active()
+            if target is not None:
+                return target
+        if prefer_unsaved:
+            target = next((s for s in self.series if s.unsaved), None)
+            if target is not None:
+                return target
+        if fallback_last and self.series:
+            return self.series[-1]
+        return None
+
+    def has_rows(self) -> bool:
+        return bool(self.series)
+
+    def any_unsaved(self) -> bool:
+        return any(s.unsaved for s in self.series)
+
+    def saved_session_entries(self) -> list[PeakSeriesSessionEntry]:
+        return [
+            PeakSeriesSessionEntry(
+                path=str(s.json_path),
+                display_name=s.display_name,
+                color=s.color,
+                visible=s.visible,
+                heatmap_selected=s.series_id == self.selected_series_id,
+            )
+            for s in self.series
+            if s.json_path is not None
+        ]
 
 
 def assign_peak_series_color(existing_series: list[PeakSeriesResource]) -> str:

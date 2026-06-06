@@ -56,7 +56,6 @@ from heatmap_alignment_core import (
     Leg2UltrasonicSignalSeries,
     LoadedLeg2UltrasonicDatasource,
     PeakDistanceSignalSeries,
-    PeakSeriesSessionEntry,
     SignalPlotViewSettings,
     apply_viewport_visibility,
     build_leg2_ultrasonic_signal_series,
@@ -127,6 +126,7 @@ from sparse_iq_peak_distance_core import (
     PeakDistanceJsonImportError,
 )
 from heatmap_peak_distance_resource import (
+    PeakSeriesResourceAdapter,
     PeakSeriesResource,
     active_peak_measurements,
     active_peak_zero_velocity_m_s,
@@ -4545,13 +4545,13 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
 
     def _active_peak_state(self):
         """Return measurements/metadata for the heatmap-selected peak series, or None."""
-        if not self._peak_series_list:
-            return None
-        if self._heatmap_peak_selector_id:
-            for s in self._peak_series_list:
-                if s.series_id == self._heatmap_peak_selector_id:
-                    return s
-        return None
+        return self._peak_adapter().active()
+
+    def _peak_adapter(self) -> PeakSeriesResourceAdapter:
+        return PeakSeriesResourceAdapter(
+            self._peak_series_list,
+            selected_series_id=self._heatmap_peak_selector_id or "",
+        )
 
     def _resolve_peak_series_target(
         self,
@@ -4562,29 +4562,18 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         fallback_active: bool = True,
     ) -> PeakSeriesResource | None:
         """Resolve a peak-series action target using the Resources row or UI selection."""
-        if series_id:
-            target = next((s for s in self._peak_series_list if s.series_id == series_id), None)
-            if target is not None:
-                return target
-            # Preserve pre-refactor behavior: stale row ids are non-fatal and may
-            # fall back to the current selection or action-specific default.
-        if fallback_active:
-            target = self._active_peak_state()
-            if target is not None:
-                return target
-        if prefer_unsaved:
-            target = next((s for s in self._peak_series_list if s.unsaved), None)
-            if target is not None:
-                return target
-        if fallback_last and self._peak_series_list:
-            return self._peak_series_list[-1]
-        return None
+        return self._peak_adapter().resolve_target(
+            series_id,
+            prefer_unsaved=prefer_unsaved,
+            fallback_last=fallback_last,
+            fallback_active=fallback_active,
+        )
 
     def _has_peaks_in_memory(self) -> bool:
-        return bool(self._peak_series_list)
+        return self._peak_adapter().has_rows()
 
     def _any_peaks_unsaved(self) -> bool:
-        return any(s.unsaved for s in self._peak_series_list)
+        return self._peak_adapter().any_unsaved()
 
     def _unload_last_peak_series(self) -> None:
         """Unload action from top-level menu: unload the selected series or the last one."""
@@ -4708,17 +4697,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
 
     def _write_session_to_path(self, session_path: Path) -> bool:
         # Sync peak_series from live list before saving; only include series with a saved path.
-        self.session.peak_series = [
-            PeakSeriesSessionEntry(
-                path=str(s.json_path),
-                display_name=s.display_name,
-                color=s.color,
-                visible=s.visible,
-                heatmap_selected=s.series_id == self._heatmap_peak_selector_id,
-            )
-            for s in self._peak_series_list
-            if s.json_path is not None
-        ]
+        self.session.peak_series = self._peak_adapter().saved_session_entries()
 
         try:
             validate_alignment_session(self.session, allow_missing_sources=True)
