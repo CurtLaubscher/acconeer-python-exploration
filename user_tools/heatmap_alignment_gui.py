@@ -5904,19 +5904,25 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         timeline_visible_range_s: tuple[float, float] | None = None,
         refresh_signal_data: bool = True,
     ) -> None:
-        if invalidate_source_resolution:
-            self._invalidate_source_resolution_viewport()
-        self._load_current_camera_frame(access_hint=camera_access_hint)
-        self._refresh_camera_view_corners()
-        self._sync_timeline_feedback(
+        plan = PreviewSyncPlan(
+            camera_access_hint=camera_access_hint,
+            invalidate_source_resolution=invalidate_source_resolution,
             timeline_visible_range_s=timeline_visible_range_s,
             refresh_signal_data=refresh_signal_data,
+        )
+        if plan.invalidate_source_resolution:
+            self._invalidate_source_resolution_viewport()
+        self._load_current_camera_frame(access_hint=plan.camera_access_hint)
+        self._refresh_camera_view_corners()
+        self._sync_timeline_feedback(
+            timeline_visible_range_s=plan.timeline_visible_range_s,
+            refresh_signal_data=plan.refresh_signal_data,
         )
         frame_idx, truth_frame = self._sync_heatmap_truth_preview()
         self._sync_export_overlay_preview(frame_idx=frame_idx, truth_frame=truth_frame)
         self._sync_viewport_preview(
             truth_frame=truth_frame,
-            invalidate_source_resolution=invalidate_source_resolution,
+            invalidate_source_resolution=plan.invalidate_source_resolution,
         )
 
     def _sync_timeline_feedback(
