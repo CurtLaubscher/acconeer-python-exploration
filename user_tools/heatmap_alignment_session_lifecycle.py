@@ -182,3 +182,27 @@ class SessionLifecycleState:
             title=_CLOSE_SESSION_TITLE,
             text="Close this session and unload all resources?",
         )
+
+    def transition_guard(
+        self,
+        action: SessionPromptAction,
+        session: AlignmentSession,
+        *,
+        peaks_unsaved: bool,
+        has_camera: bool,
+        has_h5: bool,
+        has_peaks: bool,
+        has_leg2: bool,
+    ) -> SessionTransitionGuard:
+        """Return which prompt, if any, is required before a session transition."""
+        if self.dirty or peaks_unsaved:
+            return SessionTransitionGuard(prompt="save_discard_cancel")
+        if action == "close" and not self.is_pristine(
+            session,
+            has_camera=has_camera,
+            has_h5=has_h5,
+            has_peaks=has_peaks,
+            has_leg2=has_leg2,
+        ):
+            return SessionTransitionGuard(prompt="clean_close_confirm")
+        return SessionTransitionGuard(prompt="none")

@@ -261,6 +261,110 @@ def test_session_transition_guard_prompt_values() -> None:
     assert SessionTransitionGuard(prompt="clean_close_confirm").prompt == "clean_close_confirm"
 
 
+def _empty_loaded_flags() -> dict[str, bool]:
+    return {
+        "has_camera": False,
+        "has_h5": False,
+        "has_peaks": False,
+        "has_leg2": False,
+    }
+
+
+def test_transition_guard_dirty_session_requests_save_discard_cancel() -> None:
+    lifecycle = SessionLifecycleState(dirty=True)
+
+    guard = lifecycle.transition_guard(
+        "open",
+        AlignmentSession(),
+        peaks_unsaved=False,
+        **_empty_loaded_flags(),
+    )
+
+    assert guard.prompt == "save_discard_cancel"
+
+
+def test_transition_guard_unsaved_peaks_requests_save_discard_cancel() -> None:
+    lifecycle = SessionLifecycleState()
+
+    guard = lifecycle.transition_guard(
+        "quit",
+        AlignmentSession(),
+        peaks_unsaved=True,
+        **_empty_loaded_flags(),
+    )
+
+    assert guard.prompt == "save_discard_cancel"
+
+
+def test_transition_guard_clean_non_pristine_close_requests_confirm() -> None:
+    lifecycle = SessionLifecycleState()
+
+    guard = lifecycle.transition_guard(
+        "close",
+        AlignmentSession(camera_track=CameraTrack(path="/tmp/camera.mp4")),
+        peaks_unsaved=False,
+        **_empty_loaded_flags(),
+    )
+
+    assert guard.prompt == "clean_close_confirm"
+
+
+def test_transition_guard_clean_non_pristine_open_proceeds_without_confirm() -> None:
+    lifecycle = SessionLifecycleState()
+
+    guard = lifecycle.transition_guard(
+        "open",
+        AlignmentSession(camera_track=CameraTrack(path="/tmp/camera.mp4")),
+        peaks_unsaved=False,
+        **_empty_loaded_flags(),
+    )
+
+    assert guard.prompt == "none"
+
+
+def test_transition_guard_pristine_close_proceeds_silently() -> None:
+    lifecycle = SessionLifecycleState()
+
+    guard = lifecycle.transition_guard(
+        "close",
+        AlignmentSession(),
+        peaks_unsaved=False,
+        **_empty_loaded_flags(),
+    )
+
+    assert guard.prompt == "none"
+
+
+def test_transition_guard_loaded_camera_close_requests_confirm() -> None:
+    lifecycle = SessionLifecycleState()
+    flags = _empty_loaded_flags()
+    flags["has_camera"] = True
+
+    guard = lifecycle.transition_guard(
+        "close",
+        AlignmentSession(),
+        peaks_unsaved=False,
+        **flags,
+    )
+
+    assert guard.prompt == "clean_close_confirm"
+
+
+def test_transition_guard_dirty_close_prefers_save_discard_cancel() -> None:
+    lifecycle = SessionLifecycleState(dirty=True)
+    flags = _empty_loaded_flags()
+    flags["has_camera"] = True
+
+    guard = lifecycle.transition_guard(
+        "close",
+        AlignmentSession(),
+        peaks_unsaved=False,
+        **flags,
+    )
+
+    assert guard.prompt == "save_discard_cancel"
+
+
 def test_lifecycle_window_title_untitled_and_named(tmp_path: Path) -> None:
     lifecycle = SessionLifecycleState()
 

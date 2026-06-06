@@ -134,7 +134,11 @@ from heatmap_peak_distance_resource import (
     peak_state_detected_counts,
 )
 from heatmap_leg2_resource import Leg2ResourceAdapter
-from heatmap_alignment_session_lifecycle import SessionLifecycleState, SessionPromptAction
+from heatmap_alignment_session_lifecycle import (
+    SessionLifecycleState,
+    SessionPromptAction,
+    SessionTransitionGuard,
+)
 
 from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtCore import QUrl
@@ -3532,14 +3536,9 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         QtCore.QTimer.singleShot(0, self.schedule_timeline_axis_geometry_sync)
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
-        if self._session_lifecycle.dirty or self._any_peaks_unsaved():
-            choice = self._prompt_save_discard_cancel("quit")
-            if choice == "cancel":
-                event.ignore()
-                return
-            if choice == "save" and not self._save_session_for_prompt():
-                event.ignore()
-                return
+        if not self._handle_session_transition_guard("quit"):
+            event.ignore()
+            return
         self.viewport_source_resolution_timer.stop()
         self._source_resolution_thread.quit()
         self._source_resolution_thread.wait()
@@ -3702,14 +3701,8 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
     def _open_session_from_path(
         self, session_path: Path, *, prompt_for_unsaved: bool
     ) -> bool:
-        if prompt_for_unsaved and (
-            self._session_lifecycle.dirty or self._any_peaks_unsaved()
-        ):
-            choice = self._prompt_save_discard_cancel("open")
-            if choice == "cancel":
-                return False
-            if choice == "save" and not self._save_session_for_prompt():
-                return False
+        if prompt_for_unsaved and not self._handle_session_transition_guard("open"):
+            return False
 
         try:
             self.load_session_from_path(session_path)
@@ -4744,12 +4737,8 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         return self._write_session_to_path(self._session_lifecycle.current_path)
 
     def _load_session(self) -> None:
-        if self._session_lifecycle.dirty or self._any_peaks_unsaved():
-            choice = self._prompt_save_discard_cancel("open")
-            if choice == "cancel":
-                return
-            if choice == "save" and not self._save_session_for_prompt():
-                return
+        if not self._handle_session_transition_guard("open"):
+            return
 
         filename, _ = QtWidgets.QFileDialog.getOpenFileName(
             self,
@@ -6166,13 +6155,48 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             yield
 
     def workbench_is_pristine(self) -> bool:
+        has_camera, has_h5, has_peaks, has_leg2 = self._loaded_resource_flags()
         return self._session_lifecycle.is_pristine(
             self.session,
-            has_camera=self.camera_source is not None,
-            has_h5=self.heatmap_source is not None,
-            has_peaks=self._has_peaks_in_memory(),
-            has_leg2=self.leg2_ultrasonic_datasource is not None,
+            has_camera=has_camera,
+            has_h5=has_h5,
+            has_peaks=has_peaks,
+            has_leg2=has_leg2,
         )
+
+    def _loaded_resource_flags(self) -> tuple[bool, bool, bool, bool]:
+        return (
+            self.camera_source is not None,
+            self.heatmap_source is not None,
+            self._has_peaks_in_memory(),
+            self.leg2_ultrasonic_datasource is not None,
+        )
+
+    def _session_transition_guard(self, action: SessionPromptAction) -> SessionTransitionGuard:
+        has_camera, has_h5, has_peaks, has_leg2 = self._loaded_resource_flags()
+        return self._session_lifecycle.transition_guard(
+            action,
+            self.session,
+            peaks_unsaved=self._any_peaks_unsaved(),
+            has_camera=has_camera,
+            has_h5=has_h5,
+            has_peaks=has_peaks,
+            has_leg2=has_leg2,
+        )
+
+    def _handle_session_transition_guard(self, action: SessionPromptAction) -> bool:
+        """Run required prompts for a transition; return False if the action should abort."""
+        guard = self._session_transition_guard(action)
+        if guard.prompt == "save_discard_cancel":
+            choice = self._prompt_save_discard_cancel(action)
+            if choice == "cancel":
+                return False
+            if choice == "save" and not self._save_session_for_prompt():
+                return False
+            return True
+        if guard.prompt == "clean_close_confirm":
+            return self._confirm_close_session_clean()
+        return True
 
     def _prompt_save_discard_cancel(
         self,
@@ -6528,15 +6552,8 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage("Cleared all loaded resources.")
 
     def _close_session(self) -> None:
-        if self._session_lifecycle.dirty or self._any_peaks_unsaved():
-            choice = self._prompt_save_discard_cancel("close")
-            if choice == "cancel":
-                return
-            if choice == "save" and not self._save_session_for_prompt():
-                return
-        elif not self.workbench_is_pristine():
-            if not self._confirm_close_session_clean():
-                return
+        if not self._handle_session_transition_guard("close"):
+            return
         self._reset_session_after_close()
 
     def _reset_session_after_close(self) -> None:
