@@ -134,7 +134,7 @@ from heatmap_peak_distance_resource import (
     peak_state_detected_counts,
 )
 from heatmap_leg2_resource import Leg2ResourceAdapter
-from heatmap_alignment_preview_sync import PreviewSyncPlan
+from heatmap_alignment_preview_sync import PreviewSyncPlan, run_preview_sync
 from heatmap_alignment_session_lifecycle import (
     SessionLifecycleState,
     SessionPromptAction,
@@ -5910,20 +5910,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             timeline_visible_range_s=timeline_visible_range_s,
             refresh_signal_data=refresh_signal_data,
         )
-        if plan.invalidate_source_resolution:
-            self._invalidate_source_resolution_viewport()
-        self._load_current_camera_frame(access_hint=plan.camera_access_hint)
-        self._refresh_camera_view_corners()
-        self._sync_timeline_feedback(
-            timeline_visible_range_s=plan.timeline_visible_range_s,
-            refresh_signal_data=plan.refresh_signal_data,
-        )
-        frame_idx, truth_frame = self._sync_heatmap_truth_preview()
-        self._sync_export_overlay_preview(frame_idx=frame_idx, truth_frame=truth_frame)
-        self._sync_viewport_preview(
-            truth_frame=truth_frame,
-            invalidate_source_resolution=plan.invalidate_source_resolution,
-        )
+        run_preview_sync(plan, self)
 
     def _sync_timeline_feedback(
         self,
