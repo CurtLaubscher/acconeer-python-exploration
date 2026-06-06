@@ -3532,7 +3532,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         QtCore.QTimer.singleShot(0, self.schedule_timeline_axis_geometry_sync)
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
-        if self._session_dirty or self._any_peaks_unsaved():
+        if self._session_lifecycle.dirty or self._any_peaks_unsaved():
             choice = self._prompt_save_discard_cancel("quit")
             if choice == "cancel":
                 event.ignore()
@@ -3702,7 +3702,9 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
     def _open_session_from_path(
         self, session_path: Path, *, prompt_for_unsaved: bool
     ) -> bool:
-        if prompt_for_unsaved and (self._session_dirty or self._any_peaks_unsaved()):
+        if prompt_for_unsaved and (
+            self._session_lifecycle.dirty or self._any_peaks_unsaved()
+        ):
             choice = self._prompt_save_discard_cancel("open")
             if choice == "cancel":
                 return False
@@ -4552,22 +4554,6 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             self.leg2_ultrasonic_datasource,
         )
 
-    @property
-    def _session_dirty(self) -> bool:
-        return self._session_lifecycle.dirty
-
-    @_session_dirty.setter
-    def _session_dirty(self, value: bool) -> None:
-        self._session_lifecycle.dirty = value
-
-    @property
-    def _current_session_path(self) -> Path | None:
-        return self._session_lifecycle.current_path
-
-    @_current_session_path.setter
-    def _current_session_path(self, value: Path | None) -> None:
-        self._session_lifecycle.current_path = value
-
     def _resolve_peak_series_target(
         self,
         series_id: str = "",
@@ -4694,10 +4680,10 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         QtWidgets.QToolTip.showText(global_pos, text, self.truth_view)
 
     def _save_session(self) -> None:
-        if self._current_session_path is None:
+        if self._session_lifecycle.current_path is None:
             self._save_session_as()
             return
-        self._write_session_to_path(self._current_session_path)
+        self._write_session_to_path(self._session_lifecycle.current_path)
 
     def _save_session_as(self) -> None:
         filename, _ = QtWidgets.QFileDialog.getSaveFileName(
@@ -4745,7 +4731,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         return True
 
     def _save_session_for_prompt(self) -> bool:
-        if self._current_session_path is None:
+        if self._session_lifecycle.current_path is None:
             filename, _ = QtWidgets.QFileDialog.getSaveFileName(
                 self,
                 "Save session as",
@@ -4755,10 +4741,10 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             if not filename:
                 return False
             return self._write_session_to_path(Path(filename))
-        return self._write_session_to_path(self._current_session_path)
+        return self._write_session_to_path(self._session_lifecycle.current_path)
 
     def _load_session(self) -> None:
-        if self._session_dirty or self._any_peaks_unsaved():
+        if self._session_lifecycle.dirty or self._any_peaks_unsaved():
             choice = self._prompt_save_discard_cancel("open")
             if choice == "cancel":
                 return
@@ -6237,7 +6223,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
     def _refresh_resources_ui(self) -> None:
         summaries = self.resource_summaries()
         if self._resources_window is not None:
-            self._resources_window.refresh(summaries, self._current_session_path)
+            self._resources_window.refresh(summaries, self._session_lifecycle.current_path)
             # Update generate/import buttons in Resources window footer.
             self._resources_window.generate_peak_series_button.setEnabled(
                 self.heatmap_source is not None
@@ -6542,7 +6528,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage("Cleared all loaded resources.")
 
     def _close_session(self) -> None:
-        if self._session_dirty or self._any_peaks_unsaved():
+        if self._session_lifecycle.dirty or self._any_peaks_unsaved():
             choice = self._prompt_save_discard_cancel("close")
             if choice == "cancel":
                 return

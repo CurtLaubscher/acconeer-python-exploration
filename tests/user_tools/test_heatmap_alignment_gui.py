@@ -189,7 +189,7 @@ def test_missing_recent_session_is_removed_without_prompt(
     _use_fake_recent_sessions(window)
     missing_path = tmp_path / "missing.json"
     window.recent_sessions.add(missing_path)
-    window._session_dirty = True
+    window._session_lifecycle.dirty = True
 
     def fail_prompt(_action: str) -> str:
         raise AssertionError("missing recent session should not prompt")
@@ -201,7 +201,7 @@ def test_missing_recent_session_is_removed_without_prompt(
     assert window.recent_sessions.paths() == ()
     assert str(missing_path) in window.statusBar().currentMessage()
 
-    window._session_dirty = False
+    window._session_lifecycle.dirty = False
     window.close()
     qapplication.processEvents()
 
@@ -231,14 +231,14 @@ def test_recent_session_open_respects_cancel_for_unsaved_work(
     session_path = tmp_path / "session.json"
     save_alignment_session(AlignmentSession(), session_path)
     window.recent_sessions.add(session_path)
-    window._session_dirty = True
+    window._session_lifecycle.dirty = True
     monkeypatch.setattr(window, "_prompt_save_discard_cancel", lambda _action: "cancel")
 
     window._open_recent_session(session_path)
 
-    assert window._current_session_path is None
+    assert window._session_lifecycle.current_path is None
 
-    window._session_dirty = False
+    window._session_lifecycle.dirty = False
     window.close()
     qapplication.processEvents()
 
@@ -988,7 +988,7 @@ def test_resources_window_close_button_hides_without_changing_state(
     window = HeatmapAlignmentWindow()
     window.session.camera_track = CameraTrack(path="/tmp/example_camera.mp4")
     window.session.heatmap_track = HeatmapTrack(path="/tmp/example.h5")
-    window._current_session_path = Path("/tmp/session.json")
+    window._session_lifecycle.current_path = Path("/tmp/session.json")
 
     window._show_resources_window()
     resources = window._resources_window
@@ -1004,7 +1004,7 @@ def test_resources_window_close_button_hides_without_changing_state(
     assert window._resources_window is resources
     assert window.session.camera_track.path == "/tmp/example_camera.mp4"
     assert window.session.heatmap_track.path == "/tmp/example.h5"
-    assert window._current_session_path == Path("/tmp/session.json")
+    assert window._session_lifecycle.current_path == Path("/tmp/session.json")
     assert window.camera_source is None
     assert window.heatmap_source is None
 
@@ -2103,12 +2103,12 @@ def test_save_session_without_loaded_camera_or_h5(
     window = HeatmapAlignmentWindow()
     window.session.camera_track.path = str(tmp_path / "missing_camera.mp4")
     window.session.heatmap_track.path = str(tmp_path / "missing.h5")
-    window._current_session_path = session_path
+    window._session_lifecycle.current_path = session_path
 
     window._write_session_to_path(session_path)
 
     assert session_path.is_file()
-    assert window._session_dirty is False
+    assert window._session_lifecycle.dirty is False
 
 
 def test_title_shows_asterisk_when_dirty_and_clears_after_save(
@@ -2124,11 +2124,11 @@ def test_title_shows_asterisk_when_dirty_and_clears_after_save(
 
     window.offset_spin.setValue(0.5)
     qapplication.processEvents()
-    assert window._session_dirty is True
+    assert window._session_lifecycle.dirty is True
     assert window.windowTitle().endswith("*")
 
     window._write_session_to_path(session_path)
-    assert window._session_dirty is False
+    assert window._session_lifecycle.dirty is False
     assert "*" not in window.windowTitle()
 
 
@@ -2149,7 +2149,7 @@ def test_cancel_on_quit_leaves_session_dirty(
     window.closeEvent(event)
 
     assert event.isAccepted() is False
-    assert window._session_dirty is True
+    assert window._session_lifecycle.dirty is True
 
 
 def test_dont_save_then_open_proceeds(
@@ -2179,8 +2179,8 @@ def test_dont_save_then_open_proceeds(
 
     window._load_session()
 
-    assert window._current_session_path == second_path
-    assert window._session_dirty is False
+    assert window._session_lifecycle.current_path == second_path
+    assert window._session_lifecycle.dirty is False
 
 
 def test_dont_save_then_cancel_open_dialog_stays_dirty(
@@ -2208,8 +2208,8 @@ def test_dont_save_then_cancel_open_dialog_stays_dirty(
 
     window._load_session()
 
-    assert window._current_session_path == session_path
-    assert window._session_dirty is True
+    assert window._session_lifecycle.current_path == session_path
+    assert window._session_lifecycle.dirty is True
 
 
 def test_save_from_prompt_calls_write_path(
@@ -2382,7 +2382,7 @@ def test_no_dirty_after_camera_job_completion_on_session_open(
 
     window._apply_camera_job_result(result)
 
-    assert window._session_dirty is False
+    assert window._session_lifecycle.dirty is False
     assert "*" not in window.windowTitle()
 
 
@@ -2403,7 +2403,7 @@ def test_clear_all_resources_marks_dirty(
 
     window.clear_all_resources()
 
-    assert window._session_dirty is True
+    assert window._session_lifecycle.dirty is True
 
 
 
@@ -2431,7 +2431,7 @@ def test_save_from_prompt_aborted_when_validation_fails(
 
     window._close_session()
 
-    assert window._session_dirty is True
+    assert window._session_lifecycle.dirty is True
     assert reset_called is False
     with pytest.raises(ValueError):
         validate_alignment_session(window.session, allow_missing_sources=True)
