@@ -4577,6 +4577,33 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
                     return s
         return None
 
+    def _resolve_peak_series_target(
+        self,
+        series_id: str = "",
+        *,
+        prefer_unsaved: bool = False,
+        fallback_last: bool = False,
+        fallback_active: bool = True,
+    ) -> PeakSeriesResource | None:
+        """Resolve a peak-series action target using the Resources row or UI selection."""
+        if series_id:
+            target = next((s for s in self._peak_series_list if s.series_id == series_id), None)
+            if target is not None:
+                return target
+            # Preserve pre-refactor behavior: stale row ids are non-fatal and may
+            # fall back to the current selection or action-specific default.
+        if fallback_active:
+            target = self._active_peak_state()
+            if target is not None:
+                return target
+        if prefer_unsaved:
+            target = next((s for s in self._peak_series_list if s.unsaved), None)
+            if target is not None:
+                return target
+        if fallback_last and self._peak_series_list:
+            return self._peak_series_list[-1]
+        return None
+
     def _has_peaks_in_memory(self) -> bool:
         return bool(self._peak_series_list)
 
@@ -4585,9 +4612,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
 
     def _unload_last_peak_series(self) -> None:
         """Unload action from top-level menu: unload the selected series or the last one."""
-        target = self._active_peak_state()
-        if target is None and self._peak_series_list:
-            target = self._peak_series_list[-1]
+        target = self._resolve_peak_series_target(fallback_last=True)
         if target is not None:
             self._unload_peak_series(target.series_id)
 
@@ -6390,19 +6415,13 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             return
         if action == "save":
             if kind == "radar_peak":
-                target = (
-                    next((s for s in self._peak_series_list if s.series_id == series_id), None)
-                    if series_id else None
-                ) or self._active_peak_state() or next((s for s in self._peak_series_list if s.unsaved), None)
+                target = self._resolve_peak_series_target(series_id, prefer_unsaved=True)
                 if target is not None:
                     self._save_peak_series(target.series_id)
             return
         if action == "save_as":
             if kind == "radar_peak":
-                target = (
-                    next((s for s in self._peak_series_list if s.series_id == series_id), None)
-                    if series_id else None
-                ) or self._active_peak_state() or (self._peak_series_list[-1] if self._peak_series_list else None)
+                target = self._resolve_peak_series_target(series_id, fallback_last=True)
                 if target is not None:
                     self._save_peak_series_as(target.series_id)
             return
@@ -6425,10 +6444,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             elif kind == "radar_h5":
                 self.unload_h5_recording()
             elif kind == "radar_peak":
-                target = (
-                    next((s for s in self._peak_series_list if s.series_id == series_id), None)
-                    if series_id else None
-                ) or self._active_peak_state() or (self._peak_series_list[-1] if self._peak_series_list else None)
+                target = self._resolve_peak_series_target(series_id, fallback_last=True)
                 if target is not None:
                     self._unload_peak_series(target.series_id)
             elif kind == "leg2_mat":
@@ -6442,7 +6458,11 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             return
         if action == "reveal":
             if kind == "radar_peak" and series_id:
-                ps = next((s for s in self._peak_series_list if s.series_id == series_id), None)
+                ps = self._resolve_peak_series_target(
+                    series_id,
+                    fallback_active=False,
+                    fallback_last=False,
+                )
                 if ps and ps.json_path:
                     self._reveal_path(ps.json_path)
             else:

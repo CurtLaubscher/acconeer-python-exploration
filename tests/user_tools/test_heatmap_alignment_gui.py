@@ -3059,6 +3059,33 @@ def test_invoke_resource_action_save_targets_series_id(qapplication: QApplicatio
     assert saved == ["s2"]
 
 
+def test_invoke_resource_action_save_as_targets_series_id(qapplication: QApplication) -> None:
+    from heatmap_peak_distance_resource import PeakSeriesResource
+
+    window = HeatmapAlignmentWindow()
+    s1 = PeakSeriesResource(
+        series_id="s1",
+        display_name="A",
+        provenance="generated",
+        measurements=(),
+        color="#3b82f6",
+    )
+    s2 = PeakSeriesResource(
+        series_id="s2",
+        display_name="B",
+        provenance="generated",
+        measurements=(),
+        color="#f59e0b",
+    )
+    window._peak_series_list = [s1, s2]
+    saved_as: list[str] = []
+    window._save_peak_series_as = lambda sid: saved_as.append(sid)  # type: ignore
+
+    window.invoke_resource_action("radar_peak", "save_as", series_id="s2")
+
+    assert saved_as == ["s2"]
+
+
 def test_invoke_resource_action_unload_targets_series_id(qapplication: QApplication) -> None:
     """Req 2: unload with series_id removes only the target."""
     from heatmap_peak_distance_resource import PeakSeriesResource
@@ -3071,6 +3098,106 @@ def test_invoke_resource_action_unload_targets_series_id(qapplication: QApplicat
     window.invoke_resource_action("radar_peak", "unload", series_id="remove")
     assert len(window._peak_series_list) == 1
     assert window._peak_series_list[0].series_id == "keep"
+
+
+def test_resolve_peak_series_target_prefers_explicit_id(qapplication: QApplication) -> None:
+    from heatmap_peak_distance_resource import PeakSeriesResource
+
+    window = HeatmapAlignmentWindow()
+    selected = PeakSeriesResource(
+        series_id="selected",
+        display_name="selected",
+        provenance="imported",
+        measurements=(),
+        color="#3b82f6",
+    )
+    explicit = PeakSeriesResource(
+        series_id="explicit",
+        display_name="explicit",
+        provenance="imported",
+        measurements=(),
+        color="#f59e0b",
+    )
+    window._peak_series_list = [selected, explicit]
+    window._heatmap_peak_selector_id = "selected"
+
+    assert window._resolve_peak_series_target("explicit") is explicit
+
+
+def test_resolve_peak_series_target_uses_active_then_unsaved(qapplication: QApplication) -> None:
+    from heatmap_peak_distance_resource import PeakSeriesResource
+
+    window = HeatmapAlignmentWindow()
+    saved = PeakSeriesResource(
+        series_id="saved",
+        display_name="saved",
+        provenance="imported",
+        measurements=(),
+        color="#3b82f6",
+        unsaved=False,
+    )
+    unsaved = PeakSeriesResource(
+        series_id="unsaved",
+        display_name="unsaved",
+        provenance="generated",
+        measurements=(),
+        color="#f59e0b",
+        unsaved=True,
+    )
+    window._peak_series_list = [saved, unsaved]
+    window._heatmap_peak_selector_id = "saved"
+
+    assert window._resolve_peak_series_target(prefer_unsaved=True) is saved
+
+    window._heatmap_peak_selector_id = ""
+    assert window._resolve_peak_series_target(prefer_unsaved=True) is unsaved
+
+
+def test_resolve_peak_series_target_can_fall_back_to_last(qapplication: QApplication) -> None:
+    from heatmap_peak_distance_resource import PeakSeriesResource
+
+    window = HeatmapAlignmentWindow()
+    first = PeakSeriesResource(
+        series_id="first",
+        display_name="first",
+        provenance="imported",
+        measurements=(),
+        color="#3b82f6",
+    )
+    last = PeakSeriesResource(
+        series_id="last",
+        display_name="last",
+        provenance="imported",
+        measurements=(),
+        color="#f59e0b",
+    )
+    window._peak_series_list = [first, last]
+
+    assert window._resolve_peak_series_target(fallback_last=True) is last
+
+
+def test_resolve_peak_series_target_can_require_explicit_id(qapplication: QApplication) -> None:
+    from heatmap_peak_distance_resource import PeakSeriesResource
+
+    window = HeatmapAlignmentWindow()
+    selected = PeakSeriesResource(
+        series_id="selected",
+        display_name="selected",
+        provenance="imported",
+        measurements=(),
+        color="#3b82f6",
+        json_path=Path("/tmp/selected.json"),
+    )
+    window._peak_series_list = [selected]
+    window._heatmap_peak_selector_id = "selected"
+
+    assert (
+        window._resolve_peak_series_target(
+            fallback_active=False,
+            fallback_last=False,
+        )
+        is None
+    )
 
 
 def test_refresh_signal_plot_passes_all_visible_series(qapplication: QApplication) -> None:
