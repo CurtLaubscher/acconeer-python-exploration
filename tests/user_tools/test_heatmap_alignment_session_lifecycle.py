@@ -9,7 +9,7 @@ USER_TOOLS_PATH = REPO_ROOT / "user_tools"
 if str(USER_TOOLS_PATH) not in sys.path:
     sys.path.insert(0, str(USER_TOOLS_PATH))
 
-from heatmap_alignment_core import AlignmentSession, CameraTrack  # noqa: E402
+from heatmap_alignment_core import AlignmentSession, CameraTrack, PeakSeriesSessionEntry  # noqa: E402
 from heatmap_alignment_session_lifecycle import SessionLifecycleState  # noqa: E402
 
 
@@ -108,3 +108,33 @@ def test_lifecycle_pristine_rejects_loaded_resources_or_nondefault_session() -> 
         has_peaks=False,
         has_leg2=True,
     )
+
+
+def test_lifecycle_prepare_session_for_save_syncs_peak_entries() -> None:
+    lifecycle = SessionLifecycleState()
+    session = AlignmentSession()
+    peak_entries = [
+        PeakSeriesSessionEntry(
+            path="/tmp/peaks.json",
+            display_name="peaks",
+            color="#3b82f6",
+        )
+    ]
+
+    prepared = lifecycle.prepare_session_for_save(session, peak_entries=peak_entries)
+
+    assert prepared is session
+    assert session.peak_series == peak_entries
+
+
+def test_lifecycle_prepare_session_for_save_validates_payload() -> None:
+    lifecycle = SessionLifecycleState()
+    session = AlignmentSession()
+    session.viewport.output_width = -1
+
+    try:
+        lifecycle.prepare_session_for_save(session, peak_entries=[])
+    except ValueError as exc:
+        assert "Viewport output dimensions" in str(exc)
+    else:
+        raise AssertionError("Expected invalid session payload to fail validation")

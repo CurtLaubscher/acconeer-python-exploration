@@ -79,7 +79,6 @@ from heatmap_alignment_core import (
     apply_timeline_h5_alignment_drag,
     timeline_h5_drag_affects_alignment,
     timeline_view_bounds_s,
-    validate_alignment_session,
     visible_signal_y_range,
     visible_signal_y_range_for_series,
 )
@@ -4714,11 +4713,11 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._write_session_to_path(Path(filename))
 
     def _write_session_to_path(self, session_path: Path) -> bool:
-        # Sync peak_series from live list before saving; only include series with a saved path.
-        self.session.peak_series = self._peak_adapter().saved_session_entries()
-
         try:
-            validate_alignment_session(self.session, allow_missing_sources=True)
+            self._session_lifecycle.prepare_session_for_save(
+                self.session,
+                peak_entries=self._peak_adapter().saved_session_entries(),
+            )
         except ValueError as exc:
             QtWidgets.QMessageBox.warning(self, "Cannot save session", str(exc))
             return False

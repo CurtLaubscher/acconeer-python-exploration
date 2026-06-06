@@ -7,7 +7,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
 
-from heatmap_alignment_core import AlignmentSession, session_equivalent_for_pristine
+from heatmap_alignment_core import (
+    AlignmentSession,
+    PeakSeriesSessionEntry,
+    session_equivalent_for_pristine,
+    validate_alignment_session,
+)
 
 
 @dataclass
@@ -56,3 +61,14 @@ class SessionLifecycleState:
         if has_camera or has_h5 or has_peaks or has_leg2:
             return False
         return session_equivalent_for_pristine(session, AlignmentSession())
+
+    def prepare_session_for_save(
+        self,
+        session: AlignmentSession,
+        *,
+        peak_entries: list[PeakSeriesSessionEntry],
+    ) -> AlignmentSession:
+        """Apply live save-only fields and validate before writing a session file."""
+        session.peak_series = list(peak_entries)
+        validate_alignment_session(session, allow_missing_sources=True)
+        return session
