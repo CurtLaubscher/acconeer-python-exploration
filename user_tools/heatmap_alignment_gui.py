@@ -134,6 +134,7 @@ from heatmap_peak_distance_resource import (
     peak_state_detected_counts,
 )
 from heatmap_leg2_resource import Leg2ResourceAdapter
+from heatmap_alignment_preview_sync import PreviewSyncPlan
 from heatmap_alignment_session_lifecycle import (
     SessionLifecycleState,
     SessionPromptAction,
@@ -6154,16 +6155,6 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
     def _session_dirty_guard(self) -> Iterator[None]:
         with self._session_lifecycle.dirty_guard():
             yield
-
-    def workbench_is_pristine(self) -> bool:
-        has_camera, has_h5, has_peaks, has_leg2 = self._loaded_resource_flags()
-        return self._session_lifecycle.is_pristine(
-            self.session,
-            has_camera=has_camera,
-            has_h5=has_h5,
-            has_peaks=has_peaks,
-            has_leg2=has_leg2,
-        )
 
     def _loaded_resource_flags(self) -> tuple[bool, bool, bool, bool]:
         return (
