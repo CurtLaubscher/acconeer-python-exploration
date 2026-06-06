@@ -44,7 +44,6 @@ from heatmap_alignment_core import (
     SIGNAL_PLOT_NO_DETECTION_ALPHA,
     SIGNAL_PLOT_PRIMARY_SEGMENT_ALPHA,
     TIMELINE_PLAYHEAD_COLOR_HEX,
-    AlignmentResourceRuntime,
     AlignmentSession,
     CameraTrack,
     CameraVideoSource,
@@ -58,13 +57,8 @@ from heatmap_alignment_core import (
     LoadedLeg2UltrasonicDatasource,
     PeakDistanceSignalSeries,
     PeakSeriesSessionEntry,
-    ResourceAction,
-    ResourceJobPresentation,
-    ResourceKind,
-    ResourceSummary,
     SignalPlotViewSettings,
     apply_viewport_visibility,
-    build_alignment_resource_summaries,
     build_leg2_ultrasonic_signal_series,
     build_peak_distance_signal_series,
     derive_signal_plot_color,
@@ -90,6 +84,14 @@ from heatmap_alignment_core import (
     validate_alignment_session,
     visible_signal_y_range,
     visible_signal_y_range_for_series,
+)
+from heatmap_alignment_resource_summaries import (
+    AlignmentResourceRuntime,
+    ResourceAction,
+    ResourceJobPresentation,
+    ResourceKind,
+    ResourceSummary,
+    build_alignment_resource_summaries,
 )
 from sparse_iq_heatmap_common import distance_velocity_map, heatmap_axes, select_subsweep
 from heatmap_alignment_resource_jobs import (

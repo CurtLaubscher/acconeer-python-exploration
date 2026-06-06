@@ -16,7 +16,6 @@ if str(USER_TOOLS_PATH) not in sys.path:
 from scipy.io import savemat
 
 from heatmap_alignment_core import (  # noqa: E402
-    AlignmentResourceRuntime,
     AlignmentSession,
     CameraSlotIdentity,
     CameraTrack,
@@ -30,16 +29,13 @@ from heatmap_alignment_core import (  # noqa: E402
     PeakSeriesSessionEntry,
     PreprocessSettings,
     RenderSettings,
-    ResourceJobPresentation,
     SignalPlotViewSettings,
     SyncSlotIdentity,
     TimelineState,
     ViewportGeometry,
     ViewportVisibilitySettings,
     _compute_leg2_stance_intervals,
-    _resource_messages,
     apply_viewport_visibility,
-    build_alignment_resource_summaries,
     build_leg2_ultrasonic_signal_series,
     desired_camera_identity,
     desired_h5_identity,
@@ -66,6 +62,12 @@ from heatmap_alignment_core import (  # noqa: E402
     validate_alignment_session,
     visible_signal_y_range,
     visible_signal_y_range_for_series,
+)
+from heatmap_alignment_resource_summaries import (  # noqa: E402
+    AlignmentResourceRuntime,
+    ResourceJobPresentation,
+    _resource_messages,
+    build_alignment_resource_summaries,
 )
 from heatmap_alignment_video_proxy import prepare_proxy_video  # noqa: E402
 from sparse_iq_peak_distance_core import (  # noqa: E402

@@ -36,7 +36,6 @@ from heatmap_alignment_gui import (  # noqa: E402
 )
 from heatmap_alignment_core import (  # noqa: E402
     TimelineH5DragSnapshot,
-    AlignmentResourceRuntime,
     AlignmentSession,
     CameraTrack,
     ExportOverlaySettings,
@@ -47,12 +46,15 @@ from heatmap_alignment_core import (  # noqa: E402
     Leg2UltrasonicSignalSeries,
     PeakDistanceSignalSeries,
     PeakSeriesSessionEntry,
-    ResourceJobPresentation,
     SignalPlotViewSettings,
-    build_alignment_resource_summaries,
     save_alignment_session,
     session_equivalent_for_pristine,
     validate_alignment_session,
+)
+from heatmap_alignment_resource_summaries import (  # noqa: E402
+    AlignmentResourceRuntime,
+    ResourceJobPresentation,
+    build_alignment_resource_summaries,
 )
 from sparse_iq_peak_distance_core import (  # noqa: E402
     STATUS_DETECTED,
