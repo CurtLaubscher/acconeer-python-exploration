@@ -2269,6 +2269,27 @@ def test_pristine_close_session_does_not_show_dialog(
     assert confirm_called is False
 
 
+def test_clean_close_resets_window_title_to_untitled(
+    tmp_path: Path,
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_path = tmp_path / "session.json"
+    save_alignment_session(AlignmentSession(), session_path)
+
+    window = HeatmapAlignmentWindow()
+    window.load_session_from_path(session_path)
+    assert session_path.name in window.windowTitle()
+
+    monkeypatch.setattr(window, "_confirm_close_session_clean", lambda: True)
+
+    window._close_session()
+
+    assert window._session_lifecycle.current_path is None
+    assert window._session_lifecycle.dirty is False
+    assert window.windowTitle() == "Heatmap Alignment Workbench — Untitled Session"
+
+
 def test_clean_non_pristine_close_session_shows_yes_no_only(
     tmp_path: Path,
     qapplication: QApplication,

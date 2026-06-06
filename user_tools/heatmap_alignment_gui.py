@@ -4903,6 +4903,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             self._record_recent_session(session_path)
             self.statusBar().showMessage(f"Loaded session: {session_path}")
         self._clear_session_dirty()
+        self._refresh_session_title()
 
     def _snapshot_active_camera(self) -> _CameraResourceBackup:
         if self.camera_source is None:
