@@ -6221,10 +6221,11 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         return "cancel"
 
     def _confirm_close_session_clean(self) -> bool:
+        prompt = self._session_lifecycle.clean_close_session_prompt()
         reply = QtWidgets.QMessageBox.question(
             self,
-            "Close Session?",
-            "Close this session and unload all resources?",
+            prompt.title,
+            prompt.text,
             QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
             QtWidgets.QMessageBox.StandardButton.No,
         )

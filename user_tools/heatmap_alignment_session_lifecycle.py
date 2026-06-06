@@ -19,6 +19,8 @@ from heatmap_alignment_core import (
 
 SessionPromptAction = Literal["open", "close", "quit"]
 
+_CLOSE_SESSION_TITLE = "Close Session?"
+
 
 @dataclass(frozen=True)
 class SaveDiscardCancelPrompt:
@@ -101,7 +103,7 @@ class SessionLifecycleState:
     ) -> SaveDiscardCancelPrompt:
         titles: dict[SessionPromptAction, str] = {
             "open": "Open Another Session?",
-            "close": "Close Session?",
+            "close": _CLOSE_SESSION_TITLE,
             "quit": "Quit Heatmap Alignment?",
         }
         peaks_note = "Saving the alignment session does not write peak JSON."
@@ -150,3 +152,10 @@ class SessionLifecycleState:
                 "quit": "There are unsaved changes. Do you want to save them before quitting?",
             }
         return SaveDiscardCancelPrompt(title=titles[action], text=texts[action])
+
+    def clean_close_session_prompt(self) -> SaveDiscardCancelPrompt:
+        """Return title/text for closing a clean but non-pristine session."""
+        return SaveDiscardCancelPrompt(
+            title=_CLOSE_SESSION_TITLE,
+            text="Close this session and unload all resources?",
+        )

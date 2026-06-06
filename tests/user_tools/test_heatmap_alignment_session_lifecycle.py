@@ -233,3 +233,12 @@ def test_lifecycle_prompt_for_dirty_session_with_unsaved_peaks() -> None:
     assert "opening another session" in prompt.text
     assert "Unsaved peak-distance data will also be lost." in prompt.text
     assert "Saving the alignment session does not write peak JSON." in prompt.text
+
+
+def test_lifecycle_clean_close_session_prompt() -> None:
+    lifecycle = SessionLifecycleState()
+
+    prompt = lifecycle.clean_close_session_prompt()
+
+    assert prompt.title == "Close Session?"
+    assert prompt.text == "Close this session and unload all resources?"
