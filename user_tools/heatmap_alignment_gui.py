@@ -28,7 +28,6 @@ import os
 import sys
 import threading
 import time
-import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -129,7 +128,8 @@ from heatmap_peak_distance_resource import (
     PeakSeriesResource,
     active_peak_measurements,
     active_peak_zero_velocity_m_s,
-    assign_peak_series_color,
+    build_generated_peak_series,
+    build_imported_peak_series,
     default_generated_name,
     default_imported_name,
     generate_peak_distances_from_heatmap_record,
@@ -4253,31 +4253,6 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.leg2_signal_kind_combo.setEnabled(has_datasource)
         self.timeline_view.update()
 
-    def _make_imported_peak_series(
-        self,
-        datasource: Any,
-        json_path: Path,
-        *,
-        display_name: str,
-        color: str | None = None,
-        visible: bool = True,
-        heatmap_selected: bool = False,
-        warnings: tuple[str, ...] = (),
-    ) -> PeakSeriesResource:
-        return PeakSeriesResource(
-            series_id=str(uuid.uuid4()),
-            display_name=display_name,
-            provenance="imported",
-            measurements=datasource.measurements,
-            metadata=datasource.metadata,
-            color=color or assign_peak_series_color(self._peak_series_list),
-            json_path=json_path,
-            visible=visible,
-            heatmap_selected=heatmap_selected,
-            unsaved=False,
-            warnings=warnings,
-        )
-
     def _reload_peak_series_from_session(self) -> None:
         from sparse_iq_peak_distance_core import load_peak_distance_json
 
@@ -4305,11 +4280,12 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
                 self._refresh_resources_ui()
                 continue
 
-            series = self._make_imported_peak_series(
+            series = build_imported_peak_series(
                 datasource,
                 json_path,
                 display_name=entry.display_name or json_path.stem,
-                color=entry.color or assign_peak_series_color(self._peak_series_list),
+                existing_series=self._peak_series_list,
+                color=entry.color or None,
                 visible=entry.visible,
                 heatmap_selected=entry.heatmap_selected,
             )
@@ -4357,16 +4333,12 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         finally:
             QtWidgets.QApplication.restoreOverrideCursor()
 
-        series = PeakSeriesResource(
-            series_id=str(uuid.uuid4()),
+        series = build_generated_peak_series(
+            result,
             display_name=dialog.display_name,
-            provenance="generated",
-            measurements=result.measurements,
-            metadata=result.metadata,
             algorithm_id=dialog.algorithm_id,
-            algorithm_params={"threshold": dialog.threshold},
-            color=assign_peak_series_color(self._peak_series_list),
-            unsaved=True,
+            threshold=dialog.threshold,
+            existing_series=self._peak_series_list,
         )
         self._peak_series_list.append(series)
         self._heatmap_peak_selector_id = series.series_id
@@ -4419,10 +4391,11 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
 
             display_name = default_imported_name(json_path, existing_names)
             existing_names.append(display_name)
-            series = self._make_imported_peak_series(
+            series = build_imported_peak_series(
                 datasource,
                 json_path,
                 display_name=display_name,
+                existing_series=self._peak_series_list,
                 warnings=tuple(warnings),
             )
             self._peak_series_list.append(series)
@@ -4464,10 +4437,11 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
 
         existing_names = [s.display_name for s in self._peak_series_list]
         display_name = default_imported_name(json_path, existing_names)
-        series = self._make_imported_peak_series(
+        series = build_imported_peak_series(
             datasource,
             json_path,
             display_name=display_name,
+            existing_series=self._peak_series_list,
             warnings=tuple(warnings),
         )
         self._peak_series_list.append(series)

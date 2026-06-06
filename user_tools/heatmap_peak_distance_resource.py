@@ -64,6 +64,55 @@ def assign_peak_series_color(existing_series: list[PeakSeriesResource]) -> str:
     return PEAK_SERIES_PALETTE[0]
 
 
+def build_imported_peak_series(
+    datasource: LoadedPeakDistanceDatasource,
+    json_path: Path,
+    *,
+    display_name: str,
+    existing_series: list[PeakSeriesResource],
+    color: str | None = None,
+    visible: bool = True,
+    heatmap_selected: bool = False,
+    warnings: tuple[str, ...] = (),
+) -> PeakSeriesResource:
+    """Create a runtime peak-series row from a saved JSON datasource."""
+    return PeakSeriesResource(
+        series_id=str(uuid4()),
+        display_name=display_name,
+        provenance="imported",
+        measurements=datasource.measurements,
+        metadata=datasource.metadata,
+        color=color or assign_peak_series_color(existing_series),
+        json_path=json_path,
+        visible=visible,
+        heatmap_selected=heatmap_selected,
+        unsaved=False,
+        warnings=warnings,
+    )
+
+
+def build_generated_peak_series(
+    result: PeakDistanceExportResult,
+    *,
+    display_name: str,
+    algorithm_id: str,
+    threshold: float,
+    existing_series: list[PeakSeriesResource],
+) -> PeakSeriesResource:
+    """Create an unsaved runtime peak-series row from generated measurements."""
+    return PeakSeriesResource(
+        series_id=str(uuid4()),
+        display_name=display_name,
+        provenance="generated",
+        measurements=result.measurements,
+        metadata=result.metadata,
+        algorithm_id=algorithm_id,
+        algorithm_params={"threshold": threshold},
+        color=assign_peak_series_color(existing_series),
+        unsaved=True,
+    )
+
+
 def default_generated_name(algorithm_id: str, threshold: float) -> str:
     """Return a human-readable default name for a generated peak series.
 

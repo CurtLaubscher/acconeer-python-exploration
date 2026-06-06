@@ -23,6 +23,8 @@ from heatmap_alignment_core import (  # noqa: E402
 from heatmap_peak_distance_resource import (  # noqa: E402
     active_peak_measurements,
     active_peak_zero_velocity_m_s,
+    build_generated_peak_series,
+    build_imported_peak_series,
     generate_peak_distances_from_heatmap_record,
     peak_state_detected_counts,
     save_peak_state_to_path,
@@ -162,6 +164,77 @@ class TestActivePeakZeroVelocityMs:
         )
         modified = PeakDistanceExportResult(metadata=meta, measurements=result.measurements)
         assert active_peak_zero_velocity_m_s(modified) == pytest.approx(0.15)
+
+
+class TestPeakSeriesFactories:
+    def test_build_imported_peak_series_sets_saved_imported_fields(self) -> None:
+        datasource = _make_loaded_datasource(Path("/tmp/peaks.json"))
+
+        series = build_imported_peak_series(
+            datasource,
+            Path("/tmp/peaks.json"),
+            display_name="Imported",
+            existing_series=[],
+            color="#f59e0b",
+            visible=False,
+            heatmap_selected=True,
+            warnings=("warning",),
+        )
+
+        assert series.provenance == "imported"
+        assert series.display_name == "Imported"
+        assert series.measurements == datasource.measurements
+        assert series.metadata == datasource.metadata
+        assert series.color == "#f59e0b"
+        assert series.json_path == Path("/tmp/peaks.json")
+        assert series.visible is False
+        assert series.heatmap_selected is True
+        assert series.unsaved is False
+        assert series.warnings == ("warning",)
+        assert series.series_id
+
+    def test_build_imported_peak_series_assigns_next_color(self) -> None:
+        existing = [
+            build_imported_peak_series(
+                _make_loaded_datasource(),
+                Path("/tmp/first.json"),
+                display_name="First",
+                existing_series=[],
+            )
+        ]
+
+        series = build_imported_peak_series(
+            _make_loaded_datasource(),
+            Path("/tmp/second.json"),
+            display_name="Second",
+            existing_series=existing,
+        )
+
+        assert series.color != existing[0].color
+
+    def test_build_generated_peak_series_sets_unsaved_generated_fields(self) -> None:
+        result = _make_export_result()
+
+        series = build_generated_peak_series(
+            result,
+            display_name="Generated",
+            algorithm_id=PEAK_EXTRACTION_METHOD_SUM_VELOCITY,
+            threshold=650.0,
+            existing_series=[],
+        )
+
+        assert series.provenance == "generated"
+        assert series.display_name == "Generated"
+        assert series.measurements == result.measurements
+        assert series.metadata == result.metadata
+        assert series.algorithm_id == PEAK_EXTRACTION_METHOD_SUM_VELOCITY
+        assert series.algorithm_params == {"threshold": 650.0}
+        assert series.json_path is None
+        assert series.visible is True
+        assert series.heatmap_selected is False
+        assert series.warnings == ()
+        assert series.unsaved is True
+        assert series.series_id
 
 
 class TestSavePeakStateToPath:
