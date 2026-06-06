@@ -20,6 +20,7 @@ from heatmap_alignment_core import (
 SessionPromptAction = Literal["open", "close", "quit"]
 
 _CLOSE_SESSION_TITLE = "Close Session?"
+_WINDOW_TITLE_PREFIX = "Heatmap Alignment Workbench — "
 
 
 @dataclass(frozen=True)
@@ -101,6 +102,13 @@ class SessionLifecycleState:
             return False
         self.current_path = None
         return True
+
+    def window_title(self) -> str:
+        """Return the main window title from current path and dirty state."""
+        dirty_suffix = "*" if self.dirty else ""
+        if self.current_path is None:
+            return f"{_WINDOW_TITLE_PREFIX}Untitled Session{dirty_suffix}"
+        return f"{_WINDOW_TITLE_PREFIX}{self.current_path.name}{dirty_suffix}"
 
     def save_discard_cancel_prompt(
         self,

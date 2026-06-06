@@ -6232,15 +6232,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         return reply == QtWidgets.QMessageBox.StandardButton.Yes
 
     def _refresh_session_title(self) -> None:
-        dirty_suffix = "*" if self._session_dirty else ""
-        if self._current_session_path is None:
-            self.setWindowTitle(
-                f"Heatmap Alignment Workbench — Untitled Session{dirty_suffix}"
-            )
-            return
-        self.setWindowTitle(
-            f"Heatmap Alignment Workbench — {self._current_session_path.name}{dirty_suffix}"
-        )
+        self.setWindowTitle(self._session_lifecycle.window_title())
 
     def _refresh_resources_ui(self) -> None:
         summaries = self.resource_summaries()
@@ -6574,6 +6566,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             self._refresh_resources_ui()
             self.statusBar().showMessage("Closed session.")
         self._clear_session_dirty()
+        self._refresh_session_title()
 
     def _dialog_start_path(self, key: str) -> str:
         value = self.settings.value(key, "", type=str)

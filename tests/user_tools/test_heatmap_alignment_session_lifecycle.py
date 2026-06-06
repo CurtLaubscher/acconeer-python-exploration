@@ -250,3 +250,19 @@ def test_lifecycle_clear_current_path_reports_change(tmp_path: Path) -> None:
     assert lifecycle.clear_current_path() is True
     assert lifecycle.current_path is None
     assert lifecycle.clear_current_path() is False
+
+
+def test_lifecycle_window_title_untitled_and_named(tmp_path: Path) -> None:
+    lifecycle = SessionLifecycleState()
+
+    assert lifecycle.window_title() == "Heatmap Alignment Workbench — Untitled Session"
+
+    lifecycle.mark_dirty()
+    assert lifecycle.window_title() == "Heatmap Alignment Workbench — Untitled Session*"
+
+    lifecycle.current_path = tmp_path / "trial.json"
+    lifecycle.clear_dirty()
+    assert lifecycle.window_title() == "Heatmap Alignment Workbench — trial.json"
+
+    lifecycle.mark_dirty()
+    assert lifecycle.window_title() == "Heatmap Alignment Workbench — trial.json*"
