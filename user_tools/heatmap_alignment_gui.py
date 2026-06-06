@@ -134,7 +134,7 @@ from heatmap_peak_distance_resource import (
     peak_state_detected_counts,
 )
 from heatmap_leg2_resource import Leg2ResourceAdapter
-from heatmap_alignment_session_lifecycle import SessionLifecycleState
+from heatmap_alignment_session_lifecycle import SessionLifecycleState, SessionPromptAction
 
 from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtCore import QUrl
@@ -6190,66 +6190,16 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
 
     def _prompt_save_discard_cancel(
         self,
-        action: Literal["open", "close", "quit"],
+        action: SessionPromptAction,
     ) -> Literal["save", "discard", "cancel"]:
-        titles = {
-            "open": "Open Another Session?",
-            "close": "Close Session?",
-            "quit": "Quit Heatmap Alignment?",
-        }
-        peaks_note = (
-            "Saving the alignment session does not write peak JSON."
+        prompt = self._session_lifecycle.save_discard_cancel_prompt(
+            action,
+            peaks_unsaved=self._any_peaks_unsaved(),
         )
-        if self._session_dirty and self._any_peaks_unsaved():
-            texts = {
-                "open": (
-                    "There are unsaved changes. Do you want to save them before "
-                    f"opening another session?\n\nUnsaved peak-distance data will also be lost. "
-                    f"{peaks_note}"
-                ),
-                "close": (
-                    "There are unsaved changes. Do you want to save them before "
-                    f"closing this session?\n\nUnsaved peak-distance data will also be lost. "
-                    f"{peaks_note}"
-                ),
-                "quit": (
-                    "There are unsaved changes. Do you want to save them before quitting?"
-                    f"\n\nUnsaved peak-distance data will also be lost. {peaks_note}"
-                ),
-            }
-        elif self._any_peaks_unsaved():
-            texts = {
-                "open": (
-                    "Unsaved peak-distance data will be lost if you open another session. "
-                    f"{peaks_note}\n\nProceed?"
-                ),
-                "close": (
-                    "Unsaved peak-distance data will be lost if you close this session. "
-                    f"{peaks_note}\n\nProceed?"
-                ),
-                "quit": (
-                    "Unsaved peak-distance data will be lost if you quit. "
-                    f"{peaks_note}\n\nProceed?"
-                ),
-            }
-        else:
-            texts = {
-                "open": (
-                    "There are unsaved changes. Do you want to save them before "
-                    "opening another session?"
-                ),
-                "close": (
-                    "There are unsaved changes. Do you want to save them before "
-                    "closing this session?"
-                ),
-                "quit": (
-                    "There are unsaved changes. Do you want to save them before quitting?"
-                ),
-            }
         message_box = QtWidgets.QMessageBox(self)
         message_box.setIcon(QtWidgets.QMessageBox.Icon.Warning)
-        message_box.setWindowTitle(titles[action])
-        message_box.setText(texts[action])
+        message_box.setWindowTitle(prompt.title)
+        message_box.setText(prompt.text)
         save_button = message_box.addButton(
             "Save",
             QtWidgets.QMessageBox.ButtonRole.AcceptRole,

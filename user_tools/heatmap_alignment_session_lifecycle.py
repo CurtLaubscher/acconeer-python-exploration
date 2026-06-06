@@ -5,7 +5,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator
+from typing import Iterator, Literal
 
 from heatmap_alignment_core import (
     AlignmentSession,
@@ -15,6 +15,15 @@ from heatmap_alignment_core import (
     session_equivalent_for_pristine,
     validate_alignment_session,
 )
+
+
+SessionPromptAction = Literal["open", "close", "quit"]
+
+
+@dataclass(frozen=True)
+class SaveDiscardCancelPrompt:
+    title: str
+    text: str
 
 
 @dataclass
@@ -83,3 +92,61 @@ class SessionLifecycleState:
         session = load_alignment_session(path)
         self.current_path = path
         return session
+
+    def save_discard_cancel_prompt(
+        self,
+        action: SessionPromptAction,
+        *,
+        peaks_unsaved: bool,
+    ) -> SaveDiscardCancelPrompt:
+        titles: dict[SessionPromptAction, str] = {
+            "open": "Open Another Session?",
+            "close": "Close Session?",
+            "quit": "Quit Heatmap Alignment?",
+        }
+        peaks_note = "Saving the alignment session does not write peak JSON."
+        if self.dirty and peaks_unsaved:
+            texts: dict[SessionPromptAction, str] = {
+                "open": (
+                    "There are unsaved changes. Do you want to save them before "
+                    "opening another session?\n\nUnsaved peak-distance data will also be lost. "
+                    f"{peaks_note}"
+                ),
+                "close": (
+                    "There are unsaved changes. Do you want to save them before "
+                    "closing this session?\n\nUnsaved peak-distance data will also be lost. "
+                    f"{peaks_note}"
+                ),
+                "quit": (
+                    "There are unsaved changes. Do you want to save them before quitting?"
+                    f"\n\nUnsaved peak-distance data will also be lost. {peaks_note}"
+                ),
+            }
+        elif peaks_unsaved:
+            texts = {
+                "open": (
+                    "Unsaved peak-distance data will be lost if you open another session. "
+                    f"{peaks_note}\n\nProceed?"
+                ),
+                "close": (
+                    "Unsaved peak-distance data will be lost if you close this session. "
+                    f"{peaks_note}\n\nProceed?"
+                ),
+                "quit": (
+                    "Unsaved peak-distance data will be lost if you quit. "
+                    f"{peaks_note}\n\nProceed?"
+                ),
+            }
+        else:
+            texts = {
+                "open": (
+                    "There are unsaved changes. Do you want to save them before "
+                    "opening another session?"
+                ),
+                "close": (
+                    "There are unsaved changes. Do you want to save them before "
+                    "closing this session?"
+                ),
+                "quit": "There are unsaved changes. Do you want to save them before quitting?",
+            }
+        return SaveDiscardCancelPrompt(title=titles[action], text=texts[action])

@@ -201,3 +201,35 @@ def test_lifecycle_load_from_path_does_not_update_path_on_failure(tmp_path: Path
         raise AssertionError("Expected missing session load to fail")
 
     assert lifecycle.current_path == tmp_path / "existing.json"
+
+
+def test_lifecycle_prompt_for_dirty_session_without_unsaved_peaks() -> None:
+    lifecycle = SessionLifecycleState(dirty=True)
+
+    prompt = lifecycle.save_discard_cancel_prompt("quit", peaks_unsaved=False)
+
+    assert prompt.title == "Quit Heatmap Alignment?"
+    assert prompt.text == "There are unsaved changes. Do you want to save them before quitting?"
+
+
+def test_lifecycle_prompt_for_unsaved_peaks_without_dirty_session() -> None:
+    lifecycle = SessionLifecycleState(dirty=False)
+
+    prompt = lifecycle.save_discard_cancel_prompt("close", peaks_unsaved=True)
+
+    assert prompt.title == "Close Session?"
+    assert "Unsaved peak-distance data will be lost if you close this session." in prompt.text
+    assert "Saving the alignment session does not write peak JSON." in prompt.text
+    assert prompt.text.endswith("Proceed?")
+
+
+def test_lifecycle_prompt_for_dirty_session_with_unsaved_peaks() -> None:
+    lifecycle = SessionLifecycleState(dirty=True)
+
+    prompt = lifecycle.save_discard_cancel_prompt("open", peaks_unsaved=True)
+
+    assert prompt.title == "Open Another Session?"
+    assert "There are unsaved changes." in prompt.text
+    assert "opening another session" in prompt.text
+    assert "Unsaved peak-distance data will also be lost." in prompt.text
+    assert "Saving the alignment session does not write peak JSON." in prompt.text
