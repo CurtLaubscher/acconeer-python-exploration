@@ -18,6 +18,7 @@ from heatmap_alignment_core import (
 
 
 SessionPromptAction = Literal["open", "close", "quit"]
+SessionGuardPrompt = Literal["none", "save_discard_cancel", "clean_close_confirm"]
 
 _CLOSE_SESSION_TITLE = "Close Session?"
 _WINDOW_TITLE_PREFIX = "Heatmap Alignment Workbench — "
@@ -27,6 +28,13 @@ _WINDOW_TITLE_PREFIX = "Heatmap Alignment Workbench — "
 class SaveDiscardCancelPrompt:
     title: str
     text: str
+
+
+@dataclass(frozen=True)
+class SessionTransitionGuard:
+    """UI-neutral decision for whether a session transition needs a prompt."""
+
+    prompt: SessionGuardPrompt
 
 
 @dataclass

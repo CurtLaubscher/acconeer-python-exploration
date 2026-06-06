@@ -11,7 +11,10 @@ if str(USER_TOOLS_PATH) not in sys.path:
 
 from heatmap_alignment_core import AlignmentSession, CameraTrack, PeakSeriesSessionEntry  # noqa: E402
 import heatmap_alignment_session_lifecycle as lifecycle_module  # noqa: E402
-from heatmap_alignment_session_lifecycle import SessionLifecycleState  # noqa: E402
+from heatmap_alignment_session_lifecycle import (  # noqa: E402
+    SessionLifecycleState,
+    SessionTransitionGuard,
+)
 
 
 def test_lifecycle_mark_dirty_reports_visible_state_change() -> None:
@@ -250,6 +253,12 @@ def test_lifecycle_clear_current_path_reports_change(tmp_path: Path) -> None:
     assert lifecycle.clear_current_path() is True
     assert lifecycle.current_path is None
     assert lifecycle.clear_current_path() is False
+
+
+def test_session_transition_guard_prompt_values() -> None:
+    assert SessionTransitionGuard(prompt="none").prompt == "none"
+    assert SessionTransitionGuard(prompt="save_discard_cancel").prompt == "save_discard_cancel"
+    assert SessionTransitionGuard(prompt="clean_close_confirm").prompt == "clean_close_confirm"
 
 
 def test_lifecycle_window_title_untitled_and_named(tmp_path: Path) -> None:
