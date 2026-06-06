@@ -137,6 +137,7 @@ from heatmap_peak_distance_resource import (
     generate_peak_distances_from_heatmap_record,
     peak_state_detected_counts,
 )
+from heatmap_leg2_resource import Leg2ResourceAdapter
 
 from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtCore import QUrl
@@ -4182,7 +4183,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             return False
 
         self.leg2_ultrasonic_datasource = datasource
-        self.session.leg2_ultrasonic_datasource.path = str(mat_path)
+        self._leg2_adapter().remember_path(mat_path)
         self.settings.setValue("last_leg2_mat_path", str(mat_path))
         self._set_resource_reload_error("leg2_mat", None)
         self._set_resource_warnings("leg2_mat", ())
@@ -4207,8 +4208,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         if mark_dirty:
             self._mark_session_dirty()
         self.leg2_ultrasonic_datasource = None
-        self.session.leg2_ultrasonic_datasource.path = ""
-        self.session.leg2_ultrasonic_datasource.offset_s = 0.0
+        self._leg2_adapter().clear_settings()
         self._set_resource_reload_error("leg2_mat", None)
         self._set_resource_warnings("leg2_mat", ())
         self._update_leg2_datasource_controls()
@@ -4250,9 +4250,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._sync_previews(camera_access_hint="auto")
 
     def _update_leg2_datasource_controls(self) -> None:
-        datasource = self.leg2_ultrasonic_datasource
-        has_datasource = datasource is not None
-        self.leg2_signal_kind_combo.setEnabled(has_datasource)
+        self.leg2_signal_kind_combo.setEnabled(self._leg2_adapter().is_loaded())
         self.timeline_view.update()
 
     def _reload_peak_series_from_session(self) -> None:
@@ -4551,6 +4549,12 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         return PeakSeriesResourceAdapter(
             self._peak_series_list,
             selected_series_id=self._heatmap_peak_selector_id or "",
+        )
+
+    def _leg2_adapter(self) -> Leg2ResourceAdapter:
+        return Leg2ResourceAdapter(
+            self.session.leg2_ultrasonic_datasource,
+            self.leg2_ultrasonic_datasource,
         )
 
     def _resolve_peak_series_target(
@@ -6051,9 +6055,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.viewport_view.set_frame(viewport_frame)
 
     def _leg2_legend_name(self) -> str:
-        if self.session.leg2_ultrasonic_datasource.signal_kind == "filtered":
-            return "Leg2 filtered ultrasonic"
-        return "Leg2 raw ultrasonic"
+        return self._leg2_adapter().legend_name()
 
     def _refresh_signal_plot(self, *, refresh_data: bool = True) -> None:
         if not refresh_data:
@@ -6131,17 +6133,15 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             counts = peak_state_detected_counts(peak_state)
             if counts is not None:
                 peak_detected, peak_total = counts
-        leg2_valid: int | None = None
-        leg2_samples: int | None = None
-        if self.leg2_ultrasonic_datasource is not None:
-            leg2_samples = int(self.leg2_ultrasonic_datasource.time_s.size)
-            leg2_valid = int(np.count_nonzero(self.leg2_ultrasonic_datasource.reliable_flag_mask))
+        leg2_adapter = self._leg2_adapter()
+        leg2_valid = leg2_adapter.valid_segment_count()
+        leg2_samples = leg2_adapter.sample_count()
 
         return AlignmentResourceRuntime(
             camera_loaded=self.camera_source is not None,
             radar_h5_loaded=self.heatmap_source is not None,
             radar_peak_loaded=self._has_peaks_in_memory(),
-            leg2_loaded=self.leg2_ultrasonic_datasource is not None,
+            leg2_loaded=leg2_adapter.is_loaded(),
             peak_detected_count=peak_detected,
             peak_measurement_count=peak_total,
             peaks_dirty=self._any_peaks_unsaved(),
@@ -6307,16 +6307,15 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         has_peak_path = bool(self._peak_series_list) or bool(
             any(e.path for e in self.session.peak_series)
         )  # True when a saved series path exists (for reload/reveal actions)
-        has_leg2_path = bool(self.session.leg2_ultrasonic_datasource.path)
+        leg2_adapter = self._leg2_adapter()
+        has_leg2_path = leg2_adapter.has_path()
 
         self.unload_camera_action.setEnabled(self.camera_source is not None)
         self.unload_h5_action.setEnabled(self.heatmap_source is not None)
         self.unload_peak_action.setEnabled(
             self._has_peaks_in_memory() or has_peak_path
         )
-        self.unload_leg2_action.setEnabled(
-            self.leg2_ultrasonic_datasource is not None or has_leg2_path
-        )
+        self.unload_leg2_action.setEnabled(leg2_adapter.can_unload())
         self.reload_camera_action.setEnabled(has_camera_path)
         self.reload_h5_action.setEnabled(has_h5_path)
         self.reload_peak_action.setEnabled(has_peak_path)
@@ -6436,7 +6435,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
                 if s.json_path is not None:
                     return str(s.json_path)
             return ""
-        return self.session.leg2_ultrasonic_datasource.path
+        return self._leg2_adapter().path_text()
 
     def _reload_resource(self, kind: ResourceKind) -> None:
         path_text = self._resource_path_for_kind(kind)
