@@ -6565,7 +6565,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         with self._session_dirty_guard():
             self._close_sources()
             self.session = AlignmentSession()
-            self._current_session_path = None
+            self._session_lifecycle.clear_current_path()
             self._resource_reload_errors.clear()
             self._resource_load_warnings.clear()
             self._populate_controls_from_session()

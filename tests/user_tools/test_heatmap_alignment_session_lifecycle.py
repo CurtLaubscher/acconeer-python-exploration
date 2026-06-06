@@ -242,3 +242,11 @@ def test_lifecycle_clean_close_session_prompt() -> None:
 
     assert prompt.title == "Close Session?"
     assert prompt.text == "Close this session and unload all resources?"
+
+
+def test_lifecycle_clear_current_path_reports_change(tmp_path: Path) -> None:
+    lifecycle = SessionLifecycleState(current_path=tmp_path / "session.json")
+
+    assert lifecycle.clear_current_path() is True
+    assert lifecycle.current_path is None
+    assert lifecycle.clear_current_path() is False

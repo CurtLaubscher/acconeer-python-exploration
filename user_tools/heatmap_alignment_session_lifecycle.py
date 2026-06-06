@@ -95,6 +95,13 @@ class SessionLifecycleState:
         self.current_path = path
         return session
 
+    def clear_current_path(self) -> bool:
+        """Clear the remembered session file path; return whether it changed."""
+        if self.current_path is None:
+            return False
+        self.current_path = None
+        return True
+
     def save_discard_cancel_prompt(
         self,
         action: SessionPromptAction,
