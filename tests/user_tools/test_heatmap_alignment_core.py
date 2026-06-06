@@ -53,7 +53,6 @@ from heatmap_alignment_core import (  # noqa: E402
     import_peak_distance_json_for_heatmap,
     load_alignment_session,
     load_leg2_mat_ultrasonic,
-    prepare_proxy_video,
     reconcile_camera_action,
     reconcile_h5_action,
     reconcile_sync_slot_action,
@@ -68,6 +67,7 @@ from heatmap_alignment_core import (  # noqa: E402
     visible_signal_y_range,
     visible_signal_y_range_for_series,
 )
+from heatmap_alignment_video_proxy import prepare_proxy_video  # noqa: E402
 from sparse_iq_peak_distance_core import (  # noqa: E402
     DEFAULT_PEAK_THRESHOLD,
     PEAK_EXTRACTION_METHOD_SUM_VELOCITY,
@@ -911,13 +911,13 @@ def test_camera_video_source_uses_grab_for_skipped_playback_frames(
 def test_prepare_proxy_video_skips_proxy_for_small_sources(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import heatmap_alignment_core as core
+    import heatmap_alignment_video_proxy as video_proxy
 
     source_path = Path("small.mp4")
     monkeypatch.setattr(
-        core,
+        video_proxy,
         "probe_video",
-        lambda path: core.VideoProbe(
+        lambda path: video_proxy.VideoProbe(
             path=path,
             fps=30.0,
             frame_count=90,
@@ -938,7 +938,7 @@ def test_prepare_proxy_video_reuses_cached_proxy(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    import heatmap_alignment_core as core
+    import heatmap_alignment_video_proxy as video_proxy
 
     source_path = tmp_path / "large.mp4"
     source_path.write_bytes(b"source")
@@ -946,9 +946,9 @@ def test_prepare_proxy_video_reuses_cached_proxy(
     proxy_path.write_bytes(b"proxy")
 
     monkeypatch.setattr(
-        core,
+        video_proxy,
         "probe_video",
-        lambda path: core.VideoProbe(
+        lambda path: video_proxy.VideoProbe(
             path=path,
             fps=60.0,
             frame_count=600,
@@ -957,10 +957,10 @@ def test_prepare_proxy_video_reuses_cached_proxy(
             height=2160,
         ),
     )
-    monkeypatch.setattr(core, "_find_ffmpeg", lambda: "ffmpeg")
+    monkeypatch.setattr(video_proxy, "find_ffmpeg", lambda: "ffmpeg")
     monkeypatch.setattr(
-        core,
-        "_proxy_cache_path",
+        video_proxy,
+        "proxy_cache_path",
         lambda source_path, source_probe, max_dimension, cache_root: proxy_path,
     )
 

@@ -9,13 +9,9 @@ because it depends on the same runtime surface as the GUI, including OpenCV.
 
 import json
 import math
-import os
-import shutil
-import tempfile
 from collections import OrderedDict
 from dataclasses import asdict, dataclass, field
 from functools import lru_cache
-from hashlib import sha256
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -34,6 +30,23 @@ from sparse_iq_peak_distance_core import (
     load_peak_distance_json,
     validate_peak_distance_import,
 )
+from heatmap_alignment_video_proxy import (
+    ProxyVideoResult,
+    VideoProbe,
+    default_proxy_cache_root,
+    find_ffmpeg,
+    prepare_proxy_video,
+    probe_video,
+    proxy_cache_path,
+    resolve_ffmpeg_path,
+    scaled_video_dimensions,
+)
+
+_default_proxy_cache_root = default_proxy_cache_root
+_find_ffmpeg = find_ffmpeg
+_proxy_cache_path = proxy_cache_path
+_resolve_ffmpeg_path = resolve_ffmpeg_path
+_scaled_video_dimensions = scaled_video_dimensions
 
 
 SESSION_VERSION = 3
@@ -221,25 +234,6 @@ class Leg2MatImportError(ValueError):
         if self.detail:
             return f"Could not load Leg2 MAT ultrasonic datasource.\n\n{self.detail}"
         return "Could not load Leg2 MAT ultrasonic datasource."
-
-
-@dataclass(frozen=True)
-class VideoProbe:
-    path: Path
-    fps: float
-    frame_count: int
-    duration_s: float
-    width: int
-    height: int
-
-
-@dataclass(frozen=True)
-class ProxyVideoResult:
-    source_path: Path
-    display_path: Path
-    source_probe: VideoProbe
-    proxy_path: Path | None
-    state: Literal["original", "proxy_reused", "proxy_built", "proxy_unavailable"]
 
 
 @dataclass(frozen=True)
@@ -1095,145 +1089,6 @@ def _json_values_equivalent_for_pristine(left: object, right: object) -> bool:
         return math.isclose(float(left), float(right), rel_tol=0.0, abs_tol=1e-9)
 
     return left == right
-
-
-def probe_video(path: Path) -> VideoProbe:
-    capture = cv2.VideoCapture(str(path))
-    if not capture.isOpened():
-        raise ValueError(f"Could not open camera video: {path}")
-    try:
-        fps = float(capture.get(cv2.CAP_PROP_FPS) or 0.0)
-        frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-        width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
-        height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
-    finally:
-        capture.release()
-
-    duration_s = frame_count / fps if fps > 0 and frame_count > 0 else 0.0
-    return VideoProbe(
-        path=path,
-        fps=fps,
-        frame_count=frame_count,
-        duration_s=duration_s,
-        width=width,
-        height=height,
-    )
-
-
-def prepare_proxy_video(
-    source_path: Path,
-    *,
-    max_dimension: int = 1280,
-    cache_root: Path | None = None,
-) -> ProxyVideoResult:
-    """Prepare a preview proxy for large camera videos.
-
-    Small sources at or below ``max_dimension`` are returned unchanged. Larger
-    sources require ffmpeg; when ffmpeg is unavailable the call raises instead
-    of falling back to full-resolution interactive preview.
-    """
-    source_probe = probe_video(source_path)
-    if max(source_probe.width, source_probe.height) <= max_dimension:
-        return ProxyVideoResult(
-            source_path=source_path,
-            display_path=source_path,
-            source_probe=source_probe,
-            proxy_path=None,
-            state="original",
-        )
-
-    ffmpeg_path = _find_ffmpeg()
-    if ffmpeg_path is None:
-        raise RuntimeError("ffmpeg was not found; preview proxy generation is required.")
-
-    proxy_path = _proxy_cache_path(
-        source_path,
-        source_probe=source_probe,
-        max_dimension=max_dimension,
-        cache_root=cache_root,
-    )
-    if proxy_path.exists():
-        return ProxyVideoResult(
-            source_path=source_path,
-            display_path=proxy_path,
-            source_probe=source_probe,
-            proxy_path=proxy_path,
-            state="proxy_reused",
-        )
-
-    from heatmap_alignment_resource_jobs import build_preview_proxy_video
-
-    return build_preview_proxy_video(
-        source_path,
-        max_dimension=max_dimension,
-        cache_root=cache_root,
-    )
-
-
-def _scaled_video_dimensions(width: int, height: int, max_dimension: int) -> tuple[int, int]:
-    largest_dimension = max(width, height, 1)
-    scale = min(1.0, max_dimension / largest_dimension)
-    scaled_width = max(2, int(round(width * scale)))
-    scaled_height = max(2, int(round(height * scale)))
-    if scaled_width % 2 != 0:
-        scaled_width -= 1
-    if scaled_height % 2 != 0:
-        scaled_height -= 1
-    return max(2, scaled_width), max(2, scaled_height)
-
-
-def _proxy_cache_path(
-    source_path: Path,
-    *,
-    source_probe: VideoProbe,
-    max_dimension: int,
-    cache_root: Path | None,
-) -> Path:
-    source_stat = source_path.stat()
-    payload = "|".join(
-        [
-            str(source_path.resolve()),
-            str(source_stat.st_size),
-            str(source_stat.st_mtime_ns),
-            str(source_probe.width),
-            str(source_probe.height),
-            str(source_probe.frame_count),
-            str(source_probe.fps),
-            str(max_dimension),
-            "proxy-v1",
-        ]
-    )
-    digest = sha256(payload.encode("utf-8")).hexdigest()[:16]
-    stem = source_path.stem
-    root = cache_root or _default_proxy_cache_root()
-    return root / f"{stem}_{digest}_proxy_{max_dimension}.mp4"
-
-
-def _default_proxy_cache_root() -> Path:
-    local_app_data = os.getenv("LOCALAPPDATA")
-    if local_app_data:
-        return Path(local_app_data) / "Acconeer" / "HeatmapAlignmentWorkbench" / "proxy-cache"
-    return Path(tempfile.gettempdir()) / "Acconeer" / "HeatmapAlignmentWorkbench" / "proxy-cache"
-
-
-def _resolve_ffmpeg_path(path: Path | None) -> str | None:
-    if path is None:
-        return None
-    if path.is_dir():
-        path = path / "ffmpeg.exe"
-    return str(path) if path.exists() else None
-
-
-def _find_ffmpeg() -> str | None:
-    for candidate in (
-        os.getenv("FFMPEG_PATH"),
-        r"C:\Users\claub\Documents\Portable Programs\ffmpeg-master-latest-win64-gpl-shared\bin",
-    ):
-        if candidate:
-            resolved = _resolve_ffmpeg_path(Path(candidate))
-            if resolved is not None:
-                return resolved
-    return shutil.which("ffmpeg")
 
 
 class CameraVideoSource:

@@ -21,12 +21,14 @@ from heatmap_alignment_core import (
     CameraTrack,
     HeatmapTrack,
     HeatmapTruthSource,
-    ProxyVideoResult,
-    _find_ffmpeg,
-    _proxy_cache_path,
-    _scaled_video_dimensions,
-    probe_video,
     scale_viewport_corners,
+)
+from heatmap_alignment_video_proxy import (
+    ProxyVideoResult,
+    find_ffmpeg,
+    probe_video,
+    proxy_cache_path,
+    scaled_video_dimensions,
 )
 
 ResourceJobKind = Literal["camera", "radar_h5"]
@@ -386,11 +388,11 @@ def build_preview_proxy_video(
             state="original",
         )
 
-    ffmpeg_path = _find_ffmpeg()
+    ffmpeg_path = find_ffmpeg()
     if ffmpeg_path is None:
         raise ProxyBuildError("ffmpeg was not found; preview proxy generation is required.")
 
-    proxy_path = _proxy_cache_path(
+    proxy_path = proxy_cache_path(
         source_path,
         source_probe=source_probe,
         max_dimension=max_dimension,
@@ -408,7 +410,7 @@ def build_preview_proxy_video(
     if cancel_check and cancel_check():
         raise ProxyBuildError("Preview proxy generation cancelled.")
 
-    scaled_width, scaled_height = _scaled_video_dimensions(
+    scaled_width, scaled_height = scaled_video_dimensions(
         source_probe.width,
         source_probe.height,
         max_dimension,
