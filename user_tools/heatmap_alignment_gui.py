@@ -135,6 +135,7 @@ from heatmap_peak_distance_resource import (
 )
 from heatmap_leg2_resource import Leg2ResourceAdapter
 from heatmap_alignment_preview_sync import PreviewSyncPlan, run_preview_sync
+from heatmap_alignment_session_coordinator import LoadSessionPlan
 from heatmap_alignment_session_lifecycle import (
     SessionLifecycleState,
     SessionPromptAction,
@@ -3697,22 +3698,32 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             self._refresh_recent_sessions_menu()
             return
 
-        self._open_session_from_path(session_path, prompt_for_unsaved=True)
+        self._open_session(
+            LoadSessionPlan(session_path=session_path, prompt_for_unsaved=True)
+        )
+
+    def _open_session(self, plan: LoadSessionPlan) -> bool:
+        if plan.prompt_for_unsaved and not self._handle_session_transition_guard("open"):
+            return False
+
+        try:
+            self.load_session_from_path(plan.session_path)
+        except (OSError, ValueError) as exc:
+            QtWidgets.QMessageBox.warning(self, "Open session failed", str(exc))
+            self.statusBar().showMessage(f"Could not open session: {plan.session_path}")
+            return False
+
+        return True
 
     def _open_session_from_path(
         self, session_path: Path, *, prompt_for_unsaved: bool
     ) -> bool:
-        if prompt_for_unsaved and not self._handle_session_transition_guard("open"):
-            return False
-
-        try:
-            self.load_session_from_path(session_path)
-        except (OSError, ValueError) as exc:
-            QtWidgets.QMessageBox.warning(self, "Open session failed", str(exc))
-            self.statusBar().showMessage(f"Could not open session: {session_path}")
-            return False
-
-        return True
+        return self._open_session(
+            LoadSessionPlan(
+                session_path=session_path,
+                prompt_for_unsaved=prompt_for_unsaved,
+            )
+        )
 
     def _build_ui(self) -> None:
         central = QtWidgets.QWidget(self)
@@ -6778,7 +6789,10 @@ def main() -> None:
         mat_path = args.mat
 
         def _load_session_on_start() -> None:
-            window.load_session_from_path(session_path)
+            if not window._open_session(
+                LoadSessionPlan(session_path=session_path, prompt_for_unsaved=False)
+            ):
+                return
             if peaks_path is not None:
                 window._import_peak_series_from_path(peaks_path, mark_dirty=False)
             if mat_path is not None:
