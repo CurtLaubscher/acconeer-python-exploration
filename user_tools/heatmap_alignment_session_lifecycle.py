@@ -10,6 +10,8 @@ from typing import Iterator
 from heatmap_alignment_core import (
     AlignmentSession,
     PeakSeriesSessionEntry,
+    load_alignment_session,
+    save_alignment_session,
     session_equivalent_for_pristine,
     validate_alignment_session,
 )
@@ -71,4 +73,13 @@ class SessionLifecycleState:
         """Apply live save-only fields and validate before writing a session file."""
         session.peak_series = list(peak_entries)
         validate_alignment_session(session, allow_missing_sources=True)
+        return session
+
+    def save_to_path(self, session: AlignmentSession, path: Path) -> None:
+        save_alignment_session(session, path)
+        self.current_path = path
+
+    def load_from_path(self, path: Path) -> AlignmentSession:
+        session = load_alignment_session(path)
+        self.current_path = path
         return session

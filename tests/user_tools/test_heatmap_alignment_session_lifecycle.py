@@ -10,6 +10,7 @@ if str(USER_TOOLS_PATH) not in sys.path:
     sys.path.insert(0, str(USER_TOOLS_PATH))
 
 from heatmap_alignment_core import AlignmentSession, CameraTrack, PeakSeriesSessionEntry  # noqa: E402
+import heatmap_alignment_session_lifecycle as lifecycle_module  # noqa: E402
 from heatmap_alignment_session_lifecycle import SessionLifecycleState  # noqa: E402
 
 
@@ -138,3 +139,65 @@ def test_lifecycle_prepare_session_for_save_validates_payload() -> None:
         assert "Viewport output dimensions" in str(exc)
     else:
         raise AssertionError("Expected invalid session payload to fail validation")
+
+
+def test_lifecycle_save_to_path_writes_session_and_updates_path(tmp_path: Path) -> None:
+    lifecycle = SessionLifecycleState()
+    session_path = tmp_path / "alignment.json"
+    session = AlignmentSession(camera_track=CameraTrack(path="/tmp/camera.mp4"))
+
+    lifecycle.save_to_path(session, session_path)
+
+    assert session_path.exists()
+    assert lifecycle.current_path == session_path
+
+
+def test_lifecycle_save_to_path_does_not_update_path_on_failure(
+    monkeypatch, tmp_path: Path
+) -> None:
+    existing_path = tmp_path / "existing.json"
+    lifecycle = SessionLifecycleState(current_path=existing_path)
+    session_path = tmp_path / "alignment.json"
+    session = AlignmentSession(camera_track=CameraTrack(path="/tmp/camera.mp4"))
+
+    def fail_save(_session: AlignmentSession, _path: Path) -> None:
+        raise OSError("save failed")
+
+    monkeypatch.setattr(lifecycle_module, "save_alignment_session", fail_save)
+
+    try:
+        lifecycle.save_to_path(session, session_path)
+    except OSError:
+        pass
+    else:
+        raise AssertionError("Expected session save to fail")
+
+    assert lifecycle.current_path == existing_path
+
+
+def test_lifecycle_load_from_path_reads_session_and_updates_path(tmp_path: Path) -> None:
+    lifecycle = SessionLifecycleState()
+    session_path = tmp_path / "alignment.json"
+    camera_path = tmp_path / "camera.mp4"
+    camera_path.touch()
+    original = AlignmentSession(camera_track=CameraTrack(path=str(camera_path)))
+    SessionLifecycleState().save_to_path(original, session_path)
+
+    loaded = lifecycle.load_from_path(session_path)
+
+    assert loaded.camera_track.path == str(camera_path)
+    assert lifecycle.current_path == session_path
+
+
+def test_lifecycle_load_from_path_does_not_update_path_on_failure(tmp_path: Path) -> None:
+    lifecycle = SessionLifecycleState(current_path=tmp_path / "existing.json")
+    missing_path = tmp_path / "missing.json"
+
+    try:
+        lifecycle.load_from_path(missing_path)
+    except FileNotFoundError:
+        pass
+    else:
+        raise AssertionError("Expected missing session load to fail")
+
+    assert lifecycle.current_path == tmp_path / "existing.json"

@@ -68,12 +68,10 @@ from heatmap_alignment_core import (
     elide_path_middle,
     import_leg2_mat_for_heatmap,
     import_peak_distance_json_for_heatmap,
-    load_alignment_session,
     reconcile_camera_action,
     reconcile_h5_action,
     reconcile_sync_slot_action,
     rectify_viewport,
-    save_alignment_session,
     scale_viewport_corners,
     TimelineH5DragSnapshot,
     apply_timeline_h5_alignment_drag,
@@ -4737,8 +4735,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             if reply != QtWidgets.QMessageBox.StandardButton.Yes:
                 return False
 
-        save_alignment_session(self.session, session_path)
-        self._current_session_path = session_path
+        self._session_lifecycle.save_to_path(self.session, session_path)
         self.settings.setValue("last_session_path", str(session_path))
         self._clear_session_dirty()
         self._refresh_session_title()
@@ -4899,12 +4896,11 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
 
     def load_session_from_path(self, session_path: Path) -> None:
         with self._session_dirty_guard():
-            desired_session = load_alignment_session(session_path)
+            desired_session = self._session_lifecycle.load_from_path(session_path)
             prior_session = self.session
 
             # Assign self.session BEFORE reconcile so load_h5_from_path reads correct indices.
             self.session = desired_session
-            self._current_session_path = session_path
             self._resource_reload_errors.clear()
             self._resource_load_warnings.clear()
 
