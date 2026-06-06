@@ -46,6 +46,7 @@ from heatmap_alignment_core import (  # noqa: E402
     Leg2UltrasonicDatasourceSettings,
     Leg2UltrasonicSignalSeries,
     PeakDistanceSignalSeries,
+    PeakSeriesSessionEntry,
     ResourceJobPresentation,
     SignalPlotViewSettings,
     build_alignment_resource_summaries,
@@ -3235,13 +3236,13 @@ def test_reload_peak_series_from_session_restores_persisted_fields(
 
     window = HeatmapAlignmentWindow()
     window.session.peak_series = [
-        {
-            "path": str(json_path),
-            "display_name": "restored peaks",
-            "color": "#f59e0b",
-            "visible": False,
-            "heatmap_selected": True,
-        }
+        PeakSeriesSessionEntry(
+            path=str(json_path),
+            display_name="restored peaks",
+            color="#f59e0b",
+            visible=False,
+            heatmap_selected=True,
+        )
     ]
     monkeypatch.setattr(
         "sparse_iq_peak_distance_core.load_peak_distance_json",

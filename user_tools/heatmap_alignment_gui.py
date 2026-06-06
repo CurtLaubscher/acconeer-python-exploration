@@ -58,6 +58,7 @@ from heatmap_alignment_core import (
     Leg2UltrasonicSignalSeries,
     LoadedLeg2UltrasonicDatasource,
     PeakDistanceSignalSeries,
+    PeakSeriesSessionEntry,
     ResourceAction,
     ResourceJobPresentation,
     ResourceKind,
@@ -4282,7 +4283,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
 
         self._peak_series_list = []
         for entry in self.session.peak_series:
-            json_path_text = entry.get("path", "")
+            json_path_text = entry.path
             if not json_path_text:
                 continue
 
@@ -4307,10 +4308,10 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             series = self._make_imported_peak_series(
                 datasource,
                 json_path,
-                display_name=entry.get("display_name", json_path.stem),
-                color=entry.get("color", assign_peak_series_color(self._peak_series_list)),
-                visible=entry.get("visible", True),
-                heatmap_selected=entry.get("heatmap_selected", False),
+                display_name=entry.display_name or json_path.stem,
+                color=entry.color or assign_peak_series_color(self._peak_series_list),
+                visible=entry.visible,
+                heatmap_selected=entry.heatmap_selected,
             )
             self._peak_series_list.append(series)
             self._set_resource_reload_error("radar_peak", None)
@@ -4707,13 +4708,13 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
     def _write_session_to_path(self, session_path: Path) -> bool:
         # Sync peak_series from live list before saving; only include series with a saved path.
         self.session.peak_series = [
-            {
-                "path": str(s.json_path),
-                "display_name": s.display_name,
-                "color": s.color,
-                "visible": s.visible,
-                "heatmap_selected": s.series_id == self._heatmap_peak_selector_id,
-            }
+            PeakSeriesSessionEntry(
+                path=str(s.json_path),
+                display_name=s.display_name,
+                color=s.color,
+                visible=s.visible,
+                heatmap_selected=s.series_id == self._heatmap_peak_selector_id,
+            )
             for s in self._peak_series_list
             if s.json_path is not None
         ]
@@ -6324,7 +6325,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         has_camera_path = bool(self.session.camera_track.path)
         has_h5_path = bool(self.session.heatmap_track.path)
         has_peak_path = bool(self._peak_series_list) or bool(
-            any(e.get("path", "") for e in self.session.peak_series)
+            any(e.path for e in self.session.peak_series)
         )  # True when a saved series path exists (for reload/reveal actions)
         has_leg2_path = bool(self.session.leg2_ultrasonic_datasource.path)
 

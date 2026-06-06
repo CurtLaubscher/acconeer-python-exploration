@@ -278,6 +278,52 @@ def _normalize_heatmap_track_keys(raw: dict) -> dict:
 
 
 @dataclass
+class PeakSeriesSessionEntry:
+    """Persisted peak-series metadata stored in alignment session JSON."""
+
+    path: str = ""
+    display_name: str = ""
+    color: str = "#3b82f6"
+    visible: bool = True
+    heatmap_selected: bool = False
+
+
+def _peak_series_entry_from_payload(raw: Any) -> PeakSeriesSessionEntry | None:
+    if isinstance(raw, PeakSeriesSessionEntry):
+        return raw
+    if not isinstance(raw, dict):
+        return None
+    data = _filter_dataclass_fields(PeakSeriesSessionEntry, raw)
+    entry = PeakSeriesSessionEntry(**data)
+    if not entry.display_name and entry.path:
+        entry.display_name = Path(entry.path).stem
+    return entry
+
+
+def _peak_series_entries_from_payload(raw_entries: Any) -> list[PeakSeriesSessionEntry]:
+    if not isinstance(raw_entries, list):
+        return []
+    entries = []
+    for raw_entry in raw_entries:
+        entry = _peak_series_entry_from_payload(raw_entry)
+        if entry is not None:
+            entries.append(entry)
+    return entries
+
+
+def _peak_series_entries_to_json(
+    entries: list[PeakSeriesSessionEntry | dict[str, Any]],
+) -> list[dict[str, Any]]:
+    payload: list[dict[str, Any]] = []
+    for raw_entry in entries:
+        entry = _peak_series_entry_from_payload(raw_entry)
+        if entry is None or not entry.path:
+            continue
+        payload.append(asdict(entry))
+    return payload
+
+
+@dataclass
 class AlignmentSession:
     """Serializable state for one alignment session."""
 
@@ -292,7 +338,7 @@ class AlignmentSession:
     viewport_visibility: ViewportVisibilitySettings = field(
         default_factory=ViewportVisibilitySettings
     )
-    peak_series: list = field(default_factory=list)
+    peak_series: list[PeakSeriesSessionEntry] = field(default_factory=list)
     leg2_ultrasonic_datasource: Leg2UltrasonicDatasourceSettings = field(
         default_factory=Leg2UltrasonicDatasourceSettings
     )
@@ -305,7 +351,7 @@ class AlignmentSession:
             view["manual_x_range"] = list(view["manual_x_range"])
         if view["manual_y_range"] is not None:
             view["manual_y_range"] = list(view["manual_y_range"])
-        payload["peak_series"] = [e for e in self.peak_series if e.get("path", "")]
+        payload["peak_series"] = _peak_series_entries_to_json(self.peak_series)
         return payload
 
     @classmethod
@@ -332,7 +378,15 @@ class AlignmentSession:
             old_path = old_peak.get("path", "") if isinstance(old_peak, dict) else ""
             if old_path:
                 from pathlib import Path
-                payload["peak_series"] = [{"path": old_path, "display_name": Path(old_path).stem, "color": "#3b82f6", "visible": True, "heatmap_selected": False}]
+                payload["peak_series"] = [
+                    PeakSeriesSessionEntry(
+                        path=old_path,
+                        display_name=Path(old_path).stem,
+                        color="#3b82f6",
+                        visible=True,
+                        heatmap_selected=False,
+                    )
+                ]
             else:
                 payload["peak_series"] = []
             payload["version"] = 3
@@ -361,7 +415,7 @@ class AlignmentSession:
             viewport_visibility=ViewportVisibilitySettings(
                 **payload.get("viewport_visibility", {})
             ),
-            peak_series=list(payload.get("peak_series", [])),
+            peak_series=_peak_series_entries_from_payload(payload.get("peak_series", [])),
             leg2_ultrasonic_datasource=Leg2UltrasonicDatasourceSettings(
                 **payload.get("leg2_ultrasonic_datasource", {})
             ),
@@ -2016,7 +2070,7 @@ def desired_h5_identity(session: AlignmentSession) -> H5SlotIdentity | None:
 
 def desired_peak_identities(session: AlignmentSession) -> list:
     """Return desired peak series identities from session.peak_series."""
-    return [SyncSlotIdentity(path=e["path"]) for e in session.peak_series if e.get("path", "")]
+    return [SyncSlotIdentity(path=entry.path) for entry in session.peak_series if entry.path]
 
 
 def desired_leg2_identity(session: AlignmentSession) -> SyncSlotIdentity | None:

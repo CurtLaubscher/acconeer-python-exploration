@@ -27,6 +27,7 @@ from heatmap_alignment_core import (  # noqa: E402
     HeatmapTrack,
     Leg2MatImportError,
     Leg2UltrasonicDatasourceSettings,
+    PeakSeriesSessionEntry,
     PreprocessSettings,
     RenderSettings,
     ResourceJobPresentation,
@@ -164,7 +165,15 @@ def test_alignment_session_roundtrip_with_peak_series(tmp_path: Path) -> None:
     session = AlignmentSession(
         camera_track=CameraTrack(path=str(camera_path), fps=30.0, duration_s=2.0, frame_count=60),
         heatmap_track=HeatmapTrack(path=str(heatmap_path), duration_s=2.0, fps=10.0),
-        peak_series=[{"path": str(peak_json_path), "display_name": "peaks", "color": "#3b82f6", "visible": True, "heatmap_selected": False}],
+        peak_series=[
+            PeakSeriesSessionEntry(
+                path=str(peak_json_path),
+                display_name="peaks",
+                color="#3b82f6",
+                visible=True,
+                heatmap_selected=False,
+            )
+        ],
     )
 
     session_path = tmp_path / "alignment_with_peaks.json"
@@ -172,7 +181,8 @@ def test_alignment_session_roundtrip_with_peak_series(tmp_path: Path) -> None:
     loaded = load_alignment_session(session_path)
 
     assert len(loaded.peak_series) == 1
-    assert loaded.peak_series[0]["path"] == str(peak_json_path)
+    assert loaded.peak_series[0].path == str(peak_json_path)
+    assert loaded.peak_series[0].display_name == "peaks"
 
 
 def test_alignment_session_roundtrip_with_signal_plot_view_settings(tmp_path: Path) -> None:
@@ -1781,7 +1791,7 @@ def test_alignment_session_v1_migration_strips_peak_visibility(tmp_path: Path) -
 
     assert loaded.version == 3
     assert len(loaded.peak_series) == 1
-    assert loaded.peak_series[0]["path"] == str(peak_json_path)
+    assert loaded.peak_series[0].path == str(peak_json_path)
 
 
 def test_alignment_session_v1_migration_strips_leg2_visibility(tmp_path: Path) -> None:
@@ -1839,7 +1849,15 @@ def test_alignment_session_v3_save_uses_peak_series(tmp_path: Path) -> None:
     session = AlignmentSession(
         camera_track=CameraTrack(path=str(camera_path), fps=30.0, duration_s=2.0, frame_count=60),
         heatmap_track=HeatmapTrack(path=str(heatmap_path), duration_s=2.0, fps=10.0),
-        peak_series=[{"path": str(peak_json_path), "display_name": "peaks", "color": "#3b82f6", "visible": True, "heatmap_selected": False}],
+        peak_series=[
+            PeakSeriesSessionEntry(
+                path=str(peak_json_path),
+                display_name="peaks",
+                color="#3b82f6",
+                visible=True,
+                heatmap_selected=False,
+            )
+        ],
         leg2_ultrasonic_datasource=Leg2UltrasonicDatasourceSettings(path=str(mat_path)),
     )
 
@@ -1914,7 +1932,8 @@ def test_v2_to_v3_migration_with_peak_path():
     }
     session = AlignmentSession.from_json_dict(v2_payload)
     assert len(session.peak_series) == 1
-    assert session.peak_series[0]["path"] == "/some/peaks.json"
+    assert session.peak_series[0].path == "/some/peaks.json"
+    assert session.peak_series[0].display_name == "peaks"
 
 def test_v2_to_v3_migration_no_peak():
     from heatmap_alignment_core import AlignmentSession
@@ -1933,9 +1952,17 @@ def test_desired_peak_identities_empty():
     assert desired_peak_identities(session) == []
 
 def test_desired_peak_identities_with_path():
-    from heatmap_alignment_core import AlignmentSession, desired_peak_identities
+    from heatmap_alignment_core import AlignmentSession, PeakSeriesSessionEntry, desired_peak_identities
     session = AlignmentSession()
-    session.peak_series = [{"path": "/a.json", "display_name": "a", "color": "#fff", "visible": True, "heatmap_selected": False}]
+    session.peak_series = [
+        PeakSeriesSessionEntry(
+            path="/a.json",
+            display_name="a",
+            color="#fff",
+            visible=True,
+            heatmap_selected=False,
+        )
+    ]
     ids = desired_peak_identities(session)
     assert len(ids) == 1
     assert ids[0].path == "/a.json"
@@ -1951,8 +1978,20 @@ def test_session_serialization_omits_unsaved_generated_series() -> None:
     session = AlignmentSession()
     # One saved entry (has path) and one unsaved generated entry (no path).
     session.peak_series = [
-        {"path": "/tmp/saved.json", "display_name": "saved", "color": "#3b82f6", "visible": True, "heatmap_selected": False},
-        {"path": "", "display_name": "generated unsaved", "color": "#f59e0b", "visible": True, "heatmap_selected": False},
+        PeakSeriesSessionEntry(
+            path="/tmp/saved.json",
+            display_name="saved",
+            color="#3b82f6",
+            visible=True,
+            heatmap_selected=False,
+        ),
+        PeakSeriesSessionEntry(
+            path="",
+            display_name="generated unsaved",
+            color="#f59e0b",
+            visible=True,
+            heatmap_selected=False,
+        ),
     ]
     doc = session.to_json_dict()
     persisted_series = doc.get("peak_series", [])
@@ -1965,8 +2004,61 @@ def test_session_reload_does_not_restore_unsaved_generated_series() -> None:
     session = AlignmentSession()
     # Unsaved generated series have no path — to_json_dict omits them.
     session.peak_series = [
-        {"path": "", "display_name": "generated", "color": "#3b82f6", "visible": True, "heatmap_selected": False},
+        PeakSeriesSessionEntry(
+            path="",
+            display_name="generated",
+            color="#3b82f6",
+            visible=True,
+            heatmap_selected=False,
+        ),
     ]
     doc = session.to_json_dict()
     reloaded = AlignmentSession.from_json_dict(doc)
     assert reloaded.peak_series == []
+
+
+def test_session_peak_series_entry_defaults_name_from_path() -> None:
+    session = AlignmentSession.from_json_dict(
+        {
+            "version": 3,
+            "peak_series": [{"path": "/tmp/generated-peaks.json"}],
+        }
+    )
+
+    assert len(session.peak_series) == 1
+    assert session.peak_series[0].path == "/tmp/generated-peaks.json"
+    assert session.peak_series[0].display_name == "generated-peaks"
+    assert session.peak_series[0].visible is True
+
+
+def test_session_peak_series_ignores_unknown_entry_fields() -> None:
+    session = AlignmentSession.from_json_dict(
+        {
+            "version": 3,
+            "peak_series": [
+                {
+                    "path": "/tmp/peaks.json",
+                    "display_name": "peaks",
+                    "unknown": "ignored",
+                }
+            ],
+        }
+    )
+
+    assert len(session.peak_series) == 1
+    assert session.peak_series[0].path == "/tmp/peaks.json"
+    assert not hasattr(session.peak_series[0], "unknown")
+
+
+def test_session_peak_series_tolerates_malformed_payload() -> None:
+    non_list = AlignmentSession.from_json_dict({"version": 3, "peak_series": "bad"})
+    mixed_list = AlignmentSession.from_json_dict(
+        {
+            "version": 3,
+            "peak_series": [None, "bad", {"path": "/tmp/peaks.json"}],
+        }
+    )
+
+    assert non_list.peak_series == []
+    assert len(mixed_list.peak_series) == 1
+    assert mixed_list.peak_series[0].path == "/tmp/peaks.json"
