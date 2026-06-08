@@ -62,6 +62,7 @@ from sparse_iq_peak_distance_core import (  # noqa: E402
     PeakDistanceMetadata,
 )
 from sparse_iq_heatmap_common import HeatmapAxes  # noqa: E402
+from heatmap_alignment_session_coordinator import LoadSessionPlan  # noqa: E402
 from scipy.io import savemat
 
 
@@ -630,6 +631,37 @@ def test_startup_mat_overrides_session_leg2_path(tmp_path: Path, qapplication: Q
     assert window.session.leg2_ultrasonic_datasource.path == str(startup_mat)
     assert window.leg2_ultrasonic_datasource is not None
     assert window.leg2_ultrasonic_datasource.path == startup_mat
+
+
+def test_open_session_returns_false_for_missing_session_path(
+    tmp_path: Path, qapplication: QApplication
+) -> None:
+    window = HeatmapAlignmentWindow()
+    missing_path = tmp_path / "nonexistent.json"
+
+    result = window._open_session(LoadSessionPlan(session_path=missing_path, prompt_for_unsaved=False))
+
+    assert result is False
+    assert window._session_lifecycle.current_path is None
+
+    window.close()
+    qapplication.processEvents()
+
+
+def test_open_session_returns_false_for_invalid_session_json(
+    tmp_path: Path, qapplication: QApplication
+) -> None:
+    window = HeatmapAlignmentWindow()
+    bad_path = tmp_path / "bad.json"
+    bad_path.write_text("{", encoding="utf-8")
+
+    result = window._open_session(LoadSessionPlan(session_path=bad_path, prompt_for_unsaved=False))
+
+    assert result is False
+    assert window._session_lifecycle.current_path is None
+
+    window.close()
+    qapplication.processEvents()
 
 
 def _sample_leg2_signal_series() -> Leg2UltrasonicSignalSeries:
