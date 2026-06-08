@@ -4890,6 +4890,9 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             # Populate controls after reconcile (jobs may still be in-flight).
             self._populate_controls_from_session()
             if self.camera_source is not None:
+                # Force a clean seek to the session's starting position before the full sync.
+                # "random" is correct here: the prior sequential-decode position is no longer
+                # valid after loading a new session, so we must not assume continuity.
                 self._load_current_camera_frame(access_hint="random")
                 self._refresh_camera_view_corners()
                 self.camera_view.set_export_overlay(self.session.export_overlay)
