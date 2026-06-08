@@ -2043,6 +2043,64 @@ def test_reconcile_camera_load_when_no_camera_was_loaded(
     assert load_camera_calls[0] == camera_file
 
 
+def test_reconcile_camera_load_sets_error_when_file_missing(
+    tmp_path: Path,
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Session references a camera path that no longer exists → reload error set, no load call.
+
+    This path is reachable when a session was saved against files that have since been deleted.
+    We call _reconcile_session_load directly to bypass the load-time file-existence check.
+    """
+    missing_camera = tmp_path / "missing.mp4"
+    desired = AlignmentSession(camera_track=CameraTrack(path=str(missing_camera)))
+
+    window = HeatmapAlignmentWindow()
+
+    load_camera_calls: list[Path] = []
+    monkeypatch.setattr(
+        window,
+        "load_camera_from_path",
+        lambda p, **kwargs: load_camera_calls.append(p),
+    )
+
+    window._reconcile_session_load(desired, AlignmentSession())
+
+    assert load_camera_calls == []
+    assert "camera" in window._resource_reload_errors
+    assert "File not found" in window._resource_reload_errors["camera"]
+
+
+def test_reconcile_h5_load_sets_error_when_file_missing(
+    tmp_path: Path,
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Session references an H5 path that no longer exists → reload error set, no load call.
+
+    This path is reachable when a session was saved against files that have since been deleted.
+    We call _reconcile_session_load directly to bypass the load-time file-existence check.
+    """
+    missing_h5 = tmp_path / "missing.h5"
+    desired = AlignmentSession(heatmap_track=HeatmapTrack(path=str(missing_h5)))
+
+    window = HeatmapAlignmentWindow()
+
+    load_h5_calls: list[Path] = []
+    monkeypatch.setattr(
+        window,
+        "load_h5_from_path",
+        lambda p, **kwargs: load_h5_calls.append(p),
+    )
+
+    window._reconcile_session_load(desired, AlignmentSession())
+
+    assert load_h5_calls == []
+    assert "radar_h5" in window._resource_reload_errors
+    assert "File not found" in window._resource_reload_errors["radar_h5"]
+
+
 def test_reconcile_h5_unload_when_session_omits_path(
     tmp_path: Path,
     qapplication: QApplication,
