@@ -1977,6 +1977,72 @@ def test_reconcile_camera_unload_when_session_omits_path(
     assert "camera" in unloaded
 
 
+def test_reconcile_camera_load_when_identity_changes(
+    tmp_path: Path,
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Changed camera path → reconcile as load; load_camera_from_path called with new path."""
+    new_camera = tmp_path / "new_video.mp4"
+    new_camera.write_bytes(b"")
+
+    session_path = _make_session_file(tmp_path, camera_path=str(new_camera))
+
+    window = HeatmapAlignmentWindow()
+    # Pretend old camera is loaded with a different path.
+    class _FakeCameraSource:
+        path = tmp_path / "old_video.mp4"
+
+        def close(self) -> None:
+            pass
+
+    window.camera_source = _FakeCameraSource()  # type: ignore[assignment]
+    window.session.camera_track = CameraTrack(path=str(tmp_path / "old_video.mp4"))
+
+    load_camera_calls: list[Path] = []
+    monkeypatch.setattr(
+        window,
+        "load_camera_from_path",
+        lambda p, **kwargs: load_camera_calls.append(p),
+    )
+    monkeypatch.setattr(window, "_sync_previews", lambda **kwargs: None)
+    monkeypatch.setattr(window, "_load_current_camera_frame", lambda access_hint="auto": None)
+    monkeypatch.setattr(window, "_refresh_camera_view_corners", lambda: None)
+
+    window.load_session_from_path(session_path)
+
+    assert len(load_camera_calls) == 1
+    assert load_camera_calls[0] == new_camera
+
+
+def test_reconcile_camera_load_when_no_camera_was_loaded(
+    tmp_path: Path,
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No camera loaded, session has a camera path → load_camera_from_path called."""
+    camera_file = tmp_path / "video.mp4"
+    camera_file.write_bytes(b"")
+
+    session_path = _make_session_file(tmp_path, camera_path=str(camera_file))
+
+    window = HeatmapAlignmentWindow()
+    # No camera loaded — camera_source stays None.
+
+    load_camera_calls: list[Path] = []
+    monkeypatch.setattr(
+        window,
+        "load_camera_from_path",
+        lambda p, **kwargs: load_camera_calls.append(p),
+    )
+    monkeypatch.setattr(window, "_sync_previews", lambda **kwargs: None)
+
+    window.load_session_from_path(session_path)
+
+    assert len(load_camera_calls) == 1
+    assert load_camera_calls[0] == camera_file
+
+
 def test_reconcile_h5_unload_when_session_omits_path(
     tmp_path: Path,
     qapplication: QApplication,
