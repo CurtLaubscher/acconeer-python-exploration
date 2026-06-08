@@ -2242,6 +2242,163 @@ def test_reconcile_session_fields_applied_after_h5_keep(
     assert window.session.timeline.offset_s == pytest.approx(1.25)
 
 
+def test_reconcile_deferred_peak_reload_fires_after_h5_replacement(
+    tmp_path: Path,
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: session load with H5 identity change + new peaks → peaks load after H5 job.
+
+    When reconcile defers peak reload because H5 is loading (different identity),
+    _apply_h5_job_result must honour the deferred flag and call
+    _reload_peak_series_from_session even for the replacement (different-path) branch.
+    """
+    from heatmap_alignment_resource_jobs import LoadedH5ResourcePayload
+    from heatmap_alignment_core import PeakSeriesSessionEntry
+
+    old_h5 = tmp_path / "old.h5"
+    new_h5 = tmp_path / "new.h5"
+    old_h5.write_bytes(b"")
+    new_h5.write_bytes(b"")
+
+    # Session wants new H5 + one peak series.
+    peak_path = tmp_path / "peaks.json"
+    peak_path.write_bytes(b"")
+    desired = AlignmentSession(
+        heatmap_track=HeatmapTrack(path=str(new_h5)),
+        peak_series=[PeakSeriesSessionEntry(path=str(peak_path))],
+    )
+
+    window = HeatmapAlignmentWindow()
+
+    # Pretend old H5 is currently loaded.
+    class _FakeHeatmapSource:
+        path = old_h5
+        record = type("rec", (), {"session_idx": 0, "group_idx": 0, "entry_idx": 0})()
+        subsweep_idx = 0
+
+        def close(self) -> None:
+            pass
+
+    window.heatmap_source = _FakeHeatmapSource()  # type: ignore[assignment]
+    window.session.heatmap_track = HeatmapTrack(
+        path=str(old_h5), session_idx=0, group_idx=0, entry_idx=0, subsweep_idx=0
+    )
+
+    reload_calls: list[str] = []
+    monkeypatch.setattr(
+        window,
+        "load_h5_from_path",
+        lambda p, **kwargs: reload_calls.append(f"load_h5:{p.name}"),
+    )
+    monkeypatch.setattr(
+        window,
+        "_reload_peak_series_from_session",
+        lambda: reload_calls.append("peaks"),
+    )
+
+    # Trigger reconcile: H5 identity changed → h5_action="load", peaks deferred.
+    window._reconcile_session_load(desired, window.session)
+
+    assert window._pending_peak_session_reload is True
+    assert "peaks" not in reload_calls
+
+    # Simulate H5 job completion with new H5.
+    class _FakeRecord:
+        session_idx = 0
+        group_idx = 0
+        entry_idx = 0
+        duration_s = 1.0
+        fps = 1.0
+        results: list[object] = []
+
+        def close(self) -> None:
+            pass
+
+    payload = LoadedH5ResourcePayload(
+        path=new_h5,
+        record=_FakeRecord(),
+        subsweep_idx=0,
+        metadata=HeatmapTrack(path=str(new_h5)),
+        first_frame_shape=(10, 10),
+    )
+    monkeypatch.setattr(window, "_rebuild_overlay_plot_renderer", lambda: None)
+    monkeypatch.setattr(window, "_update_heatmap_extent_labels", lambda: None)
+
+    class _NewFakeHeatmapSource:
+        def close(self) -> None:
+            pass
+
+    window._h5_replacement_backup = _H5ResourceBackup(
+        heatmap_source=_FakeHeatmapSource(),
+        heatmap_track=HeatmapTrack(path=str(old_h5)),
+        viewport_output_width=10,
+        viewport_output_height=10,
+    )
+    monkeypatch.setattr(
+        "heatmap_alignment_gui.build_h5_truth_source_from_payload",
+        lambda _payload: _NewFakeHeatmapSource(),
+    )
+
+    window._apply_h5_job_result(payload)
+
+    assert window._pending_peak_session_reload is False
+    assert "peaks" in reload_calls
+
+
+def test_reconcile_deferred_peak_reload_cleared_on_h5_cancel(
+    tmp_path: Path,
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Deferred peak reload flag is cleared when an H5 replacement job is cancelled/rolled back."""
+    from heatmap_alignment_core import PeakSeriesSessionEntry
+
+    new_h5 = tmp_path / "new.h5"
+    new_h5.write_bytes(b"")
+    peak_path = tmp_path / "peaks.json"
+    peak_path.write_bytes(b"")
+
+    desired = AlignmentSession(
+        heatmap_track=HeatmapTrack(path=str(new_h5)),
+        peak_series=[PeakSeriesSessionEntry(path=str(peak_path))],
+    )
+
+    window = HeatmapAlignmentWindow()
+
+    class _FakeHeatmapSource:
+        path = tmp_path / "old.h5"
+        record = type("rec", (), {"session_idx": 0, "group_idx": 0, "entry_idx": 0})()
+        subsweep_idx = 0
+
+        def close(self) -> None:
+            pass
+
+    window.heatmap_source = _FakeHeatmapSource()  # type: ignore[assignment]
+    window.session.heatmap_track = HeatmapTrack(
+        path=str(tmp_path / "old.h5"), session_idx=0, group_idx=0, entry_idx=0, subsweep_idx=0
+    )
+
+    monkeypatch.setattr(window, "load_h5_from_path", lambda p, **kwargs: None)
+    monkeypatch.setattr(window, "_reload_peak_series_from_session", lambda: None)
+
+    window._reconcile_session_load(desired, window.session)
+    assert window._pending_peak_session_reload is True
+
+    # Simulate cancellation (backup restore clears the flag).
+    window._h5_replacement_backup = _H5ResourceBackup(
+        heatmap_source=_FakeHeatmapSource(),
+        heatmap_track=HeatmapTrack(path=str(tmp_path / "old.h5")),
+        viewport_output_width=10,
+        viewport_output_height=10,
+    )
+    monkeypatch.setattr(window, "_rebuild_overlay_plot_renderer", lambda: None)
+    monkeypatch.setattr(window, "_update_heatmap_extent_labels", lambda: None)
+    window._restore_h5_replacement_backup()
+
+    assert window._pending_peak_session_reload is False
+
+
 # ---------------------------------------------------------------------------
 # Dirty session and unsaved prompts (dirty-session-prompts)
 # ---------------------------------------------------------------------------

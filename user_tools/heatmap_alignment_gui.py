@@ -3496,6 +3496,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._camera_replacement_backup: _CameraResourceBackup | None = None
         self._h5_replacement_backup: _H5ResourceBackup | None = None
         self._inflight_h5_identity: H5SlotIdentity | None = None
+        self._pending_peak_session_reload: bool = False
 
         self.viewport_source_resolution_timer = QtCore.QTimer(self)
         self.viewport_source_resolution_timer.setSingleShot(True)
@@ -3549,6 +3550,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._camera_replacement_backup = None
         self._h5_replacement_backup = None
         self._inflight_h5_identity = None
+        self._pending_peak_session_reload = False
 
     def _create_menu_bar(self) -> None:
         file_menu = self.menuBar().addMenu("&File")
@@ -4770,6 +4772,10 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         Per-slot registry approach: new resource types must add an entry here.
         See OpenSpec change: session-load-responsiveness.
         """
+        # Reset on every reconcile so stale True from a previous session load cannot
+        # survive into a later unrelated H5 job completion.
+        self._pending_peak_session_reload = False
+
         # Build a plain-value snapshot of loaded/inflight state for the coordinator.
         if self.camera_source is not None:
             source_path = getattr(self.camera_source, "path", None)
@@ -4836,10 +4842,11 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         if self._heatmap_peak_selector_id not in {s.series_id for s in self._peak_series_list}:
             self._heatmap_peak_selector_id = None
         if plan.peak_paths_to_load:
-            if plan.h5_action not in ("load",):
+            if plan.h5_action != "load":
                 self._reload_peak_series_from_session()
-            # If H5 is loading, _reload_peak_series_from_session
-            # will be called after H5 finishes.
+            else:
+                # Defer peak reload until the in-flight H5 job completes.
+                self._pending_peak_session_reload = True
 
         if plan.leg2_action == "unload":
             if self.leg2_ultrasonic_datasource is not None:
@@ -5001,13 +5008,18 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.session.viewport.output_height = payload.first_frame_shape[0]
         self._rebuild_overlay_plot_renderer()
         self.settings.setValue("last_h5_path", str(payload.path))
-        if not previous_path or previous_path == str(payload.path):
+        if self._pending_peak_session_reload:
+            # Deferred by session-load reconcile: peak paths to load were waiting on this H5 job.
+            self._pending_peak_session_reload = False
+            self._reload_peak_series_from_session()
+        elif not previous_path or previous_path == str(payload.path):
             # Same H5 identity (initial load or keep): restore persisted peak series only
             # when there are no live series yet; preserves unsaved generated rows.
             if not self._peak_series_list:
                 self._reload_peak_series_from_session()
-        # Different H5: preserve existing peak series as optional signal resources.
-        # They remain valid signal data and the user can unload them individually.
+        # Different H5 without a pending session reload: preserve existing peak series as
+        # optional signal resources. They remain valid signal data and the user can unload
+        # them individually.
         self._h5_replacement_backup = None
         self._inflight_h5_identity = None
         self._update_heatmap_extent_labels()
@@ -5055,6 +5067,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.session.viewport.output_height = backup.viewport_output_height
         self._rebuild_overlay_plot_renderer()
         self._h5_replacement_backup = None
+        self._pending_peak_session_reload = False
         self._update_heatmap_extent_labels()
 
     def _handle_resource_job_state_changed(self) -> None:
@@ -6475,6 +6488,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         clear_resource_job(self._resource_job_manager.board(), "radar_h5")
         self._h5_replacement_backup = None
         self._inflight_h5_identity = None
+        self._pending_peak_session_reload = False
         self.truth_view.set_loading_overlay(False)
         if self.heatmap_source is not None:
             self.heatmap_source.close()
