@@ -15,7 +15,14 @@ from heatmap_alignment_core import (
     session_equivalent_for_pristine,
     validate_alignment_session,
 )
-from heatmap_alignment_session_coordinator import ClosedSessionReset
+
+
+@dataclass(frozen=True)
+class ClosedSessionReset:
+    """Default session document produced by closing the current workbench session."""
+
+    session: AlignmentSession
+    path_cleared: bool
 
 
 SessionPromptAction = Literal["open", "close", "quit"]

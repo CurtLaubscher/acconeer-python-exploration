@@ -14,15 +14,9 @@ returning objects from this module. Do not import PySide6 or GUI modules here.
 from dataclasses import dataclass
 from pathlib import Path
 
-from heatmap_alignment_core import AlignmentSession
+from heatmap_alignment_session_lifecycle import ClosedSessionReset
 
-
-@dataclass(frozen=True)
-class ClosedSessionReset:
-    """Default session document produced by closing the current workbench session."""
-
-    session: AlignmentSession
-    path_cleared: bool
+__all__ = ["ClosedSessionReset", "LoadSessionPlan"]
 
 
 @dataclass(frozen=True)

@@ -3715,16 +3715,6 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
 
         return True
 
-    def _open_session_from_path(
-        self, session_path: Path, *, prompt_for_unsaved: bool
-    ) -> bool:
-        return self._open_session(
-            LoadSessionPlan(
-                session_path=session_path,
-                prompt_for_unsaved=prompt_for_unsaved,
-            )
-        )
-
     def _build_ui(self) -> None:
         central = QtWidgets.QWidget(self)
         layout = QtWidgets.QVBoxLayout(central)
@@ -4759,7 +4749,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             "JSON files (*.json);;All files (*)",
         )
         if filename:
-            self._open_session_from_path(Path(filename), prompt_for_unsaved=False)
+            self._open_session(LoadSessionPlan(session_path=Path(filename), prompt_for_unsaved=False))
 
     def _loaded_h5_identity(self) -> H5SlotIdentity | None:
         """Return identity of the currently loaded H5 source, or None."""
