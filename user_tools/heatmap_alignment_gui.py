@@ -61,16 +61,9 @@ from heatmap_alignment_core import (
     build_leg2_ultrasonic_signal_series,
     build_peak_distance_signal_series,
     derive_signal_plot_color,
-    desired_camera_identity,
-    desired_h5_identity,
-    desired_leg2_identity,
-    desired_peak_identities,
     elide_path_middle,
     import_leg2_mat_for_heatmap,
     import_peak_distance_json_for_heatmap,
-    reconcile_camera_action,
-    reconcile_h5_action,
-    reconcile_sync_slot_action,
     rectify_viewport,
     scale_viewport_corners,
     TimelineH5DragSnapshot,
@@ -135,7 +128,11 @@ from heatmap_peak_distance_resource import (
 )
 from heatmap_leg2_resource import Leg2ResourceAdapter
 from heatmap_alignment_preview_sync import PreviewSyncPlan, run_preview_sync
-from heatmap_alignment_session_coordinator import LoadSessionPlan
+from heatmap_alignment_session_coordinator import (
+    LoadSessionPlan,
+    LoadedResourceState,
+    plan_session_reconcile,
+)
 from heatmap_alignment_session_lifecycle import (
     SessionLifecycleState,
     SessionPromptAction,
@@ -4773,62 +4770,44 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         Per-slot registry approach: new resource types must add an entry here.
         See OpenSpec change: session-load-responsiveness.
         """
-        # Camera slot
-        camera_desired = desired_camera_identity(desired_session)
+        # Build a plain-value snapshot of loaded/inflight state for the coordinator.
         if self.camera_source is not None:
             source_path = getattr(self.camera_source, "path", None)
-            camera_loaded = (
+            camera_loaded_path = (
                 str(source_path)
                 if source_path is not None
                 else prior_session.camera_track.path
             )
         else:
-            camera_loaded = None
+            camera_loaded_path = None
         camera_slot = self._resource_job_manager.board().camera
-        camera_inflight = (
+        camera_inflight_path = (
             str(camera_slot.target_path)
             if camera_slot.target_path is not None and camera_slot.phase not in ("idle", "failed", "superseded")
             else None
         )
-        camera_action = reconcile_camera_action(
-            camera_desired,
-            loaded_path=camera_loaded,
-            inflight_path=camera_inflight,
+        loaded = LoadedResourceState(
+            camera_loaded_path=camera_loaded_path,
+            camera_inflight_path=camera_inflight_path,
+            h5_loaded_identity=self._loaded_h5_identity(),
+            h5_inflight_identity=self._inflight_h5_identity,
+            loaded_peak_paths=frozenset(
+                str(s.json_path)
+                for s in self._peak_series_list
+                if s.json_path is not None
+            ),
+            leg2_loaded_path=(
+                prior_session.leg2_ultrasonic_datasource.path
+                if self.leg2_ultrasonic_datasource is not None and prior_session.leg2_ultrasonic_datasource.path
+                else None
+            ),
         )
-
-        # H5 slot
-        h5_desired = desired_h5_identity(desired_session)
-        h5_loaded = self._loaded_h5_identity()
-        h5_action = reconcile_h5_action(
-            h5_desired,
-            loaded_identity=h5_loaded,
-            inflight_identity=self._inflight_h5_identity,
-        )
-
-        # Peak series — per-series reconciliation.
-        # desired_peak_identities() returns one SyncSlotIdentity per stored path.
-        peak_desired_list = desired_peak_identities(desired_session)
-        peak_desired_paths = {identity.path for identity in peak_desired_list}
-        loaded_peak_paths = {
-            str(s.json_path)
-            for s in self._peak_series_list
-            if s.json_path is not None
-        }
-
-        # Leg2 slot — keep only when datasource object is present and path matches.
-        # Use prior_session to get the path of the currently loaded datasource.
-        leg2_desired = desired_leg2_identity(desired_session)
-        leg2_loaded = (
-            prior_session.leg2_ultrasonic_datasource.path
-            if self.leg2_ultrasonic_datasource is not None and prior_session.leg2_ultrasonic_datasource.path
-            else None
-        )
-        leg2_action = reconcile_sync_slot_action(leg2_desired, loaded_path=leg2_loaded)
+        plan = plan_session_reconcile(desired_session, loaded)
 
         # Execute per-slot actions
-        if camera_action == "unload":
+        if plan.camera_action == "unload":
             self.unload_camera_video(mark_dirty=False)
-        elif camera_action == "load":
+        elif plan.camera_action == "load":
             camera_path = Path(desired_session.camera_track.path)
             if camera_path.exists():
                 self.load_camera_from_path(camera_path, mark_dirty=False)
@@ -4836,9 +4815,9 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
                 self._set_resource_reload_error("camera", f"File not found: {camera_path}")
         # camera "keep" — nothing to do
 
-        if h5_action == "unload":
+        if plan.h5_action == "unload":
             self.unload_h5_recording(mark_dirty=False)
-        elif h5_action == "load":
+        elif plan.h5_action == "load":
             h5_path = Path(desired_session.heatmap_track.path)
             if h5_path.exists():
                 self.load_h5_from_path(h5_path, mark_dirty=False)
@@ -4849,25 +4828,23 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         # Per-series peak reconciliation: unload series whose paths are no longer desired,
         # load series that are desired but not yet loaded, and drop unsaved generated
         # series that have no saved path (they cannot be represented in the session).
-        paths_to_unload = loaded_peak_paths - peak_desired_paths
-        paths_to_load = peak_desired_paths - loaded_peak_paths
         # Always filter: drop pathless (unsaved generated) rows and any stale path rows.
         self._peak_series_list = [
             s for s in self._peak_series_list
-            if s.json_path is not None and str(s.json_path) not in paths_to_unload
+            if s.json_path is not None and str(s.json_path) not in plan.peak_paths_to_unload
         ]
         if self._heatmap_peak_selector_id not in {s.series_id for s in self._peak_series_list}:
             self._heatmap_peak_selector_id = None
-        if paths_to_load:
-            if h5_action not in ("load",):
+        if plan.peak_paths_to_load:
+            if plan.h5_action not in ("load",):
                 self._reload_peak_series_from_session()
             # If H5 is loading, _reload_peak_series_from_session
             # will be called after H5 finishes.
 
-        if leg2_action == "unload":
+        if plan.leg2_action == "unload":
             if self.leg2_ultrasonic_datasource is not None:
                 self._clear_leg2_ultrasonic_datasource(mark_dirty=False)
-        elif leg2_action == "load":
+        elif plan.leg2_action == "load":
             self._reload_leg2_ultrasonic_datasource_from_session()
         # leg2 "keep" — nothing to do
 
