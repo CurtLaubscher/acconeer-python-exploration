@@ -103,6 +103,7 @@ peak-distances = "python user_tools/export_sparse_iq_peak_distances.py {args}"
 [tool.hatch.envs.mypy]
 features = ["app"]
 dependencies = [
+    "basedpyright",
     "mypy==1.14.1",
     "pytest==7.2",
     "pandas==1.3.5",
@@ -117,6 +118,7 @@ dependencies = [
 python = ["3.9"]
 
 [tool.hatch.envs.mypy.scripts]
+pyright = "basedpyright {args}"
 check = "python -m mypy {args}"
 
 
