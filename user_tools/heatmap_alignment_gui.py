@@ -55,7 +55,7 @@ from heatmap_alignment_core import (
     Leg2MatImportError,
     Leg2UltrasonicSignalSeries,
     LoadedLeg2UltrasonicDatasource,
-    PeakDistanceSignalSeries,
+    DetectionSignalSeries,
     SignalPlotViewSettings,
     apply_viewport_visibility,
     build_leg2_ultrasonic_signal_series,
@@ -123,7 +123,7 @@ from heatmap_peak_distance_resource import (
     build_imported_peak_series,
     default_generated_name,
     default_imported_name,
-    generate_peak_distances_from_heatmap_record,
+    generate_detection_series_from_heatmap_record,
     peak_state_detected_counts,
 )
 from heatmap_leg2_resource import Leg2ResourceAdapter
@@ -139,6 +139,7 @@ from heatmap_alignment_session_lifecycle import (
     SessionTransitionGuard,
 )
 from heatmap_alignment_widgets import (
+    DetectionStripWidget,
     DoubleRangeSlider,
     ImagePreview,
     rgb_to_qpixmap,
@@ -153,7 +154,7 @@ import pyqtgraph as pg
 
 from heatmap_alignment_dialogs import (  # noqa: F401
     ElidedPathItemDelegate,
-    GeneratePeakSeriesDialog,
+    GenerateDetectionSeriesDialog,
     HeatmapDistanceHeader,
     RESOURCE_ACTION_LABELS,
     RESOURCE_JOB_STATUS_LABELS,
@@ -615,6 +616,8 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         rendered_heatmap_layout.setSpacing(0)
         self._heatmap_distance_header = HeatmapDistanceHeader()
         rendered_heatmap_layout.addWidget(self._heatmap_distance_header)
+        self._detection_strip = DetectionStripWidget()
+        rendered_heatmap_layout.addWidget(self._detection_strip)
         rendered_heatmap_layout.addWidget(self.truth_view)
         self.truth_view.setMouseTracking(True)
         self.truth_view.installEventFilter(self)
@@ -643,13 +646,13 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._heatmap_vel_extent_label.setStyleSheet("color: #d7dde6; font-size: 10px;")
         rendered_heatmap_color_row.addWidget(self._heatmap_vel_extent_label)
         rendered_heatmap_controls_layout.addLayout(rendered_heatmap_color_row)
-        # Peak series marker selector.
+        # Detection algorithm selector.
         rendered_heatmap_peak_row = QtWidgets.QHBoxLayout()
-        rendered_heatmap_peak_row.addWidget(QtWidgets.QLabel("Peak Marker:"))
+        rendered_heatmap_peak_row.addWidget(QtWidgets.QLabel("Detection Algorithm:"))
         self._heatmap_peak_combo = QtWidgets.QComboBox()
         self._heatmap_peak_combo.addItem("None", None)
         self._heatmap_peak_combo.setToolTip(
-            "Select which peak series to use for the rendered heatmap marker. "
+            "Select which detection series to use for the rendered heatmap marker. "
             "Independent of Signals plot visibility."
         )
         self._heatmap_peak_combo.currentIndexChanged.connect(self._on_heatmap_peak_combo_changed)
@@ -1166,19 +1169,22 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         """Open the Generate Peak Series dialog and add a new series."""
         if self.heatmap_source is None:
             return
-        dialog = GeneratePeakSeriesDialog(self)
+        dialog = GenerateDetectionSeriesDialog(self)
         if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
             return
 
         QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.CursorShape.WaitCursor)
         self.statusBar().showMessage("Generating peak series...")
         try:
-            result = generate_peak_distances_from_heatmap_record(
+            result = generate_detection_series_from_heatmap_record(
                 self.heatmap_source.record,
                 h5_path=self.heatmap_source.path,
                 subsweep_idx=self.heatmap_source.subsweep_idx,
                 threshold=dialog.threshold,
                 peak_extraction_method=dialog.algorithm_id,
+                threshold_max=dialog.threshold_max,
+                threshold_min=dialog.threshold_min,
+                reference_distance_m=dialog.reference_distance_m,
             )
         except Exception as exc:
             QtWidgets.QApplication.restoreOverrideCursor()
@@ -1195,6 +1201,9 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             algorithm_id=dialog.algorithm_id,
             threshold=dialog.threshold,
             existing_series=self._peak_series_list,
+            threshold_max=dialog.threshold_max,
+            threshold_min=dialog.threshold_min,
+            reference_distance_m=dialog.reference_distance_m,
         )
         self._peak_series_list.append(series)
         self._heatmap_peak_selector_id = series.series_id
@@ -1361,11 +1370,11 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             self._write_peak_series_to_path(series, Path(path))
 
     def _write_peak_series_to_path(self, series: PeakSeriesResource, output_path: Path) -> None:
-        from sparse_iq_peak_distance_core import PeakDistanceExportResult, write_peak_distance_json
+        from sparse_iq_peak_distance_core import DetectionExportResult, write_peak_distance_json
 
         if series.metadata is None:
             return
-        result = PeakDistanceExportResult(
+        result = DetectionExportResult(
             metadata=series.metadata, measurements=series.measurements
         )
         try:
@@ -1441,7 +1450,13 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         if target is not None:
             self._unload_peak_series(target.series_id)
 
-    def _peak_overlay_for_frame(self, frame_idx: int) -> tuple[float, float] | None:
+    def _peak_overlay_for_frame(
+        self, frame_idx: int
+    ) -> tuple[float, float, np.ndarray | None] | None:
+        """Return (target_distance_m, zero_velocity_m_s, detection_ratio) for the active series.
+
+        Returns None if no series is active or the frame has no detection.
+        """
         peak_state = self._active_peak_state()
         if peak_state is None:
             return None
@@ -1452,12 +1467,22 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             (m for m in measurements if m.frame_index == frame_idx), None
         )
         if measurement is None or measurement.status != STATUS_DETECTED:
+            # Still return detection_ratio even when no detection, so the strip renders.
+            if measurement is not None:
+                ratio = measurement.detection_ratio if len(measurement.detection_ratio) > 0 else None
+                return (
+                    None,  # type: ignore[return-value]
+                    active_peak_zero_velocity_m_s(peak_state),
+                    ratio,
+                )
             return None
-        if measurement.peak_distance_m is None:
+        if measurement.target_distance_m is None:
             return None
+        ratio = measurement.detection_ratio if len(measurement.detection_ratio) > 0 else None
         return (
-            measurement.peak_distance_m,
+            measurement.target_distance_m,
             active_peak_zero_velocity_m_s(peak_state),
+            ratio,
         )
 
     def _annotate_truth_frame_with_peak(
@@ -1487,10 +1512,10 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             self._heatmap_distance_header.set_peak_distance(None)
             return
         peak_overlay = self._peak_overlay_for_frame(frame_idx)
-        if peak_overlay is None:
+        dist = None if peak_overlay is None else peak_overlay[0]
+        if dist is None:
             self._heatmap_distance_header.set_peak_distance(None)
         else:
-            dist = peak_overlay[0]
             if self._heatmap_axes is not None:
                 d_min = float(self._heatmap_axes.distances_m[0])
                 d_max = float(self._heatmap_axes.distances_m[-1])
@@ -1535,6 +1560,22 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         dvm = self._hover_dvm_cache[1]
         magnitude = int(round(float(dvm[vel_idx, dist_idx])))
         text = "Distance: {:.3f} m\nVelocity: {:.3f} m/s\nMagnitude: {}".format(dist_val, vel_val, magnitude)
+
+        # Append detection ratio from the active series if one is selected.
+        frame_idx = self._hover_dvm_cache[0]
+        active_series = self._active_peak_state()
+        if active_series is not None:
+            measurement = next(
+                (m for m in active_series.measurements if m.frame_index == frame_idx), None
+            )
+            if (
+                measurement is not None
+                and measurement.detection_ratio is not None
+                and len(measurement.detection_ratio) > dist_idx
+            ):
+                ratio_val = float(measurement.detection_ratio[dist_idx])
+                text += "\nDetection ratio: {:.2f}".format(ratio_val)
+
         global_pos = self.truth_view.mapToGlobal(pos)
         QtWidgets.QToolTip.showText(global_pos, text, self.truth_view)
 
@@ -2807,9 +2848,12 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             self._update_heatmap_peak_cue(frame_idx)
             if self._hover_last_pos is not None:
                 self._refresh_hover_tooltip()
+            peak_overlay = self._peak_overlay_for_frame(frame_idx)
+            self._detection_strip.set_detection_ratio(None if peak_overlay is None else peak_overlay[2])
         else:
             self._hover_dvm_cache = None
             self._update_heatmap_peak_cue(None)
+            self._detection_strip.set_detection_ratio(None)
         self.truth_view.set_frame(truth_frame)
         return frame_idx, truth_frame
 
@@ -2846,6 +2890,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
                 source_size=presentation_source_size,
                 peak_distance_m=None if peak_overlay is None else peak_overlay[0],
                 zero_velocity_m_s=None if peak_overlay is None else peak_overlay[1],
+                detection_ratio=None if peak_overlay is None else peak_overlay[2],
             )
             self.camera_view.set_export_overlay_preview_frame(preview_frame)
         elif not self._freeze_export_overlay_preview:
@@ -2899,7 +2944,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         if not refresh_data:
             self.signal_plot.set_current_time_s(self.session.timeline.current_time_s)
             return
-        # Build list of (display_name, color_hex, PeakDistanceSignalSeries) for visible series.
+        # Build list of (display_name, color_hex, DetectionSignalSeries) for visible series.
         peak_series_list = []
         for ps in self._peak_series_list:
             if ps.visible:
@@ -3361,6 +3406,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._overlay_plot_renderer = None
         self.session.heatmap_track = HeatmapTrack()
         self.truth_view.set_frame(None)
+        self._detection_strip.set_detection_ratio(None)
         self._hover_dvm_cache = None
         self._hover_last_pos = None
         QtWidgets.QToolTip.hideText()
@@ -3560,6 +3606,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
                             source_size=presentation_source_size,
                             peak_distance_m=None if peak_overlay is None else peak_overlay[0],
                             zero_velocity_m_s=None if peak_overlay is None else peak_overlay[1],
+                            detection_ratio=None if peak_overlay is None else peak_overlay[2],
                         )
                         left = int(round(export_rect.x()))
                         top = int(round(export_rect.y()))

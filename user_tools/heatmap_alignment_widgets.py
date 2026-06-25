@@ -8,6 +8,8 @@ import numpy as np
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
+from heatmap_alignment_core import detection_ratio_strip_rgb
+
 
 def rgb_to_qpixmap(frame_rgb: np.ndarray) -> QtGui.QPixmap:
     if frame_rgb.ndim != 3 or frame_rgb.shape[2] != 3:
@@ -231,3 +233,40 @@ class DoubleRangeSlider(QtWidgets.QWidget):
             return self._minimum
         fraction = np.clip((x - rect.left()) / rect.width(), 0.0, 1.0)
         return float(self._minimum + fraction * (self._maximum - self._minimum))
+
+
+class DetectionStripWidget(QtWidgets.QWidget):
+    """Fixed-height colorbar showing per-bin detection ratio, independent of velocity bins."""
+
+    _STRIP_HEIGHT_PX = 12
+
+    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setFixedHeight(self._STRIP_HEIGHT_PX)
+        self._detection_ratio: np.ndarray | None = None
+
+    def set_detection_ratio(self, detection_ratio: np.ndarray | None) -> None:
+        self._detection_ratio = detection_ratio
+        self.update()
+
+    def paintEvent(self, event: QtGui.QPaintEvent) -> None:
+        w = self.width()
+        h = self.height()
+        if w <= 0 or h <= 0:
+            return
+        if self._detection_ratio is None or len(self._detection_ratio) == 0:
+            QtWidgets.QWidget.paintEvent(self, event)
+            return
+        strip_row = detection_ratio_strip_rgb(self._detection_ratio, w)  # (1, w, 3)
+        row_uint8 = np.ascontiguousarray(strip_row[0])  # (w, 3)
+        image = QtGui.QImage(
+            row_uint8.data,
+            w,
+            1,
+            3 * w,
+            QtGui.QImage.Format.Format_RGB888,
+        )
+        pixmap = QtGui.QPixmap.fromImage(image.copy())
+        painter = QtGui.QPainter(self)
+        painter.drawPixmap(QtCore.QRect(0, 0, w, h), pixmap)
+        painter.end()

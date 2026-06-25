@@ -14,18 +14,22 @@ from uuid import uuid4
 
 from heatmap_alignment_core import PeakSeriesSessionEntry
 from sparse_iq_peak_distance_core import (
+    DEFAULT_DIST_NORM_REFERENCE_DISTANCE_M,
+    DEFAULT_DIST_NORM_THRESHOLD_MAX,
+    DEFAULT_DIST_NORM_THRESHOLD_MIN,
     DEFAULT_PEAK_THRESHOLD,
     PEAK_ALGORITHM_REGISTRY,
+    PEAK_EXTRACTION_METHOD_DISTANCE_NORMALIZED,
     PEAK_EXTRACTION_METHOD_SUM_VELOCITY,
     STATUS_DETECTED,
-    FramePeakMeasurement,
+    FrameDetectionMeasurement,
     LoadedPeakDistanceDatasource,
-    PeakDistanceExportResult,
+    DetectionExportResult,
     analyze_heatmap_record,
     write_peak_distance_json,
 )
 
-PeakDistanceResourceState = PeakDistanceExportResult | LoadedPeakDistanceDatasource
+PeakDistanceResourceState = DetectionExportResult | LoadedPeakDistanceDatasource
 
 PEAK_SERIES_PALETTE: list[str] = [
     "#3b82f6",
@@ -44,12 +48,12 @@ class PeakSeriesResource:
     series_id: str
     display_name: str
     provenance: str  # "generated" or "imported"
-    measurements: tuple  # tuple[FramePeakMeasurement, ...]
+    measurements: tuple  # tuple[FrameDetectionMeasurement, ...]
     color: str
     json_path: Path | None = None
     algorithm_id: str | None = None
     algorithm_params: dict = field(default_factory=dict)
-    metadata: object = None  # PeakDistanceMetadata | None
+    metadata: object = None  # DetectionMetadata | None
     visible: bool = True
     unsaved: bool = False
     warnings: tuple = ()
@@ -153,14 +157,22 @@ def build_imported_peak_series(
 
 
 def build_generated_peak_series(
-    result: PeakDistanceExportResult,
+    result: DetectionExportResult,
     *,
     display_name: str,
     algorithm_id: str,
     threshold: float,
     existing_series: list[PeakSeriesResource],
+    threshold_max: float = DEFAULT_DIST_NORM_THRESHOLD_MAX,
+    threshold_min: float = DEFAULT_DIST_NORM_THRESHOLD_MIN,
+    reference_distance_m: float = DEFAULT_DIST_NORM_REFERENCE_DISTANCE_M,
 ) -> PeakSeriesResource:
     """Create an unsaved runtime peak-series row from generated measurements."""
+    algorithm_params: dict = {"threshold": threshold}
+    if algorithm_id == PEAK_EXTRACTION_METHOD_DISTANCE_NORMALIZED:
+        algorithm_params["threshold_max"] = threshold_max
+        algorithm_params["threshold_min"] = threshold_min
+        algorithm_params["reference_distance_m"] = reference_distance_m
     return PeakSeriesResource(
         series_id=str(uuid4()),
         display_name=display_name,
@@ -168,18 +180,25 @@ def build_generated_peak_series(
         measurements=result.measurements,
         metadata=result.metadata,
         algorithm_id=algorithm_id,
-        algorithm_params={"threshold": threshold},
+        algorithm_params=algorithm_params,
         color=assign_peak_series_color(existing_series),
         unsaved=True,
     )
 
 
-def default_generated_name(algorithm_id: str, threshold: float) -> str:
-    """Return a human-readable default name for a generated peak series.
+def default_generated_name(
+    algorithm_id: str,
+    threshold: float,
+    *,
+    reference_distance_m: float = DEFAULT_DIST_NORM_REFERENCE_DISTANCE_M,
+) -> str:
+    """Return a human-readable default name for a generated detection series.
 
-    Example: "v0 slice, thresh 650"
+    Examples: "v0 slice, thresh 650", "dist norm, ref 0.70m"
     """
     label = PEAK_ALGORITHM_REGISTRY.get(algorithm_id, algorithm_id)
+    if algorithm_id == PEAK_EXTRACTION_METHOD_DISTANCE_NORMALIZED:
+        return f"dist norm, ref {reference_distance_m:.2f}m"
     thresh_int = int(threshold)
     return f"{label}, thresh {thresh_int}"
 
@@ -197,14 +216,17 @@ def default_imported_name(json_path: Path, existing_names: list[str]) -> str:
         counter += 1
 
 
-def generate_peak_distances_from_heatmap_record(
+def generate_detection_series_from_heatmap_record(
     heatmap_record,
     *,
     h5_path: Path,
     subsweep_idx: int,
     threshold: float = DEFAULT_PEAK_THRESHOLD,
     peak_extraction_method: str = PEAK_EXTRACTION_METHOD_SUM_VELOCITY,
-) -> PeakDistanceExportResult:
+    threshold_max: float = DEFAULT_DIST_NORM_THRESHOLD_MAX,
+    threshold_min: float = DEFAULT_DIST_NORM_THRESHOLD_MIN,
+    reference_distance_m: float = DEFAULT_DIST_NORM_REFERENCE_DISTANCE_M,
+) -> DetectionExportResult:
     frame_indices = list(range(len(heatmap_record.results)))
     return analyze_heatmap_record(
         heatmap_record,
@@ -213,6 +235,9 @@ def generate_peak_distances_from_heatmap_record(
         frame_indices=frame_indices,
         threshold=threshold,
         peak_extraction_method=peak_extraction_method,
+        threshold_max=threshold_max,
+        threshold_min=threshold_min,
+        reference_distance_m=reference_distance_m,
     )
 
 
@@ -233,7 +258,7 @@ def save_peak_state_to_path(
     output_path: Path,
 ) -> LoadedPeakDistanceDatasource:
     """Write canonical JSON and return a LoadedPeakDistanceDatasource for the saved file."""
-    if isinstance(state, PeakDistanceExportResult):
+    if isinstance(state, DetectionExportResult):
         write_peak_distance_json(state, output_path)
         return LoadedPeakDistanceDatasource(
             path=output_path,
@@ -241,7 +266,7 @@ def save_peak_state_to_path(
             measurements=state.measurements,
         )
     else:
-        result = PeakDistanceExportResult(
+        result = DetectionExportResult(
             metadata=state.metadata,
             measurements=state.measurements,
         )

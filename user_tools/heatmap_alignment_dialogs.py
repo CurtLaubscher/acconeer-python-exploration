@@ -8,9 +8,14 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 from heatmap_alignment_core import elide_path_middle
 from heatmap_alignment_resource_summaries import ResourceAction, ResourceKind, ResourceSummary
 from sparse_iq_peak_distance_core import (
+    ALGORITHM_LABEL_DISTANCE_NORMALIZED,
     ALGORITHM_LABEL_SUM_VELOCITY,
     ALGORITHM_LABEL_ZERO_VELOCITY_SLICE,
+    DEFAULT_DIST_NORM_REFERENCE_DISTANCE_M,
+    DEFAULT_DIST_NORM_THRESHOLD_MAX,
+    DEFAULT_DIST_NORM_THRESHOLD_MIN,
     DEFAULT_PEAK_THRESHOLD,
+    PEAK_EXTRACTION_METHOD_DISTANCE_NORMALIZED,
     PEAK_EXTRACTION_METHOD_SUM_VELOCITY,
     PEAK_EXTRACTION_METHOD_ZERO_VELOCITY_SLICE,
 )
@@ -460,27 +465,57 @@ class ResourcesWindow(QtWidgets.QDialog):
         menu.exec(self.table.viewport().mapToGlobal(position))
 
 
-class GeneratePeakSeriesDialog(QtWidgets.QDialog):
-    """Dialog for configuring a new generated peak series."""
+class GenerateDetectionSeriesDialog(QtWidgets.QDialog):
+    """Dialog for configuring a new generated detection series."""
 
     def __init__(self, parent=None, *, default_threshold: float = DEFAULT_PEAK_THRESHOLD) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Generate Peak Series")
+        self.setWindowTitle("Generate Detection Series")
         layout = QtWidgets.QFormLayout(self)
         self._algo_combo = QtWidgets.QComboBox()
         self._algo_combo.addItem(ALGORITHM_LABEL_SUM_VELOCITY, PEAK_EXTRACTION_METHOD_SUM_VELOCITY)
         self._algo_combo.addItem(ALGORITHM_LABEL_ZERO_VELOCITY_SLICE, PEAK_EXTRACTION_METHOD_ZERO_VELOCITY_SLICE)
+        self._algo_combo.addItem(ALGORITHM_LABEL_DISTANCE_NORMALIZED, PEAK_EXTRACTION_METHOD_DISTANCE_NORMALIZED)
         layout.addRow("Algorithm:", self._algo_combo)
+
         self._threshold_spin = QtWidgets.QDoubleSpinBox()
         self._threshold_spin.setRange(0.0, 1_000_000.0)
         self._threshold_spin.setDecimals(1)
         self._threshold_spin.setValue(default_threshold)
-        layout.addRow("Threshold:", self._threshold_spin)
+        self._threshold_label = QtWidgets.QLabel("Threshold:")
+        layout.addRow(self._threshold_label, self._threshold_spin)
+
+        self._threshold_max_spin = QtWidgets.QDoubleSpinBox()
+        self._threshold_max_spin.setRange(1.0, 1_000_000.0)
+        self._threshold_max_spin.setDecimals(1)
+        self._threshold_max_spin.setValue(DEFAULT_DIST_NORM_THRESHOLD_MAX)
+        self._threshold_max_label = QtWidgets.QLabel("Threshold max:")
+        layout.addRow(self._threshold_max_label, self._threshold_max_spin)
+
+        self._threshold_min_spin = QtWidgets.QDoubleSpinBox()
+        self._threshold_min_spin.setRange(1.0, 1_000_000.0)
+        self._threshold_min_spin.setDecimals(1)
+        self._threshold_min_spin.setValue(DEFAULT_DIST_NORM_THRESHOLD_MIN)
+        self._threshold_min_label = QtWidgets.QLabel("Threshold min:")
+        layout.addRow(self._threshold_min_label, self._threshold_min_spin)
+
+        self._reference_distance_spin = QtWidgets.QDoubleSpinBox()
+        self._reference_distance_spin.setRange(0.01, 100.0)
+        self._reference_distance_spin.setDecimals(3)
+        self._reference_distance_spin.setSingleStep(0.05)
+        self._reference_distance_spin.setValue(DEFAULT_DIST_NORM_REFERENCE_DISTANCE_M)
+        self._reference_distance_label = QtWidgets.QLabel("Reference distance (m):")
+        layout.addRow(self._reference_distance_label, self._reference_distance_spin)
+
         self._name_edit = QtWidgets.QLineEdit()
         layout.addRow("Name:", self._name_edit)
-        self._algo_combo.currentIndexChanged.connect(self._update_default_name)
+
+        self._algo_combo.currentIndexChanged.connect(self._on_algo_changed)
         self._threshold_spin.valueChanged.connect(self._update_default_name)
-        self._update_default_name()
+        self._threshold_max_spin.valueChanged.connect(self._update_default_name)
+        self._threshold_min_spin.valueChanged.connect(self._update_default_name)
+        self._reference_distance_spin.valueChanged.connect(self._update_default_name)
+
         buttons = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.StandardButton.Ok | QtWidgets.QDialogButtonBox.StandardButton.Cancel
         )
@@ -488,10 +523,27 @@ class GeneratePeakSeriesDialog(QtWidgets.QDialog):
         buttons.rejected.connect(self.reject)
         layout.addRow(buttons)
 
+        self._on_algo_changed()
+
+    def _on_algo_changed(self) -> None:
+        is_dist_norm = self._algo_combo.currentData() == PEAK_EXTRACTION_METHOD_DISTANCE_NORMALIZED
+        self._threshold_label.setVisible(not is_dist_norm)
+        self._threshold_spin.setVisible(not is_dist_norm)
+        self._threshold_max_label.setVisible(is_dist_norm)
+        self._threshold_max_spin.setVisible(is_dist_norm)
+        self._threshold_min_label.setVisible(is_dist_norm)
+        self._threshold_min_spin.setVisible(is_dist_norm)
+        self._reference_distance_label.setVisible(is_dist_norm)
+        self._reference_distance_spin.setVisible(is_dist_norm)
+        self._update_default_name()
+
     def _update_default_name(self) -> None:
         algo_id = self._algo_combo.currentData()
         thresh = self._threshold_spin.value()
-        self._name_edit.setPlaceholderText(default_generated_name(algo_id, thresh))
+        ref = self._reference_distance_spin.value()
+        self._name_edit.setPlaceholderText(
+            default_generated_name(algo_id, thresh, reference_distance_m=ref)
+        )
 
     @property
     def algorithm_id(self) -> str:
@@ -502,11 +554,25 @@ class GeneratePeakSeriesDialog(QtWidgets.QDialog):
         return self._threshold_spin.value()
 
     @property
+    def threshold_max(self) -> float:
+        return self._threshold_max_spin.value()
+
+    @property
+    def threshold_min(self) -> float:
+        return self._threshold_min_spin.value()
+
+    @property
+    def reference_distance_m(self) -> float:
+        return self._reference_distance_spin.value()
+
+    @property
     def display_name(self) -> str:
         text = self._name_edit.text().strip()
         if text:
             return text
-        return default_generated_name(self.algorithm_id, self.threshold)
+        return default_generated_name(
+            self.algorithm_id, self.threshold, reference_distance_m=self.reference_distance_m
+        )
 
 
 class HeatmapDistanceHeader(QtWidgets.QWidget):

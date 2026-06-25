@@ -17,7 +17,7 @@ from heatmap_alignment_core import (
     SIGNAL_PLOT_PRIMARY_SEGMENT_ALPHA,
     TIMELINE_PLAYHEAD_COLOR_HEX,
     Leg2UltrasonicSignalSeries,
-    PeakDistanceSignalSeries,
+    DetectionSignalSeries,
     SignalPlotViewSettings,
     TimelineH5DragSnapshot,
     apply_timeline_h5_alignment_drag,
@@ -276,7 +276,7 @@ class SignalPlotWidget(pg.PlotWidget):
         self._stance_patch_items: list[QtWidgets.QGraphicsItem] = []
         # Multi-peak series: list of (display_name, detected_curve, candidate_curve)
         self._peak_curve_groups: list[tuple[str, object, object]] = []
-        self._peak_series_data: list[tuple[str, PeakDistanceSignalSeries]] = []  # (name, series)
+        self._peak_series_data: list[tuple[str, DetectionSignalSeries]] = []  # (name, series)
         leg2_plot_color = derive_signal_plot_color(LEG2_TIMELINE_TRACK_COLOR_HEX)
         primary_pen, faded_pen = _make_leg2_signal_plot_pens(leg2_plot_color)
         self._leg2_plot_color = leg2_plot_color
@@ -445,11 +445,11 @@ class SignalPlotWidget(pg.PlotWidget):
         leg2_visible: bool = False,
         leg2_legend_name: str = "",
         # Legacy single-series kwargs kept for test compatibility:
-        peak_series: PeakDistanceSignalSeries | None = None,
+        peak_series: DetectionSignalSeries | None = None,
         peak_visible: bool = False,
     ) -> None:
         # Build a normalised list: [(display_name, color, series), ...]
-        # peak_series_list entries are (display_name, color_hex, PeakDistanceSignalSeries).
+        # peak_series_list entries are (display_name, color_hex, DetectionSignalSeries).
         if peak_series_list is not None:
             named_series = peak_series_list  # already [(name, color, series)]
         elif peak_series is not None and peak_visible:
@@ -736,7 +736,7 @@ class SignalPlotWidget(pg.PlotWidget):
                 leg2_series=self._leg2_series if self._leg2_visible else None,
             )
         elif self._leg2_visible and self._leg2_series is not None:
-            empty_peak = PeakDistanceSignalSeries(
+            empty_peak = DetectionSignalSeries(
                 detected_time_s=np.asarray([], dtype=np.float64),
                 detected_distance_m=np.asarray([], dtype=np.float64),
                 candidate_time_s=np.asarray([], dtype=np.float64),

@@ -22,7 +22,7 @@ from matplotlib.figure import Figure
 from scipy.io import loadmat
 from sparse_iq_peak_distance_core import (
     STATUS_DETECTED,
-    FramePeakMeasurement,
+    FrameDetectionMeasurement,
     LoadedPeakDistanceDatasource,
     load_peak_distance_json,
     validate_peak_distance_import,
@@ -192,7 +192,7 @@ class LoadedLeg2UltrasonicDatasource:
 
 
 @dataclass(frozen=True)
-class PeakDistanceSignalSeries:
+class DetectionSignalSeries:
     detected_time_s: np.ndarray
     detected_distance_m: np.ndarray
     candidate_time_s: np.ndarray
@@ -864,16 +864,16 @@ def build_leg2_ultrasonic_signal_series(
     )
 
 
-def _plottable_candidate_distance_m(measurement: FramePeakMeasurement) -> float | None:
-    value = measurement.candidate_peak_distance_m
+def _plottable_candidate_distance_m(measurement: FrameDetectionMeasurement) -> float | None:
+    value = measurement.candidate_distance_m
     if not math.isfinite(value):
         return None
     return float(value)
 
 
 def build_peak_distance_signal_series(
-    measurements: tuple[FramePeakMeasurement, ...],
-) -> PeakDistanceSignalSeries:
+    measurements: tuple[FrameDetectionMeasurement, ...],
+) -> DetectionSignalSeries:
     detected_time_s: list[float] = []
     detected_distance_m: list[float] = []
     candidate_time_s: list[float] = []
@@ -916,7 +916,7 @@ def build_peak_distance_signal_series(
             candidate_time_s.append(measurement.time_s)
             candidate_distance_m.append(distance_m)
 
-    return PeakDistanceSignalSeries(
+    return DetectionSignalSeries(
         detected_time_s=np.asarray(detected_time_s, dtype=np.float64),
         detected_distance_m=np.asarray(detected_distance_m, dtype=np.float64),
         candidate_time_s=np.asarray(candidate_time_s, dtype=np.float64),
@@ -941,7 +941,7 @@ def _visible_distance_values_in_x_range(
 
 
 def visible_signal_y_range(
-    series: PeakDistanceSignalSeries,
+    series: DetectionSignalSeries,
     *,
     x_min_s: float,
     x_max_s: float,
@@ -956,7 +956,7 @@ def visible_signal_y_range(
 
 
 def visible_signal_y_range_for_series(
-    series_list: tuple[PeakDistanceSignalSeries, ...],
+    series_list: tuple[DetectionSignalSeries, ...],
     *,
     x_min_s: float,
     x_max_s: float,
@@ -1377,6 +1377,62 @@ class HeatmapTruthSource:
         return frame_idx, self.frame_at_index(frame_idx)
 
 
+def _build_detection_ratio_lut() -> np.ndarray:
+    """Build a 256-entry uint8 RGB LUT: Blues_r below ratio=1.0, YlOrRd above.
+
+    Index 0 = ratio 0.0, index 128 = ratio 1.0 (threshold), index 255 = ratio ~2.0+.
+    The warm half samples YlOrRd only up to 0.60 (yellow→orange) to avoid the dark-red tail.
+    Returns shape (256, 3) uint8.
+    """
+    import matplotlib.pyplot as plt
+
+    n = 256
+    half = n // 2
+    cool = plt.get_cmap("Blues_r")(np.linspace(0.15, 0.85, half))[:, :3]
+    warm = plt.get_cmap("YlOrRd")(np.linspace(0.05, 0.45, n - half))[:, :3]
+    colors = np.vstack((cool, warm))
+    return (colors * 255).clip(0, 255).astype(np.uint8)
+
+
+# Module-level LUT — built once on first use.
+_DETECTION_RATIO_LUT: np.ndarray | None = None
+
+
+def _get_detection_ratio_lut() -> np.ndarray:
+    global _DETECTION_RATIO_LUT
+    if _DETECTION_RATIO_LUT is None:
+        _DETECTION_RATIO_LUT = _build_detection_ratio_lut()
+    return _DETECTION_RATIO_LUT
+
+
+def detection_ratio_to_rgb(
+    detection_ratio: np.ndarray,
+    *,
+    ratio_max: float = 2.0,
+) -> np.ndarray:
+    """Map a 1-D detection ratio array to RGB uint8 pixels.
+
+    Values at 0.0 → deep blue, at 1.0 → transition, at ratio_max+ → bright yellow.
+    Returns shape (n, 3) uint8.
+    """
+    lut = _get_detection_ratio_lut()
+    clipped = np.clip(detection_ratio / max(ratio_max, 1e-12), 0.0, 1.0)
+    indices = (clipped * 255).astype(np.intp)
+    return lut[indices]
+
+
+def detection_ratio_strip_rgb(
+    detection_ratio: np.ndarray,
+    width: int,
+) -> np.ndarray:
+    """Return a (1, width, 3) uint8 row mapping detection_ratio bins across width pixels."""
+    n_bins = len(detection_ratio)
+    bin_colors = detection_ratio_to_rgb(detection_ratio)  # (n_bins, 3)
+    col_indices = (np.arange(width) * n_bins / max(width, 1)).astype(np.intp)
+    col_indices = np.clip(col_indices, 0, n_bins - 1)
+    return bin_colors[col_indices][np.newaxis, :, :]  # (1, width, 3)
+
+
 class HeatmapPlotRenderer:
     """Reusable Matplotlib-backed heatmap plot renderer with axes."""
 
@@ -1391,6 +1447,8 @@ class HeatmapPlotRenderer:
     _DEFAULT_SOURCE_TOP_MARGIN_PX = 35.0
     _MIN_PLOT_BODY_SOURCE_WIDTH_PX = 32.0
     _MIN_PLOT_BODY_SOURCE_HEIGHT_PX = 32.0
+
+    _STRIP_HEIGHT_RATIO = 0.08  # fraction of total figure height for the detection strip
 
     def __init__(
         self,
@@ -1420,11 +1478,14 @@ class HeatmapPlotRenderer:
             float(axes.velocities_m_s[0] - 0.5 * axes.velocity_resolution),
             float(axes.velocities_m_s[-1] + 0.5 * axes.velocity_resolution),
         )
+        self._distances_m = axes.distances_m
 
         self._figure: Figure | None = None
         self._canvas: FigureCanvasAgg | None = None
         self._ax = None
+        self._strip_ax = None
         self._image = None
+        self._strip_mesh = None
         self._peak_artists: list[object] = []
         self._output_size = (0, 0)
         self._presentation: OverlayPlotPresentation | None = None
@@ -1524,6 +1585,7 @@ class HeatmapPlotRenderer:
         source_size: tuple[int, int] | None = None,
         peak_distance_m: float | None = None,
         zero_velocity_m_s: float | None = None,
+        detection_ratio: np.ndarray | None = None,
     ) -> np.ndarray:
         presentation = self.presentation_for(output_size=output_size, source_size=source_size)
         if output_size != self._output_size or presentation != self._presentation:
@@ -1551,6 +1613,7 @@ class HeatmapPlotRenderer:
             resolved_max = self.heatmap_source.color_min + 1e-12
         self._image.set_clim(self.heatmap_source.color_min, resolved_max)
         self._draw_peak_marker(peak_distance_m, zero_velocity_m_s)
+        self._draw_detection_strip(detection_ratio)
 
         self._canvas.draw()
         width, height = self._canvas.get_width_height()
@@ -1562,6 +1625,8 @@ class HeatmapPlotRenderer:
         output_size: tuple[int, int],
         presentation: OverlayPlotPresentation | None = None,
     ) -> None:
+        import matplotlib.gridspec as mgridspec
+
         if presentation is None:
             presentation = self.presentation_for(output_size=output_size)
         width, height = presentation.render_size
@@ -1570,7 +1635,24 @@ class HeatmapPlotRenderer:
         dpi = 100.0
         figure = Figure(figsize=(width / dpi, height / dpi), dpi=dpi)
         canvas = FigureCanvasAgg(figure)
-        ax = figure.add_subplot(111)
+
+        strip_ratio = self._STRIP_HEIGHT_RATIO
+        heatmap_ratio = 1.0 - strip_ratio
+        gs = mgridspec.GridSpec(
+            2, 1,
+            figure=figure,
+            height_ratios=[strip_ratio, heatmap_ratio],
+            hspace=0.0,
+        )
+        strip_ax = figure.add_subplot(gs[0])
+        ax = figure.add_subplot(gs[1], sharex=strip_ax)
+
+        strip_ax.set_yticks([])
+        strip_ax.set_xticks([])
+        for spine in strip_ax.spines.values():
+            spine.set_visible(False)
+        strip_ax.set_facecolor("#1a1a2e")
+
         initial = np.zeros((16, 16), dtype=np.float32)
         image = ax.imshow(
             initial,
@@ -1598,18 +1680,69 @@ class HeatmapPlotRenderer:
         )
         for spine in ax.spines.values():
             spine.set_linewidth(presentation.axis_line_width_pt)
+
         figure.subplots_adjust(
             left=presentation.left_margin,
             right=presentation.right_margin,
             bottom=presentation.bottom_margin,
             top=presentation.top_margin,
+            hspace=0.02,
         )
 
         self._figure = figure
         self._canvas = canvas
         self._ax = ax
+        self._strip_ax = strip_ax
         self._image = image
+        self._strip_mesh = None
         self._peak_artists = []
+
+    @staticmethod
+    def _detection_ratio_colormap():
+        """Return the shared threshold-split colormap as a matplotlib ListedColormap."""
+        import matplotlib.colors as mcolors
+
+        lut = _get_detection_ratio_lut()  # (256, 3) uint8
+        colors_f = lut.astype(np.float64) / 255.0
+        # Append alpha=1 column so ListedColormap receives RGBA.
+        rgba = np.hstack([colors_f, np.ones((len(colors_f), 1))])
+        return mcolors.ListedColormap(rgba, name="detection_ratio_split")
+
+    def _draw_detection_strip(self, detection_ratio: np.ndarray | None) -> None:
+        if self._strip_ax is None:
+            return
+        if self._strip_mesh is not None:
+            self._strip_mesh.remove()
+            self._strip_mesh = None
+
+        self._strip_ax.set_facecolor("#1a1a2e")
+        if detection_ratio is None or len(detection_ratio) == 0:
+            return
+
+        distances = self._distances_m
+        if len(distances) != len(detection_ratio):
+            return
+
+        dist_step = float(np.median(np.diff(distances))) if len(distances) > 1 else 1.0
+        x_edges = np.concatenate([
+            distances - 0.5 * dist_step,
+            [distances[-1] + 0.5 * dist_step],
+        ])
+        y_edges = np.array([0.0, 1.0])
+        ratio_row = detection_ratio[np.newaxis, :]
+
+        cmap = self._detection_ratio_colormap()
+        import matplotlib.colors as mcolors
+        norm = mcolors.TwoSlopeNorm(vcenter=1.0, vmin=min(0.0, float(ratio_row.min())), vmax=max(2.0, float(ratio_row.max())))
+        mesh = self._strip_ax.pcolormesh(
+            x_edges, y_edges, ratio_row,
+            cmap=cmap,
+            norm=norm,
+            shading="flat",
+        )
+        self._strip_mesh = mesh
+        self._strip_ax.set_xlim(self.extent[0], self.extent[1])
+        self._strip_ax.set_ylim(0.0, 1.0)
 
     def _clear_peak_artists(self) -> None:
         if self._ax is None:

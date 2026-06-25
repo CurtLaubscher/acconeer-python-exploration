@@ -6,7 +6,7 @@ Shared by the standalone CLI exporter and the heatmap alignment GUI importer.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
@@ -32,12 +32,19 @@ PEAK_DISTANCE_VERSION = 1
 
 PEAK_EXTRACTION_METHOD_SUM_VELOCITY = "sum_velocity"
 PEAK_EXTRACTION_METHOD_ZERO_VELOCITY_SLICE = "zero_velocity_slice"
+PEAK_EXTRACTION_METHOD_DISTANCE_NORMALIZED = "distance_normalized"
+
+DEFAULT_DIST_NORM_THRESHOLD_MAX = 1250.0
+DEFAULT_DIST_NORM_THRESHOLD_MIN = 300.0
+DEFAULT_DIST_NORM_REFERENCE_DISTANCE_M = 0.700
 
 ALGORITHM_LABEL_SUM_VELOCITY = "sum v"
 ALGORITHM_LABEL_ZERO_VELOCITY_SLICE = "v0 slice"
+ALGORITHM_LABEL_DISTANCE_NORMALIZED = "dist normalized"
 PEAK_ALGORITHM_REGISTRY = {
     PEAK_EXTRACTION_METHOD_SUM_VELOCITY: ALGORITHM_LABEL_SUM_VELOCITY,
     PEAK_EXTRACTION_METHOD_ZERO_VELOCITY_SLICE: ALGORITHM_LABEL_ZERO_VELOCITY_SLICE,
+    PEAK_EXTRACTION_METHOD_DISTANCE_NORMALIZED: ALGORITHM_LABEL_DISTANCE_NORMALIZED,
 }
 
 STATUS_DETECTED: Literal["detected"] = "detected"
@@ -53,8 +60,8 @@ REDUCED_PEAK_DISTANCE_CSV_COLUMNS: tuple[str, ...] = (
     "time_s",
     "absolute_time",
     "status",
-    "peak_distance_m",
-    "candidate_peak_distance_m",
+    "target_distance_m",
+    "candidate_distance_m",
     "peak_strength",
 )
 
@@ -78,20 +85,21 @@ class ZeroVelocityBin:
     velocity_m_s: float
 
 
-@dataclass(frozen=True)
-class FramePeakMeasurement:
+@dataclass
+class FrameDetectionMeasurement:
     frame_index: int
     source_tick: int
     time_s: float
     absolute_time: str | None
     status: str
-    peak_distance_m: float | None
-    candidate_peak_distance_m: float
+    target_distance_m: float | None
+    candidate_distance_m: float
     peak_strength: float
+    detection_ratio: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.float64))
 
 
 @dataclass(frozen=True)
-class PeakDistanceMetadata:
+class DetectionMetadata:
     source_path: str
     source_name: str
     session_index: int
@@ -109,16 +117,16 @@ class PeakDistanceMetadata:
 
 
 @dataclass(frozen=True)
-class PeakDistanceExportResult:
-    metadata: PeakDistanceMetadata
-    measurements: tuple[FramePeakMeasurement, ...]
+class DetectionExportResult:
+    metadata: DetectionMetadata
+    measurements: tuple[FrameDetectionMeasurement, ...]
 
 
 @dataclass(frozen=True)
 class LoadedPeakDistanceDatasource:
     path: Path
-    metadata: PeakDistanceMetadata
-    measurements: tuple[FramePeakMeasurement, ...]
+    metadata: DetectionMetadata
+    measurements: tuple[FrameDetectionMeasurement, ...]
 
 
 @dataclass
@@ -178,29 +186,31 @@ def zero_velocity_bin_index(velocities_m_s: np.ndarray) -> ZeroVelocityBin:
     return ZeroVelocityBin(bin_index=bin_index, velocity_m_s=float(velocities_m_s[bin_index]))
 
 
-def _strongest_peak_from_distance_profile(
-    profile: np.ndarray,
+def _strongest_peak_from_ratio_profile(
+    ratio_profile: np.ndarray,
     distances_m: np.ndarray,
-    *,
-    threshold: float,
-) -> tuple[str, float, float | None, float]:
-    if profile.ndim != 1:
-        msg = f"Expected 1-D distance profile, got shape {profile.shape!r}."
+) -> tuple[str, float, float | None, float, np.ndarray]:
+    """Detect the strongest peak from a pre-normalized ratio profile (threshold=1.0).
+
+    Returns (status, candidate_distance_m, target_distance_m, peak_ratio, ratio_profile).
+    """
+    if ratio_profile.ndim != 1:
+        msg = f"Expected 1-D distance profile, got shape {ratio_profile.shape!r}."
         raise ValueError(msg)
-    if len(profile) != len(distances_m):
+    if len(ratio_profile) != len(distances_m):
         msg = (
-            f"Distance profile length {len(profile)} does not match "
+            f"Distance profile length {len(ratio_profile)} does not match "
             f"distance axis length {len(distances_m)}."
         )
         raise ValueError(msg)
 
-    peak_bin = int(np.argmax(profile))
-    peak_strength = float(profile[peak_bin])
-    candidate_peak_distance_m = float(distances_m[peak_bin])
-    if peak_strength <= threshold:
-        return STATUS_NO_DETECTION, candidate_peak_distance_m, None, peak_strength
+    peak_bin = int(np.argmax(ratio_profile))
+    peak_ratio = float(ratio_profile[peak_bin])
+    candidate_distance_m = float(distances_m[peak_bin])
+    if peak_ratio <= 1.0:
+        return STATUS_NO_DETECTION, candidate_distance_m, None, peak_ratio, ratio_profile
 
-    return STATUS_DETECTED, candidate_peak_distance_m, candidate_peak_distance_m, peak_strength
+    return STATUS_DETECTED, candidate_distance_m, candidate_distance_m, peak_ratio, ratio_profile
 
 
 def strongest_peak_after_sum_over_velocity(
@@ -208,7 +218,7 @@ def strongest_peak_after_sum_over_velocity(
     distances_m: np.ndarray,
     *,
     threshold: float,
-) -> tuple[str, float, float | None, float]:
+) -> tuple[str, float, float | None, float, np.ndarray]:
     if dvm.ndim != 2:
         msg = f"Expected 2-D distance/velocity map, got shape {dvm.shape!r}."
         raise ValueError(msg)
@@ -221,11 +231,8 @@ def strongest_peak_after_sum_over_velocity(
         raise ValueError(msg)
 
     collapsed_profile = np.sum(dvm, axis=0)
-    return _strongest_peak_from_distance_profile(
-        collapsed_profile,
-        distances_m,
-        threshold=threshold,
-    )
+    ratio_profile = collapsed_profile / max(threshold, 1e-12)
+    return _strongest_peak_from_ratio_profile(ratio_profile, distances_m)
 
 
 def strongest_peak_in_zero_velocity_slice(
@@ -234,7 +241,7 @@ def strongest_peak_in_zero_velocity_slice(
     *,
     zero_velocity_bin: int,
     threshold: float,
-) -> tuple[str, float, float | None, float]:
+) -> tuple[str, float, float | None, float, np.ndarray]:
     if dvm.ndim != 2:
         msg = f"Expected 2-D distance/velocity map, got shape {dvm.shape!r}."
         raise ValueError(msg)
@@ -245,11 +252,36 @@ def strongest_peak_in_zero_velocity_slice(
         raise ValueError(msg)
 
     slice_strengths = dvm[zero_velocity_bin, :]
-    return _strongest_peak_from_distance_profile(
-        slice_strengths,
-        distances_m,
-        threshold=threshold,
+    ratio_profile = slice_strengths / max(threshold, 1e-12)
+    return _strongest_peak_from_ratio_profile(ratio_profile, distances_m)
+
+
+def strongest_peak_distance_normalized(
+    dvm: np.ndarray,
+    distances_m: np.ndarray,
+    *,
+    threshold_max: float,
+    threshold_min: float,
+    reference_distance_m: float,
+) -> tuple[str, float, float | None, float, np.ndarray]:
+    if dvm.ndim != 2:
+        msg = f"Expected 2-D distance/velocity map, got shape {dvm.shape!r}."
+        raise ValueError(msg)
+    if dvm.shape[1] != len(distances_m):
+        msg = (
+            f"Distance axis length {len(distances_m)} does not match "
+            f"DVM column count {dvm.shape[1]}."
+        )
+        raise ValueError(msg)
+
+    collapsed_profile = np.sum(dvm, axis=0)
+    ref = max(reference_distance_m, 1e-12)
+    threshold_curve = np.maximum(
+        threshold_max * (1.0 - distances_m / ref),
+        threshold_min,
     )
+    ratio_profile = collapsed_profile / np.maximum(threshold_curve, 1e-12)
+    return _strongest_peak_from_ratio_profile(ratio_profile, distances_m)
 
 
 def _absolute_time_value(record_timestamp: str, elapsed_s: float) -> str | None:
@@ -267,7 +299,10 @@ def _extract_strongest_peak(
     peak_extraction_method: str,
     zero_velocity_bin: int,
     threshold: float,
-) -> tuple[str, float, float | None, float]:
+    threshold_max: float = DEFAULT_DIST_NORM_THRESHOLD_MAX,
+    threshold_min: float = DEFAULT_DIST_NORM_THRESHOLD_MIN,
+    reference_distance_m: float = DEFAULT_DIST_NORM_REFERENCE_DISTANCE_M,
+) -> tuple[str, float, float | None, float, np.ndarray]:
     if peak_extraction_method == PEAK_EXTRACTION_METHOD_SUM_VELOCITY:
         return strongest_peak_after_sum_over_velocity(
             dvm,
@@ -281,6 +316,14 @@ def _extract_strongest_peak(
             zero_velocity_bin=zero_velocity_bin,
             threshold=threshold,
         )
+    if peak_extraction_method == PEAK_EXTRACTION_METHOD_DISTANCE_NORMALIZED:
+        return strongest_peak_distance_normalized(
+            dvm,
+            distances_m,
+            threshold_max=threshold_max,
+            threshold_min=threshold_min,
+            reference_distance_m=reference_distance_m,
+        )
     msg = f"Unsupported peak extraction method {peak_extraction_method!r}."
     raise ValueError(msg)
 
@@ -293,20 +336,26 @@ def analyze_heatmap_record(
     frame_indices: list[int],
     threshold: float,
     peak_extraction_method: str = PEAK_EXTRACTION_METHOD_SUM_VELOCITY,
-) -> PeakDistanceExportResult:
+    threshold_max: float = DEFAULT_DIST_NORM_THRESHOLD_MAX,
+    threshold_min: float = DEFAULT_DIST_NORM_THRESHOLD_MIN,
+    reference_distance_m: float = DEFAULT_DIST_NORM_REFERENCE_DISTANCE_M,
+) -> DetectionExportResult:
     subsweep = select_subsweep(heatmap_record, subsweep_idx)
     axes = heatmap_axes(heatmap_record.metadata, heatmap_record.sensor_config, subsweep)
     zero_velocity = zero_velocity_bin_index(axes.velocities_m_s)
 
-    measurements: list[FramePeakMeasurement] = []
+    measurements: list[FrameDetectionMeasurement] = []
     for frame_index in frame_indices:
         dvm = distance_velocity_map(heatmap_record.results[frame_index].subframes[subsweep_idx])
-        status, candidate_peak_distance_m, peak_distance_m, peak_strength = _extract_strongest_peak(
+        status, candidate_distance_m, target_distance_m, peak_strength, detection_ratio = _extract_strongest_peak(
             dvm,
             axes.distances_m,
             peak_extraction_method=peak_extraction_method,
             zero_velocity_bin=zero_velocity.bin_index,
             threshold=threshold,
+            threshold_max=threshold_max,
+            threshold_min=threshold_min,
+            reference_distance_m=reference_distance_m,
         )
         elapsed_s = elapsed_time_seconds(
             heatmap_record.ticks,
@@ -314,7 +363,7 @@ def analyze_heatmap_record(
             frame_index,
         )
         measurements.append(
-            FramePeakMeasurement(
+            FrameDetectionMeasurement(
                 frame_index=frame_index,
                 source_tick=int(heatmap_record.ticks[frame_index]),
                 time_s=elapsed_s,
@@ -323,14 +372,15 @@ def analyze_heatmap_record(
                     elapsed_s,
                 ),
                 status=status,
-                peak_distance_m=peak_distance_m,
-                candidate_peak_distance_m=candidate_peak_distance_m,
+                target_distance_m=target_distance_m,
+                candidate_distance_m=candidate_distance_m,
                 peak_strength=peak_strength,
+                detection_ratio=detection_ratio,
             )
         )
 
     resolved_h5_path = h5_path.resolve()
-    metadata = PeakDistanceMetadata(
+    metadata = DetectionMetadata(
         source_path=str(resolved_h5_path),
         source_name=resolved_h5_path.name,
         session_index=heatmap_record.session_idx,
@@ -346,10 +396,10 @@ def analyze_heatmap_record(
         zero_velocity_bin_index=zero_velocity.bin_index,
         zero_velocity_m_s=zero_velocity.velocity_m_s,
     )
-    return PeakDistanceExportResult(metadata=metadata, measurements=tuple(measurements))
+    return DetectionExportResult(metadata=metadata, measurements=tuple(measurements))
 
 
-def export_peak_distances(config: PeakDistanceExportConfig) -> PeakDistanceExportResult:
+def export_peak_distances(config: PeakDistanceExportConfig) -> DetectionExportResult:
     heatmap_record = load_heatmap_record(
         config.h5_path,
         config.session_idx,
@@ -374,7 +424,7 @@ def export_peak_distances(config: PeakDistanceExportConfig) -> PeakDistanceExpor
         heatmap_record.close()
 
 
-def peak_distance_document(result: PeakDistanceExportResult) -> dict[str, Any]:
+def peak_distance_document(result: DetectionExportResult) -> dict[str, Any]:
     return {
         "format": PEAK_DISTANCE_FORMAT,
         "version": PEAK_DISTANCE_VERSION,
@@ -401,8 +451,8 @@ def peak_distance_document(result: PeakDistanceExportResult) -> dict[str, Any]:
                 "time_s": measurement.time_s,
                 "absolute_time": measurement.absolute_time,
                 "status": measurement.status,
-                "peak_distance_m": measurement.peak_distance_m,
-                "candidate_peak_distance_m": measurement.candidate_peak_distance_m,
+                "peak_distance_m": measurement.target_distance_m,
+                "candidate_peak_distance_m": measurement.candidate_distance_m,
                 "peak_strength": measurement.peak_strength,
             }
             for measurement in result.measurements
@@ -410,7 +460,7 @@ def peak_distance_document(result: PeakDistanceExportResult) -> dict[str, Any]:
     }
 
 
-def write_peak_distance_json(result: PeakDistanceExportResult, output_path: Path) -> None:
+def write_peak_distance_json(result: DetectionExportResult, output_path: Path) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         output_path.write_text(
@@ -422,7 +472,7 @@ def write_peak_distance_json(result: PeakDistanceExportResult, output_path: Path
         raise OSError(msg) from exc
 
 
-def _metadata_from_dict(payload: dict[str, Any]) -> PeakDistanceMetadata:
+def _metadata_from_dict(payload: dict[str, Any]) -> DetectionMetadata:
     required_keys = (
         "source_path",
         "source_name",
@@ -446,7 +496,7 @@ def _metadata_from_dict(payload: dict[str, Any]) -> PeakDistanceMetadata:
         "peak_extraction_method",
         PEAK_EXTRACTION_METHOD_SUM_VELOCITY,
     )
-    return PeakDistanceMetadata(
+    return DetectionMetadata(
         source_path=str(payload["source_path"]),
         source_name=str(payload["source_name"]),
         session_index=int(payload["session_index"]),
@@ -464,7 +514,7 @@ def _metadata_from_dict(payload: dict[str, Any]) -> PeakDistanceMetadata:
     )
 
 
-def _measurement_from_dict(payload: dict[str, Any]) -> FramePeakMeasurement:
+def _measurement_from_dict(payload: dict[str, Any]) -> FrameDetectionMeasurement:
     required_keys = (
         "frame_index",
         "source_tick",
@@ -480,16 +530,16 @@ def _measurement_from_dict(payload: dict[str, Any]) -> FramePeakMeasurement:
         msg = f"A measurement object is missing required keys: {', '.join(missing)}."
         raise _invalid_peak_distance_json_error(msg)
 
-    peak_distance_m = payload["peak_distance_m"]
+    target_distance_m = payload["peak_distance_m"]
     absolute_time = payload["absolute_time"]
-    return FramePeakMeasurement(
+    return FrameDetectionMeasurement(
         frame_index=int(payload["frame_index"]),
         source_tick=int(payload["source_tick"]),
         time_s=float(payload["time_s"]),
         absolute_time=None if absolute_time is None else str(absolute_time),
         status=str(payload["status"]),
-        peak_distance_m=None if peak_distance_m is None else float(peak_distance_m),
-        candidate_peak_distance_m=float(payload["candidate_peak_distance_m"]),
+        target_distance_m=None if target_distance_m is None else float(target_distance_m),
+        candidate_distance_m=float(payload["candidate_peak_distance_m"]),
         peak_strength=float(payload["peak_strength"]),
     )
 
@@ -548,7 +598,7 @@ def load_peak_distance_json(json_path: Path) -> LoadedPeakDistanceDatasource:
     )
 
 
-def reduced_measurements_to_dataframe(result: PeakDistanceExportResult) -> pd.DataFrame:
+def reduced_measurements_to_dataframe(result: DetectionExportResult) -> pd.DataFrame:
     rows: list[dict[str, object]] = []
     for measurement in result.measurements:
         rows.append(
@@ -558,15 +608,15 @@ def reduced_measurements_to_dataframe(result: PeakDistanceExportResult) -> pd.Da
                 "time_s": measurement.time_s,
                 "absolute_time": measurement.absolute_time or "",
                 "status": measurement.status,
-                "peak_distance_m": measurement.peak_distance_m,
-                "candidate_peak_distance_m": measurement.candidate_peak_distance_m,
+                "target_distance_m": measurement.target_distance_m,
+                "candidate_distance_m": measurement.candidate_distance_m,
                 "peak_strength": measurement.peak_strength,
             }
         )
     return pd.DataFrame(rows, columns=list(REDUCED_PEAK_DISTANCE_CSV_COLUMNS))
 
 
-def write_peak_distance_csv(result: PeakDistanceExportResult, output_path: Path) -> None:
+def write_peak_distance_csv(result: DetectionExportResult, output_path: Path) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         reduced_measurements_to_dataframe(result).to_csv(output_path, index=False)
@@ -639,7 +689,7 @@ def validate_peak_distance_import(
 def measurement_for_frame(
     datasource: LoadedPeakDistanceDatasource,
     frame_index: int,
-) -> FramePeakMeasurement | None:
+) -> FrameDetectionMeasurement | None:
     for measurement in datasource.measurements:
         if measurement.frame_index == frame_index:
             return measurement
