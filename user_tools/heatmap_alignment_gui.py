@@ -3496,8 +3496,18 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         try:
             export_rect = self._scaled_export_overlay_rect(original=True)
             export_fps = max(self.session.camera_track.fps, self.session.heatmap_track.fps, 1.0)
+            overlap_start_s = max(0.0, -self.session.timeline.offset_s)
+            overlap_end_s = min(
+                self.session.heatmap_track.duration_s,
+                self.session.camera_track.duration_s - self.session.timeline.offset_s,
+            )
+            if overlap_end_s <= overlap_start_s:
+                raise RuntimeError(
+                    "The H5 recording and video do not overlap in time. "
+                    "Adjust the alignment offset before exporting."
+                )
             output_frame_count = max(
-                1, int(math.ceil(self.session.heatmap_track.duration_s * export_fps))
+                1, int(math.ceil((overlap_end_s - overlap_start_s) * export_fps))
             )
             writer = cv2.VideoWriter(
                 str(output_path),
@@ -3523,7 +3533,9 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
                 for frame_idx in range(output_frame_count):
                     if progress.wasCanceled():
                         raise RuntimeError("Export cancelled.")
-                    h5_time_s = min(frame_idx / export_fps, self.session.heatmap_track.duration_s)
+                    h5_time_s = min(
+                        overlap_start_s + frame_idx / export_fps, overlap_end_s
+                    )
                     camera_time_s = h5_time_s + self.session.timeline.offset_s
                     if camera_time_s < 0.0:
                         camera_frame = first_camera_frame
