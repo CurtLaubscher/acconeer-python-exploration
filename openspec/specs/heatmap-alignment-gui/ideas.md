@@ -156,6 +156,7 @@ Possible directions:
 The current Close Session action asks for confirmation even when the workbench is already an untitled empty session. A future polish pass should detect this no-op state and either disable the action or close/reset silently without showing "Close the current session and return to an untitled empty workbench?".
 
 Possible directions:
+- **Save Session As default path:** the Save Session As file dialog should pre-populate the filename with the current session's filename and open in the current session's directory, so renaming or making a copy starts from the right place rather than an arbitrary default location.
 - **Autosave / crash recovery:** periodically or on meaningful edits, write a recovery copy of the alignment session JSON (and clearly distinguish it from explicit Save). On next launch, offer to restore unsaved work. Scope to session fields the tool already persists; unsaved generated peak JSON remains a separate concern (see Resources ideas).
 - **Copy settings from another session:** an explicit action to import selected fields from a saved session JSON without replacing the whole workspace — e.g. viewport corners and output size, viewport enhancement toggles/levels, export overlay geometry, color limits, or timeline offsets. Useful when the camera rig is fixed across trials. Require a clear picker for which fields to copy and whether to mark the current session dirty.
 
