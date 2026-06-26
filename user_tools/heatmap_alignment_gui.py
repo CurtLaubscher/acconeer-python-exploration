@@ -26,12 +26,12 @@ import argparse
 import math
 import os
 import sys
+import threading
 import time
-import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator, Literal
+from typing import Any, Iterator, Literal
 
 import cv2
 import numpy as np
@@ -44,9 +44,7 @@ from heatmap_alignment_core import (
     SIGNAL_PLOT_NO_DETECTION_ALPHA,
     SIGNAL_PLOT_PRIMARY_SEGMENT_ALPHA,
     TIMELINE_PLAYHEAD_COLOR_HEX,
-    AlignmentResourceRuntime,
     AlignmentSession,
-    CameraSlotIdentity,
     CameraTrack,
     CameraVideoSource,
     ExportOverlaySettings,
@@ -57,41 +55,31 @@ from heatmap_alignment_core import (
     Leg2MatImportError,
     Leg2UltrasonicSignalSeries,
     LoadedLeg2UltrasonicDatasource,
-    LoadedPeakDistanceDatasource,
-    PeakDistanceSignalSeries,
-    ReconcileAction,
-    ResourceAction,
-    ResourceJobPresentation,
-    ResourceKind,
-    ResourceSummary,
+    DetectionSignalSeries,
     SignalPlotViewSettings,
-    SyncSlotIdentity,
     apply_viewport_visibility,
-    build_alignment_resource_summaries,
     build_leg2_ultrasonic_signal_series,
     build_peak_distance_signal_series,
     derive_signal_plot_color,
-    desired_camera_identity,
-    desired_h5_identity,
-    desired_leg2_identity,
-    desired_peak_identities,
     elide_path_middle,
     import_leg2_mat_for_heatmap,
     import_peak_distance_json_for_heatmap,
-    load_alignment_session,
-    reconcile_camera_action,
-    reconcile_h5_action,
-    reconcile_sync_slot_action,
     rectify_viewport,
-    save_alignment_session,
-    session_equivalent_for_pristine,
     scale_viewport_corners,
     TimelineH5DragSnapshot,
     apply_timeline_h5_alignment_drag,
     timeline_h5_drag_affects_alignment,
     timeline_view_bounds_s,
-    validate_alignment_session,
     visible_signal_y_range,
+    visible_signal_y_range_for_series,
+)
+from heatmap_alignment_resource_summaries import (
+    AlignmentResourceRuntime,
+    ResourceAction,
+    ResourceJobPresentation,
+    ResourceKind,
+    ResourceSummary,
+    build_alignment_resource_summaries,
 )
 from sparse_iq_heatmap_common import distance_velocity_map, heatmap_axes, select_subsweep
 from heatmap_alignment_resource_jobs import (
@@ -121,27 +109,40 @@ from sparse_iq_peak_distance_core import (
     ALGORITHM_LABEL_SUM_VELOCITY,
     ALGORITHM_LABEL_ZERO_VELOCITY_SLICE,
     DEFAULT_PEAK_THRESHOLD,
-    PEAK_ALGORITHM_REGISTRY,
     PEAK_EXTRACTION_METHOD_SUM_VELOCITY,
     PEAK_EXTRACTION_METHOD_ZERO_VELOCITY_SLICE,
     STATUS_DETECTED,
-    PeakDistanceExportResult,
     PeakDistanceJsonImportError,
-    analyze_heatmap_record,
-    annotate_heatmap_rgb_with_peak,
 )
 from heatmap_peak_distance_resource import (
-    PeakDistanceResourceState,
+    PeakSeriesResourceAdapter,
     PeakSeriesResource,
-    PEAK_SERIES_PALETTE,
     active_peak_measurements,
     active_peak_zero_velocity_m_s,
-    assign_peak_series_color,
+    build_generated_peak_series,
+    build_imported_peak_series,
     default_generated_name,
     default_imported_name,
-    generate_peak_distances_from_heatmap_record,
+    generate_detection_series_from_heatmap_record,
     peak_state_detected_counts,
-    save_peak_state_to_path,
+)
+from heatmap_leg2_resource import Leg2ResourceAdapter
+from heatmap_alignment_preview_sync import PreviewSyncPlan, run_preview_sync
+from heatmap_alignment_session_coordinator import (
+    LoadSessionPlan,
+    LoadedResourceState,
+    plan_session_reconcile,
+)
+from heatmap_alignment_session_lifecycle import (
+    SessionLifecycleState,
+    SessionPromptAction,
+    SessionTransitionGuard,
+)
+from heatmap_alignment_widgets import (
+    DetectionStripWidget,
+    DoubleRangeSlider,
+    ImagePreview,
+    rgb_to_qpixmap,
 )
 
 from PySide6 import QtCore, QtGui, QtWidgets
@@ -151,356 +152,20 @@ from PySide6.QtGui import QDesktopServices
 import pyqtgraph as pg
 
 
-RESOURCE_STATUS_LABELS = {
-    "unloaded": "Unloaded",
-    "loaded": "Loaded",
-    "missing": "Missing",
-    "invalid": "Invalid",
-    "warning": "Warning",
-}
-
-RESOURCES_DETAILS_SECTION_SPACING_PX = 6
-RESOURCES_DETAILS_PATH_BLOCK_TOP_MARGIN_PX = 6
-# Initial column widths (Interactive; user can resize; not enforced on refresh).
-RESOURCES_TABLE_RESOURCE_COLUMN_DEFAULT_WIDTH_PX = 140
-RESOURCES_TABLE_STATUS_COLUMN_DEFAULT_WIDTH_PX = 150
-
-# Multi-peak series replace the old temporary compare overlay.
-
-RESOURCE_ACTION_LABELS: dict[ResourceAction, str] = {
-    "load": "&Load...",
-    "replace": "&Replace...",
-    "unload": "&Unload",
-    "reload": "&Reload",
-    "reveal": "Show in &File Manager",
-    "inspect": "Inspect &Warnings",
-    "cancel": "&Cancel Load",
-    "generate": "&Generate",
-    "save": "&Save Peaks",
-    "save_as": "Save Peaks &As...",
-}
-
-RESOURCE_JOB_STATUS_LABELS = {
-    "idle": "Unloaded",
-    "pending": "Loading",
-    "loading": "Loading",
-    "building": "Building",
-    "waiting": "Waiting",
-    "cancelling": "Cancelling",
-    "failed": "Failed",
-    "superseded": "Superseded",
-}
-
-
-def rgb_to_qpixmap(frame_rgb: np.ndarray) -> QtGui.QPixmap:
-    if frame_rgb.ndim != 3 or frame_rgb.shape[2] != 3:
-        raise ValueError("Expected RGB frame with shape (H, W, 3).")
-    height, width, _ = frame_rgb.shape
-    bytes_per_line = 3 * width
-    image = QtGui.QImage(
-        frame_rgb.data,
-        width,
-        height,
-        bytes_per_line,
-        QtGui.QImage.Format.Format_RGB888,
-    )
-    return QtGui.QPixmap.fromImage(image.copy())
-
-
-class ImagePreview(QtWidgets.QLabel):
-    resized = QtCore.Signal()
-
-    def __init__(self, title: str, parent: QtWidgets.QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        self.setMinimumSize(320, 200)
-        self.setSizePolicy(
-            QtWidgets.QSizePolicy.Policy.Expanding,
-            QtWidgets.QSizePolicy.Policy.Expanding,
-        )
-        self.setFrameShape(QtWidgets.QFrame.Shape.Box)
-        self.setStyleSheet("background: #0f1720; color: #d7dde6;")
-        self.setText(title)
-        self._title = title
-        self._pixmap: QtGui.QPixmap | None = None
-        self._loading_overlay_active = False
-        self._loading_overlay_message = ""
-        self._dim_content = False
-
-    def set_loading_overlay(
-        self,
-        active: bool,
-        message: str = "",
-        *,
-        dim_content: bool = True,
-    ) -> None:
-        self._loading_overlay_active = active
-        self._loading_overlay_message = message
-        self._dim_content = dim_content
-        if active and self._pixmap is None:
-            self.clear()
-        elif not active and self._pixmap is None:
-            self.setText(self._title)
-        self.update()
-
-    def set_frame(self, frame_rgb: np.ndarray | None) -> None:
-        if frame_rgb is None:
-            self._pixmap = None
-            if not self._loading_overlay_active:
-                self.setText(self._title)
-            else:
-                self.clear()
-            self.update()
-            return
-        self.clear()
-        self._pixmap = rgb_to_qpixmap(frame_rgb)
-        self.update()
-
-    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
-        super().resizeEvent(event)
-        self.resized.emit()
-        self.update()
-
-    def rendered_image_rect(self) -> QtCore.QRect:
-        return self.contentsRect()
-
-    def paintEvent(self, event: QtGui.QPaintEvent) -> None:
-        contents_rect = self.contentsRect()
-        if self._pixmap is None and self._loading_overlay_active:
-            painter = QtGui.QPainter(self)
-            try:
-                painter.fillRect(contents_rect, QtGui.QColor("#0f1720"))
-                painter.fillRect(
-                    contents_rect,
-                    QtGui.QColor(15, 23, 32, 180),
-                )
-                painter.setPen(QtGui.QColor("#d7dde6"))
-                painter.drawText(
-                    contents_rect,
-                    int(QtCore.Qt.AlignmentFlag.AlignCenter),
-                    self._loading_overlay_message or "Loading...",
-                )
-            finally:
-                painter.end()
-            return
-        super().paintEvent(event)
-        if self._pixmap is None and not self._loading_overlay_active:
-            return
-        painter = QtGui.QPainter(self)
-        try:
-            if self._pixmap is not None:
-                scaled = self._pixmap.scaled(
-                    contents_rect.size(),
-                    QtCore.Qt.AspectRatioMode.IgnoreAspectRatio,
-                    QtCore.Qt.TransformationMode.FastTransformation,
-                )
-                if self._loading_overlay_active and self._dim_content:
-                    painter.setOpacity(0.35)
-                painter.drawPixmap(contents_rect.topLeft(), scaled)
-                painter.setOpacity(1.0)
-            if self._loading_overlay_active:
-                painter.fillRect(
-                    contents_rect,
-                    QtGui.QColor(15, 23, 32, 180),
-                )
-                painter.setPen(QtGui.QColor("#d7dde6"))
-                painter.drawText(
-                    contents_rect,
-                    int(QtCore.Qt.AlignmentFlag.AlignCenter),
-                    self._loading_overlay_message or "Loading...",
-                )
-        finally:
-            painter.end()
-
-
-class DoubleRangeSlider(QtWidgets.QWidget):
-    values_changed = QtCore.Signal(float, float)
-
-    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.setMinimumHeight(26)
-        self.setMinimumWidth(140)
-        self._minimum = 0.0
-        self._maximum = 1.0
-        self._lower = 0.0
-        self._upper = 1.0
-        self._active_handle: Literal["lower", "upper"] | None = None
-        self._handle_radius = 7.0
-
-    def set_values(self, lower: float, upper: float) -> None:
-        lower = float(np.clip(lower, self._minimum, self._maximum))
-        upper = float(np.clip(upper, self._minimum, self._maximum))
-        if lower > upper:
-            lower, upper = upper, lower
-        self._lower = lower
-        self._upper = upper
-        self.update()
-
-    def values(self) -> tuple[float, float]:
-        return self._lower, self._upper
-
-    def paintEvent(self, event: QtGui.QPaintEvent) -> None:
-        del event
-        painter = QtGui.QPainter(self)
-        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
-        try:
-            rect = self.contentsRect().adjusted(8, 6, -8, -6)
-            center_y = rect.center().y()
-            left_x = rect.left()
-            right_x = rect.right()
-            lower_x = self._value_to_x(self._lower, rect)
-            upper_x = self._value_to_x(self._upper, rect)
-
-            track_color = QtGui.QColor("#334155") if self.isEnabled() else QtGui.QColor("#1f2937")
-            active_color = QtGui.QColor("#38bdf8") if self.isEnabled() else QtGui.QColor("#475569")
-            handle_color = QtGui.QColor("#e2e8f0") if self.isEnabled() else QtGui.QColor("#64748b")
-
-            painter.setPen(QtGui.QPen(track_color, 3))
-            painter.drawLine(QtCore.QPointF(left_x, center_y), QtCore.QPointF(right_x, center_y))
-            painter.setPen(QtGui.QPen(active_color, 4))
-            painter.drawLine(QtCore.QPointF(lower_x, center_y), QtCore.QPointF(upper_x, center_y))
-
-            painter.setPen(QtGui.QPen(QtGui.QColor("#0f1720"), 1))
-            painter.setBrush(QtGui.QBrush(handle_color))
-            painter.drawEllipse(
-                QtCore.QPointF(lower_x, center_y), self._handle_radius, self._handle_radius
-            )
-            painter.drawEllipse(
-                QtCore.QPointF(upper_x, center_y), self._handle_radius, self._handle_radius
-            )
-        finally:
-            painter.end()
-
-    def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:
-        if not self.isEnabled():
-            return
-        rect = self.contentsRect().adjusted(8, 6, -8, -6)
-        lower_x = self._value_to_x(self._lower, rect)
-        upper_x = self._value_to_x(self._upper, rect)
-        x = event.position().x()
-        if abs(x - lower_x) <= abs(x - upper_x):
-            self._active_handle = "lower"
-        else:
-            self._active_handle = "upper"
-        self._update_active_handle(event.position().x(), rect)
-
-    def mouseMoveEvent(self, event: QtGui.QMouseEvent) -> None:
-        if not self.isEnabled() or self._active_handle is None:
-            return
-        rect = self.contentsRect().adjusted(8, 6, -8, -6)
-        self._update_active_handle(event.position().x(), rect)
-
-    def mouseReleaseEvent(self, event: QtGui.QMouseEvent) -> None:
-        del event
-        self._active_handle = None
-
-    def _update_active_handle(self, x: float, rect: QtCore.QRect) -> None:
-        value = self._x_to_value(x, rect)
-        min_gap = 1.0 / 255.0
-        if self._active_handle == "lower":
-            self._lower = min(value, self._upper - min_gap)
-        elif self._active_handle == "upper":
-            self._upper = max(value, self._lower + min_gap)
-        self.update()
-        self.values_changed.emit(self._lower, self._upper)
-
-    def _value_to_x(self, value: float, rect: QtCore.QRect) -> float:
-        span = max(self._maximum - self._minimum, 1e-6)
-        fraction = (value - self._minimum) / span
-        return rect.left() + fraction * rect.width()
-
-    def _x_to_value(self, x: float, rect: QtCore.QRect) -> float:
-        if rect.width() <= 0:
-            return self._minimum
-        fraction = np.clip((x - rect.left()) / rect.width(), 0.0, 1.0)
-        return float(self._minimum + fraction * (self._maximum - self._minimum))
-
-
-def _plot_color_with_alpha(plot_color_hex: str, alpha: int) -> str:
-    normalized = plot_color_hex.strip().lstrip("#")
-    if len(normalized) != 6:
-        raise ValueError(f"Expected #RRGGBB color, got {plot_color_hex!r}.")
-    return f"#{normalized}{alpha:02x}"
-
-
-def _make_h5_signal_plot_pens(plot_color_hex: str) -> tuple[QtGui.QPen, QtGui.QPen]:
-    """Build solid detected and lower-alpha no-detection pens (both solid lines)."""
-    detected_pen = pg.mkPen(plot_color_hex, width=2.5)
-    candidate_pen = pg.mkPen(
-        _plot_color_with_alpha(plot_color_hex, SIGNAL_PLOT_NO_DETECTION_ALPHA),
-        width=2.5,
-    )
-    return detected_pen, candidate_pen
-
-
-def _make_leg2_signal_plot_pens(plot_color_hex: str) -> tuple[QtGui.QPen, QtGui.QPen]:
-    """Build primary (ReliableFlag) and faded segment pens for Leg2 ultrasonic curves."""
-    primary_pen = pg.mkPen(
-        _plot_color_with_alpha(plot_color_hex, SIGNAL_PLOT_PRIMARY_SEGMENT_ALPHA),
-        width=2.5,
-    )
-    faded_pen = pg.mkPen(
-        _plot_color_with_alpha(plot_color_hex, SIGNAL_PLOT_NO_DETECTION_ALPHA),
-        width=2.5,
-    )
-    return primary_pen, faded_pen
-
-
-TIMELINE_LABEL_GUTTER_PX = 72
-TIMELINE_TRACK_OFFSET_LABEL_MARGIN_PX = 6.0
-TIMELINE_OFFSET_LABEL_COLOR_HEX = "#94a3b8"
-
-
-def format_track_offset_label(track_start_s: float) -> str:
-    """Format a track's aligned start time relative to the H5 reference (shared timeline)."""
-    # Negating a zero offset yields -0.0, which compares >= 0 but still formats with a minus sign.
-    if math.isclose(track_start_s, 0.0, abs_tol=1e-9):
-        return "+0.000 s"
-    if track_start_s > 0.0:
-        return f"+{track_start_s:.3f} s"
-    return f"{track_start_s:.3f} s"
-
-
-def track_offset_label_should_show(
-    plot_rect: QtCore.QRectF,
-    track_rect: QtCore.QRectF,
-    *,
-    label_width_px: float,
-    margin_px: float = TIMELINE_TRACK_OFFSET_LABEL_MARGIN_PX,
-) -> bool:
-    if track_rect.width() <= 0.0:
-        return False
-    if track_rect.right() < plot_rect.left():
-        return False
-    if track_rect.left() > plot_rect.right():
-        return False
-    label_right_px = track_rect.left() - margin_px
-    label_left_px = label_right_px - label_width_px
-    return label_left_px >= plot_rect.left()
-
-
-def track_offset_label_rect(
-    plot_rect: QtCore.QRectF,
-    track_rect: QtCore.QRectF,
-    label_width_px: float,
-    *,
-    margin_px: float = TIMELINE_TRACK_OFFSET_LABEL_MARGIN_PX,
-) -> QtCore.QRectF | None:
-    if not track_offset_label_should_show(
-        plot_rect,
-        track_rect,
-        label_width_px=label_width_px,
-        margin_px=margin_px,
-    ):
-        return None
-    label_right_px = track_rect.left() - margin_px
-    label_left_px = label_right_px - label_width_px
-    return QtCore.QRectF(
-        label_left_px,
-        track_rect.top(),
-        label_width_px,
-        track_rect.height(),
-    )
+from heatmap_alignment_dialogs import (  # noqa: F401
+    ElidedPathItemDelegate,
+    GenerateDetectionSeriesDialog,
+    HeatmapDistanceHeader,
+    RESOURCE_ACTION_LABELS,
+    RESOURCE_JOB_STATUS_LABELS,
+    RESOURCE_STATUS_LABELS,
+    RESOURCES_DETAILS_PATH_BLOCK_TOP_MARGIN_PX,
+    RESOURCES_DETAILS_SECTION_SPACING_PX,
+    RESOURCES_TABLE_RESOURCE_COLUMN_DEFAULT_WIDTH_PX,
+    RESOURCES_TABLE_STATUS_COLUMN_DEFAULT_WIDTH_PX,
+    ResourceColorSwatchDelegate,
+    ResourcesWindow,
+)
 
 
 class RecentSessionStore:
@@ -576,1864 +241,27 @@ class RecentSessionStore:
         self._settings.setValue(self.SETTINGS_KEY, paths[: self.LIMIT])
 
 
-@dataclass(frozen=True)
-class TimeAxisGeometry:
-    left_px: float
-    right_px: float
-
-
-class TimelineRangeModel(QtCore.QObject):
-    """Single source of truth for the shared visible timeline x-range."""
-
-    range_changed = QtCore.Signal(float, float)
-
-    def __init__(self, parent: QtCore.QObject | None = None) -> None:
-        super().__init__(parent)
-        self._range_start_s = 0.0
-        self._range_end_s = 1.0
-        self._camera_duration_s = 0.0
-        self._heatmap_duration_s = 0.0
-        self._camera_offset_s = 0.0
-        self._leg2_duration_s = 0.0
-        self._leg2_offset_s = 0.0
-        self._fit_padding_fraction = 0.12
-        self._freeze_depth = 0
-        self._frozen_range_start_s: float | None = None
-        self._frozen_range_end_s: float | None = None
-
-    def visible_range_s(self) -> tuple[float, float]:
-        if self._freeze_depth > 0:
-            if self._frozen_range_start_s is not None and self._frozen_range_end_s is not None:
-                return self._frozen_range_start_s, self._frozen_range_end_s
-        return self._range_start_s, self._range_end_s
-
-    @property
-    def camera_duration_s(self) -> float:
-        return self._camera_duration_s
-
-    @property
-    def heatmap_duration_s(self) -> float:
-        return self._heatmap_duration_s
-
-    @property
-    def camera_offset_s(self) -> float:
-        return self._camera_offset_s
-
-    @property
-    def leg2_duration_s(self) -> float:
-        return self._leg2_duration_s
-
-    @property
-    def leg2_offset_s(self) -> float:
-        return self._leg2_offset_s
-
-    def set_track_state(
-        self,
-        *,
-        camera_duration_s: float,
-        heatmap_duration_s: float,
-        camera_offset_s: float,
-        leg2_duration_s: float = 0.0,
-        leg2_offset_s: float = 0.0,
-    ) -> None:
-        self._camera_duration_s = max(0.0, camera_duration_s)
-        self._heatmap_duration_s = max(0.0, heatmap_duration_s)
-        self._camera_offset_s = camera_offset_s
-        self._leg2_duration_s = max(0.0, leg2_duration_s)
-        self._leg2_offset_s = leg2_offset_s
-
-    def begin_visible_range_freeze(self) -> None:
-        if self._freeze_depth == 0:
-            range_start_s, range_end_s = self.visible_range_s()
-            self._frozen_range_start_s = range_start_s
-            self._frozen_range_end_s = range_end_s
-        self._freeze_depth += 1
-
-    def end_visible_range_freeze(self, *, recompute: bool) -> None:
-        self._freeze_depth = max(0, self._freeze_depth - 1)
-        if self._freeze_depth > 0:
-            return
-        self._frozen_range_start_s = None
-        self._frozen_range_end_s = None
-        if recompute:
-            self.recompute_visible_range()
-
-    def recompute_visible_range(self) -> None:
-        if self._freeze_depth > 0:
-            return
-        self.set_visible_range(
-            *timeline_view_bounds_s(
-                heatmap_duration_s=self._heatmap_duration_s,
-                camera_duration_s=self._camera_duration_s,
-                camera_offset_s=self._camera_offset_s,
-                leg2_duration_s=self._leg2_duration_s,
-                leg2_offset_s=self._leg2_offset_s,
-                fit_padding_fraction=self._fit_padding_fraction,
-            )
-        )
-
-    def set_visible_range(self, range_start_s: float, range_end_s: float) -> None:
-        if math.isclose(range_start_s, self._range_start_s) and math.isclose(
-            range_end_s, self._range_end_s
-        ):
-            return
-        self._range_start_s = range_start_s
-        self._range_end_s = range_end_s
-        self.range_changed.emit(range_start_s, range_end_s)
-
-
-class SignalPlotWidget(pg.PlotWidget):
-    """Signals plot with timeline-following x auto mode and persisted range modes."""
-
-    view_settings_changed = QtCore.Signal()
-    axis_geometry_sync_requested = QtCore.Signal()
-    playhead_scrubbed = QtCore.Signal(float)
-
-    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
-        super().__init__(parent=parent)
-        self.setBackground(SIGNAL_PLOT_BACKGROUND_HEX)
-        self.setLabel("left", "Distance (m)")
-        self.setLabel("bottom", "Time (s)")
-        self.showGrid(x=True, y=True, alpha=0.2)
-        self._view_settings = SignalPlotViewSettings()
-        self._timeline_range_model: TimelineRangeModel | None = None
-        self._leg2_series: Leg2UltrasonicSignalSeries | None = None
-        self._leg2_visible = False
-        self._applying_view = False
-        self._stance_patch_items: list[QtWidgets.QGraphicsItem] = []
-        # Multi-peak series: list of (display_name, detected_curve, candidate_curve)
-        self._peak_curve_groups: list[tuple[str, object, object]] = []
-        self._peak_series_data: list[tuple[str, PeakDistanceSignalSeries]] = []  # (name, series)
-        leg2_plot_color = derive_signal_plot_color(LEG2_TIMELINE_TRACK_COLOR_HEX)
-        primary_pen, faded_pen = _make_leg2_signal_plot_pens(leg2_plot_color)
-        self._leg2_plot_color = leg2_plot_color
-        self._leg2_plot_alpha = SIGNAL_PLOT_PRIMARY_SEGMENT_ALPHA
-        self._leg2_faded_curve = self.plot(
-            pen=faded_pen,
-            connect="finite",
-            name="Leg2 ultrasonic (not valid)",
-        )
-        self._leg2_primary_curve = self.plot(
-            pen=primary_pen,
-            connect="finite",
-            name="Leg2 ultrasonic (valid)",
-        )
-        self.addLegend(offset=(8, 8))
-        self._current_time_line = pg.InfiniteLine(
-            pos=0.0,
-            angle=90,
-            movable=False,
-            pen=pg.mkPen(
-                _plot_color_with_alpha(TIMELINE_PLAYHEAD_COLOR_HEX, PLAYHEAD_ALPHA),
-                width=PLAYHEAD_PEN_WIDTH,
-            ),
-        )
-        self._current_time_line.setAcceptedMouseButtons(QtCore.Qt.MouseButton.NoButton)
-        self._current_time_line.setHoverPen(None)
-        self.addItem(self._current_time_line)
-        self._dragging_playhead = False
-        self._hover_on_playhead = False
-        self._playhead_hit_half_width_px = 8.0
-        self.setMouseTracking(True)
-        view_box = self.getPlotItem().getViewBox()
-        view_box.disableAutoRange()
-        view_box.sigRangeChanged.connect(self._view_box_range_changed)
-        self._configure_range_mode_menu(view_box)
-        left_axis = self.getAxis("left")
-        if left_axis is not None:
-            left_axis.setWidth(56)
-
-    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
-        super().resizeEvent(event)
-        self.axis_geometry_sync_requested.emit()
-
-    def showEvent(self, event: QtGui.QShowEvent) -> None:
-        super().showEvent(event)
-        self.axis_geometry_sync_requested.emit()
-
-    def viewbox_horizontal_extent_local(self) -> tuple[float, float]:
-        """Return the ViewBox data area as left/right x in this widget's coordinates."""
-        view_box = self.getPlotItem().getViewBox()
-        view_width = float(view_box.boundingRect().width())
-        left_px = float(self.mapFromScene(view_box.mapToScene(0.0, 0.0)).x())
-        right_px = float(self.mapFromScene(view_box.mapToScene(view_width, 0.0)).x())
-        return min(left_px, right_px), max(left_px, right_px)
-
-    def view_settings(self) -> SignalPlotViewSettings:
-        return self._view_settings
-
-    def set_view_settings(self, settings: SignalPlotViewSettings) -> None:
-        self._view_settings = SignalPlotViewSettings(
-            x_range_mode=settings.x_range_mode,
-            y_range_mode=settings.y_range_mode,
-            manual_x_range=settings.manual_x_range,
-            manual_y_range=settings.manual_y_range,
-        )
-        self._sync_range_mode_menu_checks()
-        self._apply_view_settings()
-
-    def attach_timeline_range_model(self, range_model: TimelineRangeModel) -> None:
-        self._timeline_range_model = range_model
-        range_model.range_changed.connect(self._on_timeline_visible_range_changed)
-        self.sync_x_if_following()
-
-    def set_current_time_s(self, time_s: float) -> None:
-        self._current_time_line.setPos(float(time_s))
-
-    def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:
-        if event.button() == QtCore.Qt.MouseButton.LeftButton and self._playhead_hit_test(
-            event.position()
-        ):
-            self._dragging_playhead = True
-            self.setCursor(QtCore.Qt.CursorShape.SizeHorCursor)
-            self.playhead_scrubbed.emit(self._time_from_widget_x(event.position().x(), clamp=True))
-            return
-        super().mousePressEvent(event)
-
-    def mouseMoveEvent(self, event: QtGui.QMouseEvent) -> None:
-        if self._dragging_playhead:
-            self.playhead_scrubbed.emit(self._time_from_widget_x(event.position().x(), clamp=True))
-            return
-        hover = self._playhead_hit_test(event.position())
-        if hover != self._hover_on_playhead:
-            self._hover_on_playhead = hover
-            if hover:
-                self.setCursor(QtCore.Qt.CursorShape.SizeHorCursor)
-            else:
-                self.unsetCursor()
-        super().mouseMoveEvent(event)
-
-    def mouseReleaseEvent(self, event: QtGui.QMouseEvent) -> None:
-        if event.button() == QtCore.Qt.MouseButton.LeftButton and self._dragging_playhead:
-            self._dragging_playhead = False
-            self._hover_on_playhead = self._playhead_hit_test(event.position())
-            if self._hover_on_playhead:
-                self.setCursor(QtCore.Qt.CursorShape.SizeHorCursor)
-            else:
-                self.unsetCursor()
-            return
-        super().mouseReleaseEvent(event)
-
-    def leaveEvent(self, event: QtCore.QEvent) -> None:
-        if not self._dragging_playhead:
-            self._hover_on_playhead = False
-            self.unsetCursor()
-        super().leaveEvent(event)
-
-    def _playhead_hit_test(self, widget_pos: QtCore.QPointF) -> bool:
-        playhead_widget_x = self._playhead_x_in_widget()
-        if playhead_widget_x is None:
-            return False
-        return abs(widget_pos.x() - playhead_widget_x) <= self._playhead_hit_half_width_px
-
-    def _playhead_x_in_widget(self) -> float | None:
-        view_box = self.getPlotItem().getViewBox()
-        scene_pt = view_box.mapViewToScene(QtCore.QPointF(self._current_time_line.value(), 0.0))
-        widget_pt = self.mapFromScene(scene_pt)
-        vb_scene_rect = view_box.mapToScene(view_box.boundingRect()).boundingRect()
-        vb_widget_rect = self.mapFromScene(vb_scene_rect).boundingRect()
-        center_y = vb_widget_rect.center().y()
-        if not vb_widget_rect.contains(widget_pt.x(), center_y):
-            return None
-        return float(widget_pt.x())
-
-    def _time_from_widget_x(self, widget_x: float, *, clamp: bool) -> float:
-        view_box = self.getPlotItem().getViewBox()
-        scene_pt = self.mapToScene(QtCore.QPoint(int(widget_x), 0))
-        data_pt = view_box.mapSceneToView(scene_pt)
-        time_s = float(data_pt.x())
-        if clamp:
-            x_min, x_max = view_box.viewRange()[0]
-            time_s = max(float(x_min), min(float(x_max), time_s))
-        return time_s
-
-    def sync_x_if_following(self) -> None:
-        """Apply the shared visible timeline range when x-axis follows the timeline."""
-        if self._view_settings.x_range_mode != "auto" or self._timeline_range_model is None:
-            return
-        range_start_s, range_end_s = self._timeline_range_model.visible_range_s()
-        self._applying_view = True
-        try:
-            self.setXRange(range_start_s, range_end_s, padding=0.0)
-            if self._view_settings.y_range_mode == "auto":
-                self._apply_y_auto_range()
-        finally:
-            self._applying_view = False
-
-    def _on_timeline_visible_range_changed(self, range_start_s: float, range_end_s: float) -> None:
-        del range_start_s, range_end_s
-        self.sync_x_if_following()
-
-    def set_plotted_signals(
-        self,
-        *,
-        peak_series_list: list | None = None,
-        leg2_series: Leg2UltrasonicSignalSeries | None = None,
-        leg2_visible: bool = False,
-        leg2_legend_name: str = "",
-        # Legacy single-series kwargs kept for test compatibility:
-        peak_series: PeakDistanceSignalSeries | None = None,
-        peak_visible: bool = False,
-    ) -> None:
-        # Build a normalised list: [(display_name, color, series), ...]
-        # peak_series_list entries are (display_name, color_hex, PeakDistanceSignalSeries).
-        if peak_series_list is not None:
-            named_series = peak_series_list  # already [(name, color, series)]
-        elif peak_series is not None and peak_visible:
-            named_series = [("H5 peak", derive_signal_plot_color(H5_TIMELINE_TRACK_COLOR_HEX), peak_series)]
-        else:
-            named_series = []
-
-        self._peak_series_data = [(name, s) for name, _color, s in named_series]
-        self._leg2_series = leg2_series
-        self._leg2_visible = leg2_visible and leg2_series is not None
-
-        # Remove stale dynamic peak curves from the plot item.
-        plot_item = self.getPlotItem()
-        for _name, det_curve, cand_curve in self._peak_curve_groups:
-            plot_item.removeItem(det_curve)
-            plot_item.removeItem(cand_curve)
-        self._peak_curve_groups = []
-
-        # Create fresh curve pairs for each visible series.
-        for display_name, color_hex, ps in named_series:
-            plot_color = derive_signal_plot_color(color_hex)
-            det_pen, cand_pen = _make_h5_signal_plot_pens(plot_color)
-            det_curve = self.plot(pen=det_pen, connect="finite", name=f"{display_name} (detected)")
-            cand_curve = self.plot(pen=cand_pen, connect="finite", name=f"{display_name} (no detection)")
-            det_curve.setData(ps.detected_time_s, ps.detected_distance_m)
-            cand_curve.setData(ps.candidate_time_s, ps.candidate_distance_m)
-            self._peak_curve_groups.append((display_name, det_curve, cand_curve))
-
-        if self._leg2_visible and leg2_series is not None:
-            self._leg2_primary_curve.setData(
-                leg2_series.primary_time_s,
-                leg2_series.primary_distance_m,
-            )
-            self._leg2_faded_curve.setData(
-                leg2_series.faded_time_s,
-                leg2_series.faded_distance_m,
-            )
-            self._leg2_primary_curve.opts["name"] = f"{leg2_legend_name} (valid)"
-            self._leg2_faded_curve.opts["name"] = f"{leg2_legend_name} (not valid)"
-        else:
-            self._leg2_primary_curve.setData([], [])
-            self._leg2_faded_curve.setData([], [])
-
-        self._render_stance_patches()
-        self._sync_signal_plot_legend()
-        self._apply_view_settings()
-        self._update_stance_patches_on_y_range()
-        self.axis_geometry_sync_requested.emit()
-
-    def _sync_signal_plot_legend(self) -> None:
-        """Rebuild the compact legend so names and visibility match plotted curves."""
-        legend = self.getPlotItem().legend
-        if legend is None:
-            return
-        legend.clear()
-        for display_name, det_curve, cand_curve in self._peak_curve_groups:
-            legend.addItem(det_curve, f"{display_name} (detected)")
-            legend.addItem(cand_curve, f"{display_name} (no detection)")
-        if self._leg2_visible:
-            legend.addItem(
-                self._leg2_primary_curve,
-                str(self._leg2_primary_curve.opts.get("name", "Leg2 ultrasonic (valid)")),
-            )
-            legend.addItem(
-                self._leg2_faded_curve,
-                str(self._leg2_faded_curve.opts.get("name", "Leg2 ultrasonic (not valid)")),
-            )
-            stance_legend_item = QtWidgets.QGraphicsRectItem(QtCore.QRectF(0, 0, 15, 15))
-            patch_color = _plot_color_with_alpha(self._leg2_plot_color, self._leg2_plot_alpha)
-            stance_legend_item.setPen(pg.mkPen(None))
-            stance_legend_item.setBrush(pg.mkBrush(patch_color))
-            legend.addItem(stance_legend_item, "Stance phase")
-        legend.setVisible(bool(self._peak_curve_groups) or self._leg2_visible)
-
-    def _clear_stance_patches(self) -> None:
-        """Remove all stance phase patch items from the plot."""
-        plot_item = self.getPlotItem()
-        view_box = plot_item.getViewBox()
-        for item in self._stance_patch_items:
-            view_box.removeItem(item)
-        self._stance_patch_items.clear()
-
-    def _render_stance_patches(self) -> None:
-        """Render stance phase patches on the plot from leg2_series.stance_intervals."""
-        self._clear_stance_patches()
-        if not self._leg2_visible or self._leg2_series is None:
-            return
-
-        stance_intervals = self._leg2_series.stance_intervals
-        if stance_intervals.start_times_s.size == 0:
-            return
-
-        plot_item = self.getPlotItem()
-        view_box = plot_item.getViewBox()
-        view_range = view_box.viewRange()
-        y_min = view_range[1][0]
-
-        patch_color = _plot_color_with_alpha(self._leg2_plot_color, self._leg2_plot_alpha)
-        qbrush = pg.mkBrush(patch_color)
-
-        for start_s, end_s in zip(
-            stance_intervals.start_times_s, stance_intervals.end_times_s
-        ):
-            rect = QtCore.QRectF(
-                float(start_s),
-                float(y_min),
-                float(end_s - start_s),
-                float(0 - y_min),
-            )
-            patch = QtWidgets.QGraphicsRectItem(rect)
-            patch.setPen(pg.mkPen(None))
-            patch.setBrush(qbrush)
-            patch.setZValue(-1)
-            view_box.addItem(patch)
-            self._stance_patch_items.append(patch)
-
-    def _update_stance_patches_on_y_range(self) -> None:
-        """Update stance patch y-values when y-limits change."""
-        if not self._stance_patch_items or self._leg2_series is None:
-            return
-
-        plot_item = self.getPlotItem()
-        view_box = plot_item.getViewBox()
-        view_range = view_box.viewRange()
-        y_min = view_range[1][0]
-
-        stance_intervals = self._leg2_series.stance_intervals
-        for patch_item, start_s, end_s in zip(
-            self._stance_patch_items,
-            stance_intervals.start_times_s,
-            stance_intervals.end_times_s,
-        ):
-            rect = QtCore.QRectF(
-                float(start_s),
-                float(y_min),
-                float(end_s - start_s),
-                float(0 - y_min),
-            )
-            patch_item.setRect(rect)
-
-    def _configure_range_mode_menu(self, view_box: pg.ViewBox) -> None:
-        menu = view_box.menu
-        if menu is None:
-            return
-
-        x_axis_menu = menu.ctrl[0]
-        y_axis_menu = menu.ctrl[1]
-        x_axis_menu.autoRadio.setText("Timeline")
-        x_axis_menu.autoRadio.setToolTip("Match the Timeline x-range.")
-        for axis_menu in (x_axis_menu, y_axis_menu):
-            axis_menu.autoPercentSpin.setVisible(False)
-            axis_menu.autoPanCheck.setVisible(False)
-            axis_menu.visibleOnlyCheck.setVisible(False)
-
-        try:
-            x_axis_menu.autoRadio.clicked.disconnect(menu.xAutoClicked)
-        except TypeError:
-            pass
-        try:
-            x_axis_menu.manualRadio.clicked.disconnect(menu.xManualClicked)
-        except TypeError:
-            pass
-        try:
-            y_axis_menu.autoRadio.clicked.disconnect(menu.yAutoClicked)
-        except TypeError:
-            pass
-        try:
-            y_axis_menu.manualRadio.clicked.disconnect(menu.yManualClicked)
-        except TypeError:
-            pass
-
-        x_axis_menu.autoRadio.clicked.connect(lambda: self._set_x_range_mode("auto"))
-        x_axis_menu.manualRadio.clicked.connect(lambda: self._set_x_range_mode("manual"))
-        y_axis_menu.autoRadio.clicked.connect(lambda: self._set_y_range_mode("auto"))
-        y_axis_menu.manualRadio.clicked.connect(lambda: self._set_y_range_mode("manual"))
-
-        original_update_state = menu.updateState
-
-        def update_state() -> None:
-            original_update_state()
-            self._sync_range_mode_menu_checks()
-
-        menu.updateState = update_state
-        self._sync_range_mode_menu_checks()
-
-    def _sync_range_mode_menu_checks(self) -> None:
-        menu = self.getPlotItem().getViewBox().menu
-        if menu is None:
-            return
-        x_axis_menu = menu.ctrl[0]
-        y_axis_menu = menu.ctrl[1]
-        x_axis_menu.autoRadio.setChecked(self._view_settings.x_range_mode == "auto")
-        x_axis_menu.manualRadio.setChecked(self._view_settings.x_range_mode == "manual")
-        y_axis_menu.autoRadio.setChecked(self._view_settings.y_range_mode == "auto")
-        y_axis_menu.manualRadio.setChecked(self._view_settings.y_range_mode == "manual")
-        self._sync_x_timeline_mode_menu_constraints()
-
-    def _sync_x_timeline_mode_menu_constraints(self) -> None:
-        plot_item = self.getPlotItem()
-        view_box = plot_item.getViewBox()
-        menu = view_box.menu
-        if menu is None:
-            return
-
-        x_timeline = self._view_settings.x_range_mode == "auto"
-        x_axis_menu = menu.ctrl[0]
-        if x_timeline:
-            x_axis_menu.invertCheck.setChecked(False)
-            view_box.invertX(False)
-            for transform_check in self._x_timeline_blocked_transform_checks():
-                transform_check.setChecked(False)
-            plot_item.setLogMode(x=False)
-
-        x_axis_menu.invertCheck.setEnabled(not x_timeline)
-        for transform_check in self._x_timeline_blocked_transform_checks():
-            transform_check.setEnabled(not x_timeline)
-        menu.viewAll.setEnabled(not x_timeline)
-
-    def _x_timeline_blocked_transform_checks(self) -> tuple[QtWidgets.QCheckBox, ...]:
-        plot_ctrl = self.getPlotItem().ctrl
-        return (
-            plot_ctrl.logXCheck,
-            plot_ctrl.derivativeCheck,
-            plot_ctrl.phasemapCheck,
-            plot_ctrl.fftCheck,
-        )
-
-    def _set_x_range_mode(self, mode: Literal["auto", "manual"]) -> None:
-        if self._view_settings.x_range_mode == mode:
-            return
-        if mode == "manual":
-            x_range, _ = self.getViewBox().viewRange()
-            self._view_settings.manual_x_range = (float(x_range[0]), float(x_range[1]))
-        self._view_settings.x_range_mode = mode
-        self._sync_range_mode_menu_checks()
-        self._apply_view_settings()
-        if mode == "auto":
-            self.sync_x_if_following()
-        self.view_settings_changed.emit()
-
-    def _set_y_range_mode(self, mode: Literal["auto", "manual"]) -> None:
-        if self._view_settings.y_range_mode == mode:
-            return
-        if mode == "manual":
-            _, y_range = self.getViewBox().viewRange()
-            self._view_settings.manual_y_range = (float(y_range[0]), float(y_range[1]))
-        self._view_settings.y_range_mode = mode
-        self._sync_range_mode_menu_checks()
-        self._apply_view_settings()
-        self.view_settings_changed.emit()
-
-    def _apply_view_settings(self) -> None:
-        view_box = self.getPlotItem().getViewBox()
-        x_manual = self._view_settings.x_range_mode == "manual"
-        y_manual = self._view_settings.y_range_mode == "manual"
-        view_box.setMouseEnabled(x=x_manual, y=y_manual)
-
-        self._applying_view = True
-        try:
-            if self._view_settings.x_range_mode == "manual" and self._view_settings.manual_x_range is not None:
-                x_min_s, x_max_s = self._view_settings.manual_x_range
-                self.setXRange(x_min_s, x_max_s, padding=0.0)
-            elif self._view_settings.x_range_mode == "auto":
-                self.sync_x_if_following()
-
-            if self._view_settings.y_range_mode == "auto":
-                self._apply_y_auto_range()
-            elif self._view_settings.manual_y_range is not None:
-                y_min_m, y_max_m = self._view_settings.manual_y_range
-                self.setYRange(y_min_m, y_max_m, padding=0.0)
-        finally:
-            self._applying_view = False
-
-    def _apply_y_auto_range(self) -> None:
-        has_peak = bool(self._peak_series_data)
-        if not has_peak and not self._leg2_visible:
-            return
-        x_range, _ = self.getViewBox().viewRange()
-        if has_peak:
-            # Use first visible peak series for y-range computation (multi-series overlap).
-            first_ps = self._peak_series_data[0][1]
-            y_range = visible_signal_y_range(
-                first_ps,
-                x_min_s=float(x_range[0]),
-                x_max_s=float(x_range[1]),
-                leg2_series=self._leg2_series if self._leg2_visible else None,
-            )
-        elif self._leg2_visible and self._leg2_series is not None:
-            empty_peak = PeakDistanceSignalSeries(
-                detected_time_s=np.asarray([], dtype=np.float64),
-                detected_distance_m=np.asarray([], dtype=np.float64),
-                candidate_time_s=np.asarray([], dtype=np.float64),
-                candidate_distance_m=np.asarray([], dtype=np.float64),
-            )
-            y_range = visible_signal_y_range(
-                empty_peak,
-                x_min_s=float(x_range[0]),
-                x_max_s=float(x_range[1]),
-                leg2_series=self._leg2_series,
-            )
-        else:
-            return
-        if y_range is None:
-            return
-        self.setYRange(y_range[0], y_range[1], padding=0.0)
-
-    def _view_box_range_changed(self) -> None:
-        if self._applying_view:
-            return
-        x_range, y_range = self.getViewBox().viewRange()
-        changed = False
-        if self._view_settings.x_range_mode == "manual":
-            manual_x_range = (float(x_range[0]), float(x_range[1]))
-            if manual_x_range != self._view_settings.manual_x_range:
-                self._view_settings.manual_x_range = manual_x_range
-                changed = True
-        if self._view_settings.y_range_mode == "manual":
-            manual_y_range = (float(y_range[0]), float(y_range[1]))
-            if manual_y_range != self._view_settings.manual_y_range:
-                self._view_settings.manual_y_range = manual_y_range
-                changed = True
-        elif self._view_settings.y_range_mode == "auto":
-            self._applying_view = True
-            try:
-                self._apply_y_auto_range()
-            finally:
-                self._applying_view = False
-        self._update_stance_patches_on_y_range()
-        if changed:
-            self.view_settings_changed.emit()
-
-
-class AlignmentTimelineWidget(QtWidgets.QWidget):
-    playhead_changed = QtCore.Signal(float)
-    camera_offset_changed = QtCore.Signal(float)
-    leg2_offset_changed = QtCore.Signal(float)
-    h5_alignment_drag_changed = QtCore.Signal(float, float, float, float, float)
-    h5_alignment_drag_finished = QtCore.Signal()
-
-    def __init__(
-        self,
-        range_model: TimelineRangeModel,
-        parent: QtWidgets.QWidget | None = None,
-    ) -> None:
-        super().__init__(parent)
-        self._range_model = range_model
-        self._range_model.range_changed.connect(lambda *_args: self.update())
-        self.setMinimumHeight(124)
-        self.setMouseTracking(True)
-        self._current_time_s = 0.0
-        self._dragging_camera = False
-        self._dragging_leg2 = False
-        self._dragging_h5 = False
-        self._dragging_playhead = False
-        self._camera_drag_anchor_s = 0.0
-        self._leg2_drag_anchor_s = 0.0
-        self._h5_drag_anchor_s = 0.0
-        self._h5_drag_snapshot: TimelineH5DragSnapshot | None = None
-        self._hover_on_camera_bar = False
-        self._hover_on_leg2_bar = False
-        self._hover_on_h5_bar = False
-        self._hover_on_playhead = False
-        self._playhead_hit_half_width_px = 8.0
-        self._time_axis_left_px: float | None = None
-        self._time_axis_right_px: float | None = None
-
-    def set_time_axis_rect(self, left_px: float, right_px: float) -> None:
-        if self._time_axis_left_px is not None:
-            if math.isclose(left_px, self._time_axis_left_px) and math.isclose(
-                right_px, self._time_axis_right_px
-            ):
-                return
-        self._time_axis_left_px = left_px
-        self._time_axis_right_px = right_px
-        self.update()
-
-    def set_timeline_state(self, *, current_time_s: float) -> None:
-        self._current_time_s = current_time_s
-        self.update()
-
-    def paintEvent(self, event: QtGui.QPaintEvent) -> None:
-        del event
-        painter = QtGui.QPainter(self)
-        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
-        try:
-            painter.fillRect(self.rect(), QtGui.QColor("#0f1720"))
-            plot_rect = self._plot_rect()
-            if plot_rect.width() <= 1:
-                return
-
-            label_pen = QtGui.QPen(QtGui.QColor("#94a3b8"))
-            axis_pen = QtGui.QPen(QtGui.QColor("#334155"), 1)
-            tick_pen = QtGui.QPen(QtGui.QColor("#475569"), 1)
-            camera_brush = QtGui.QBrush(QtGui.QColor("#f97316"))
-            heatmap_brush = QtGui.QBrush(QtGui.QColor(H5_TIMELINE_TRACK_COLOR_HEX))
-            leg2_brush = QtGui.QBrush(QtGui.QColor(LEG2_TIMELINE_TRACK_COLOR_HEX))
-            playhead_color = QtGui.QColor(TIMELINE_PLAYHEAD_COLOR_HEX)
-            playhead_color.setAlpha(PLAYHEAD_ALPHA)
-            playhead_pen = QtGui.QPen(playhead_color, PLAYHEAD_PEN_WIDTH)
-
-            painter.setPen(label_pen)
-            axis_y = plot_rect.top() + 16
-            painter.drawText(QtCore.QRectF(8, axis_y - 10, 60, 20), "Time")
-            painter.drawText(QtCore.QRectF(8, plot_rect.top() + 30, 60, 20), "Camera")
-            painter.drawText(QtCore.QRectF(8, plot_rect.top() + 58, 60, 20), "H5")
-            if self._range_model.leg2_duration_s > 0.0:
-                painter.drawText(QtCore.QRectF(8, plot_rect.top() + 86, 60, 20), "Leg2")
-
-            painter.setPen(axis_pen)
-            painter.drawLine(
-                QtCore.QPointF(plot_rect.left(), axis_y),
-                QtCore.QPointF(plot_rect.right(), axis_y),
-            )
-
-            tick_count = 6
-            painter.setPen(tick_pen)
-            for idx in range(tick_count + 1):
-                frac = idx / tick_count
-                x = plot_rect.left() + frac * plot_rect.width()
-                painter.drawLine(
-                    QtCore.QPointF(x, axis_y - 4),
-                    QtCore.QPointF(x, plot_rect.bottom()),
-                )
-                range_start_s, range_end_s = self._range_model.visible_range_s()
-                tick_time = range_start_s + frac * (range_end_s - range_start_s)
-                painter.drawText(
-                    QtCore.QRectF(x - 24, plot_rect.top(), 48, 14),
-                    QtCore.Qt.AlignmentFlag.AlignCenter,
-                    f"{tick_time:.1f}",
-                )
-
-            camera_rect = self._track_rect(
-                self._camera_track_start_s(),
-                self._range_model.camera_duration_s,
-                row=0,
-            )
-            heatmap_rect = self._track_rect(0.0, self._range_model.heatmap_duration_s, row=1)
-            leg2_rect = self._track_rect(
-                self._leg2_track_start_s(),
-                self._range_model.leg2_duration_s,
-                row=2,
-            )
-
-            if camera_rect.width() > 0:
-                painter.setPen(QtCore.Qt.PenStyle.NoPen)
-                painter.setBrush(camera_brush)
-                painter.drawRoundedRect(camera_rect, 4, 4)
-            if heatmap_rect.width() > 0:
-                painter.setPen(QtCore.Qt.PenStyle.NoPen)
-                painter.setBrush(heatmap_brush)
-                painter.drawRoundedRect(heatmap_rect, 4, 4)
-            if leg2_rect.width() > 0:
-                painter.setPen(QtCore.Qt.PenStyle.NoPen)
-                painter.setBrush(leg2_brush)
-                painter.drawRoundedRect(leg2_rect, 4, 4)
-
-            offset_label_pen = QtGui.QPen(QtGui.QColor(TIMELINE_OFFSET_LABEL_COLOR_HEX))
-            painter.setPen(offset_label_pen)
-            self._draw_track_offset_label(
-                painter,
-                plot_rect,
-                camera_rect,
-                self._camera_track_start_s(),
-            )
-            if self._range_model.leg2_duration_s > 0.0:
-                self._draw_track_offset_label(
-                    painter,
-                    plot_rect,
-                    leg2_rect,
-                    self._leg2_track_start_s(),
-                )
-
-            playhead_x = self._time_to_x(self._current_time_s)
-            painter.setPen(playhead_pen)
-            painter.drawLine(
-                QtCore.QPointF(playhead_x, axis_y - 6),
-                QtCore.QPointF(playhead_x, plot_rect.bottom()),
-            )
-        finally:
-            painter.end()
-
-    def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:
-        if event.button() != QtCore.Qt.MouseButton.LeftButton:
-            return
-        press_time_s = self._time_at_x(event.position().x(), clamp=True)
-        if self._playhead_hit_test(event.position()):
-            self._dragging_playhead = True
-            self.setCursor(QtCore.Qt.CursorShape.SizeHorCursor)
-            self.playhead_changed.emit(press_time_s)
-            return
-
-        if self._camera_track_hit_test(event.position()):
-            self._dragging_camera = True
-            self._range_model.begin_visible_range_freeze()
-            self._camera_drag_anchor_s = press_time_s - self._camera_track_start_s()
-            self.setCursor(QtCore.Qt.CursorShape.ClosedHandCursor)
-            return
-
-        if self._leg2_track_hit_test(event.position()):
-            self._dragging_leg2 = True
-            self._range_model.begin_visible_range_freeze()
-            self._leg2_drag_anchor_s = press_time_s - self._leg2_track_start_s()
-            self.setCursor(QtCore.Qt.CursorShape.ClosedHandCursor)
-            return
-
-        if self._h5_track_hit_test(event.position()):
-            if not self._h5_alignment_drag_enabled():
-                return
-            self._dragging_h5 = True
-            self._h5_drag_anchor_s = press_time_s
-            range_start_s, range_end_s = self._range_model.visible_range_s()
-            self._h5_drag_snapshot = TimelineH5DragSnapshot(
-                range_start_s=range_start_s,
-                range_end_s=range_end_s,
-                current_time_s=self._current_time_s,
-                camera_offset_s=self._range_model.camera_offset_s,
-                leg2_offset_s=self._range_model.leg2_offset_s,
-            )
-            self.setCursor(QtCore.Qt.CursorShape.ClosedHandCursor)
-            return
-
-        self._dragging_playhead = True
-        self.setCursor(QtCore.Qt.CursorShape.SizeHorCursor)
-        self.playhead_changed.emit(press_time_s)
-
-    def mouseMoveEvent(self, event: QtGui.QMouseEvent) -> None:
-        if self._dragging_camera:
-            position_time_s = self._time_at_x(event.position().x(), clamp=False)
-            camera_track_start_s = position_time_s - self._camera_drag_anchor_s
-            self.camera_offset_changed.emit(-camera_track_start_s)
-            return
-        if self._dragging_leg2:
-            position_time_s = self._time_at_x(event.position().x(), clamp=False)
-            leg2_track_start_s = position_time_s - self._leg2_drag_anchor_s
-            self.leg2_offset_changed.emit(-leg2_track_start_s)
-            return
-        if self._dragging_h5:
-            if self._h5_drag_snapshot is None:
-                return
-            position_time_s = self._time_at_x(
-                event.position().x(),
-                clamp=False,
-                range_start_s=self._h5_drag_snapshot.range_start_s,
-                range_end_s=self._h5_drag_snapshot.range_end_s,
-            )
-            h5_desired_start_s = position_time_s - self._h5_drag_anchor_s
-            dragged = apply_timeline_h5_alignment_drag(
-                self._h5_drag_snapshot,
-                h5_desired_start_s=h5_desired_start_s,
-            )
-            self.h5_alignment_drag_changed.emit(
-                dragged.range_start_s,
-                dragged.range_end_s,
-                dragged.current_time_s,
-                dragged.camera_offset_s,
-                dragged.leg2_offset_s,
-            )
-            return
-        if self._dragging_playhead:
-            position_time_s = self._time_at_x(event.position().x(), clamp=True)
-            self.playhead_changed.emit(position_time_s)
-            return
-
-        hover_on_playhead = self._playhead_hit_test(event.position())
-        hover_on_camera_bar = self._camera_track_hit_test(event.position())
-        hover_on_leg2_bar = self._leg2_track_hit_test(event.position())
-        hover_on_h5_bar = (
-            self._h5_track_hit_test(event.position()) and self._h5_alignment_drag_enabled()
-        )
-        if hover_on_playhead != self._hover_on_playhead:
-            self._hover_on_playhead = hover_on_playhead
-            self._update_hover_cursor()
-        if hover_on_camera_bar != self._hover_on_camera_bar:
-            self._hover_on_camera_bar = hover_on_camera_bar
-            self._update_hover_cursor()
-        if hover_on_leg2_bar != self._hover_on_leg2_bar:
-            self._hover_on_leg2_bar = hover_on_leg2_bar
-            self._update_hover_cursor()
-        if hover_on_h5_bar != self._hover_on_h5_bar:
-            self._hover_on_h5_bar = hover_on_h5_bar
-            self._update_hover_cursor()
-
-    def mouseReleaseEvent(self, event: QtGui.QMouseEvent) -> None:
-        del event
-        was_dragging_offset_track = self._dragging_camera or self._dragging_leg2
-        was_dragging_h5 = self._dragging_h5
-        self._dragging_camera = False
-        self._dragging_leg2 = False
-        self._dragging_h5 = False
-        self._h5_drag_snapshot = None
-        self._dragging_playhead = False
-        if was_dragging_offset_track:
-            self._range_model.end_visible_range_freeze(recompute=True)
-        if was_dragging_h5:
-            self.h5_alignment_drag_finished.emit()
-        self.update()
-        self._update_hover_cursor()
-
-    def leaveEvent(self, event: QtCore.QEvent) -> None:
-        if (
-            not self._dragging_camera
-            and not self._dragging_leg2
-            and not self._dragging_h5
-            and not self._dragging_playhead
-        ):
-            self.unsetCursor()
-            self._hover_on_camera_bar = False
-            self._hover_on_leg2_bar = False
-            self._hover_on_h5_bar = False
-        super().leaveEvent(event)
-
-    def _update_hover_cursor(self) -> None:
-        if self._hover_on_playhead:
-            self.setCursor(QtCore.Qt.CursorShape.SizeHorCursor)
-        elif self._hover_on_camera_bar or self._hover_on_leg2_bar or self._hover_on_h5_bar:
-            self.setCursor(QtCore.Qt.CursorShape.OpenHandCursor)
-        else:
-            self.unsetCursor()
-
-    def visible_time_bounds_s(self) -> tuple[float, float]:
-        return self._range_model.visible_range_s()
-
-    def _h5_alignment_drag_enabled(self) -> bool:
-        return timeline_h5_drag_affects_alignment(
-            camera_duration_s=self._range_model.camera_duration_s,
-            leg2_duration_s=self._range_model.leg2_duration_s,
-        )
-
-    def _playhead_hit_test(self, widget_pos: QtCore.QPointF) -> bool:
-        playhead_x = self._time_to_x(self._current_time_s)
-        return abs(widget_pos.x() - playhead_x) <= self._playhead_hit_half_width_px
-
-    def _camera_track_hit_test(self, widget_pos: QtCore.QPointF) -> bool:
-        if self._range_model.camera_duration_s <= 0.0:
-            return False
-        return self._track_rect(
-            self._camera_track_start_s(),
-            self._range_model.camera_duration_s,
-            row=0,
-        ).contains(widget_pos)
-
-    def _h5_track_hit_test(self, widget_pos: QtCore.QPointF) -> bool:
-        if self._range_model.heatmap_duration_s <= 0.0:
-            return False
-        return self._track_rect(0.0, self._range_model.heatmap_duration_s, row=1).contains(
-            widget_pos
-        )
-
-    def _leg2_track_hit_test(self, widget_pos: QtCore.QPointF) -> bool:
-        if self._range_model.leg2_duration_s <= 0.0:
-            return False
-        return self._track_rect(
-            self._leg2_track_start_s(),
-            self._range_model.leg2_duration_s,
-            row=2,
-        ).contains(widget_pos)
-
-    def _camera_track_start_s(self) -> float:
-        return -self._range_model.camera_offset_s
-
-    def _leg2_track_start_s(self) -> float:
-        return -self._range_model.leg2_offset_s
-
-    def _draw_track_offset_label(
-        self,
-        painter: QtGui.QPainter,
-        plot_rect: QtCore.QRectF,
-        track_rect: QtCore.QRectF,
-        track_start_s: float,
-    ) -> None:
-        label_text = format_track_offset_label(track_start_s)
-        label_width_px = float(painter.fontMetrics().horizontalAdvance(label_text))
-        label_rect = track_offset_label_rect(
-            plot_rect,
-            track_rect,
-            label_width_px,
-        )
-        if label_rect is None:
-            return
-        painter.drawText(
-            label_rect,
-            QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter,
-            label_text,
-        )
-
-    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
-        super().resizeEvent(event)
-        parent_window = self.window()
-        if isinstance(parent_window, HeatmapAlignmentWindow):
-            parent_window.schedule_timeline_axis_geometry_sync()
-
-    def _plot_rect(self) -> QtCore.QRectF:
-        rect = self.contentsRect()
-        top_px = rect.top() + 6
-        height_px = max(1, rect.height() - 12)
-        if self._time_axis_left_px is not None and self._time_axis_right_px is not None:
-            left_px = self._time_axis_left_px
-            width_px = max(1.0, self._time_axis_right_px - self._time_axis_left_px)
-        else:
-            left_px = rect.left() + TIMELINE_LABEL_GUTTER_PX
-            width_px = max(1.0, rect.width() - TIMELINE_LABEL_GUTTER_PX - 12)
-        return QtCore.QRectF(left_px, top_px, width_px, height_px)
-
-    def _track_rect(self, start_s: float, duration_s: float, *, row: int) -> QtCore.QRectF:
-        plot_rect = self._plot_rect()
-        row_top = plot_rect.top() + 30 + row * 28
-        if duration_s <= 0.0:
-            return QtCore.QRectF(plot_rect.left(), row_top, 0.0, 18.0)
-        start_x = self._time_to_x(start_s)
-        end_x = self._time_to_x(start_s + duration_s)
-        left_x = min(start_x, end_x)
-        width = max(0.0, abs(end_x - start_x))
-        return QtCore.QRectF(left_x, row_top, width, 18.0)
-
-    def _time_to_x(self, time_s: float) -> float:
-        plot_rect = self._plot_rect()
-        range_start_s, range_end_s = self._range_model.visible_range_s()
-        span_s = max(1e-6, range_end_s - range_start_s)
-        frac = (time_s - range_start_s) / span_s
-        frac = min(1.0, max(0.0, frac))
-        return plot_rect.left() + frac * plot_rect.width()
-
-    def _time_at_x(
-        self,
-        x: float,
-        *,
-        clamp: bool,
-        range_start_s: float | None = None,
-        range_end_s: float | None = None,
-    ) -> float:
-        plot_rect = self._plot_rect()
-        if range_start_s is None or range_end_s is None:
-            range_start_s, range_end_s = self._range_model.visible_range_s()
-        if plot_rect.width() <= 1:
-            return range_start_s
-        resolved_x = min(plot_rect.right(), max(plot_rect.left(), x)) if clamp else x
-        frac = (resolved_x - plot_rect.left()) / plot_rect.width()
-        return range_start_s + frac * (range_end_s - range_start_s)
-
-
-class ViewportEditorWidget(ImagePreview):
-    corner_dragged = QtCore.Signal(int, float, float, float, float)
-    edge_dragged = QtCore.Signal(int, float, float, float, float)
-    center_dragged = QtCore.Signal(float, float, float, float)
-    drag_finished = QtCore.Signal()
-
-    def __init__(self, title: str, parent: QtWidgets.QWidget | None = None) -> None:
-        super().__init__(title, parent)
-        self.setMouseTracking(True)
-        self._drag_index: int | None = None
-        self._drag_edge: int | None = None
-        self._drag_center = False
-        self._start_viewport_pos: QtCore.QPointF | None = None
-        self._handle_radius = 14.0
-        self._edge_hit_distance = 18.0
-        self._center_fraction = 0.6
-        self._center_min_size = 64.0
-
-    def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:
-        if self._pixmap is None:
-            return
-        handle_index = self._handle_hit_test(event.position())
-        if handle_index is not None:
-            self._drag_index = handle_index
-            self._start_viewport_pos = self._widget_to_viewport(event.position(), clamp=False)
-            self.setCursor(QtCore.Qt.CursorShape.SizeAllCursor)
-            return
-
-        edge_index = self._edge_hit_test(event.position())
-        if edge_index is not None:
-            self._drag_edge = edge_index
-            self._start_viewport_pos = self._widget_to_viewport(event.position(), clamp=False)
-            self.setCursor(QtCore.Qt.CursorShape.ClosedHandCursor)
-            return
-
-        if self._center_hit_test(event.position()):
-            self._drag_center = True
-            self._start_viewport_pos = self._widget_to_viewport(event.position(), clamp=False)
-            self.setCursor(QtCore.Qt.CursorShape.ClosedHandCursor)
-            return
-
-        self.unsetCursor()
-
-    def mouseMoveEvent(self, event: QtGui.QMouseEvent) -> None:
-        if self._pixmap is None:
-            return
-        current_pos = self._widget_to_viewport(event.position(), clamp=False)
-        if self._drag_index is not None and self._start_viewport_pos is not None:
-            self.corner_dragged.emit(
-                self._drag_index,
-                self._start_viewport_pos.x(),
-                self._start_viewport_pos.y(),
-                current_pos.x(),
-                current_pos.y(),
-            )
-            return
-        if self._drag_edge is not None and self._start_viewport_pos is not None:
-            self.edge_dragged.emit(
-                self._drag_edge,
-                self._start_viewport_pos.x(),
-                self._start_viewport_pos.y(),
-                current_pos.x(),
-                current_pos.y(),
-            )
-            return
-        if self._drag_center and self._start_viewport_pos is not None:
-            self.center_dragged.emit(
-                self._start_viewport_pos.x(),
-                self._start_viewport_pos.y(),
-                current_pos.x(),
-                current_pos.y(),
-            )
-            return
-        self._update_hover_cursor(event.position())
-
-    def mouseReleaseEvent(self, event: QtGui.QMouseEvent) -> None:
-        self._drag_index = None
-        self._drag_edge = None
-        self._drag_center = False
-        self._start_viewport_pos = None
-        self.drag_finished.emit()
-        self._update_hover_cursor(event.position())
-
-    def leaveEvent(self, event: QtCore.QEvent) -> None:
-        if self._drag_index is None and self._drag_edge is None and not self._drag_center:
-            self.unsetCursor()
-        super().leaveEvent(event)
-
-    def _corners(self) -> list[QtCore.QPointF]:
-        rect = self.contentsRect()
-        return [
-            QtCore.QPointF(rect.left(), rect.top()),
-            QtCore.QPointF(rect.right(), rect.top()),
-            QtCore.QPointF(rect.right(), rect.bottom()),
-            QtCore.QPointF(rect.left(), rect.bottom()),
-        ]
-
-    def _handle_hit_test(self, widget_pos: QtCore.QPointF) -> int | None:
-        for idx, corner in enumerate(self._corners()):
-            if QtCore.QLineF(corner, widget_pos).length() <= self._handle_radius * 2.0:
-                return idx
-        return None
-
-    def _edge_hit_test(self, widget_pos: QtCore.QPointF) -> int | None:
-        corners = self._corners()
-        for idx in range(4):
-            start = corners[idx]
-            end = corners[(idx + 1) % 4]
-            if self._point_to_segment_distance(widget_pos, start, end) <= self._edge_hit_distance:
-                return idx
-        return None
-
-    def _center_hit_test(self, widget_pos: QtCore.QPointF) -> bool:
-        rect = self.contentsRect()
-        center_width = min(
-            rect.width(), max(rect.width() * self._center_fraction, self._center_min_size)
-        )
-        center_height = min(
-            rect.height(), max(rect.height() * self._center_fraction, self._center_min_size)
-        )
-        center_rect = QtCore.QRectF(
-            rect.center().x() - center_width / 2.0,
-            rect.center().y() - center_height / 2.0,
-            center_width,
-            center_height,
-        )
-        return center_rect.contains(widget_pos)
-
-    def _widget_to_viewport(
-        self,
-        widget_pos: QtCore.QPointF,
-        *,
-        clamp: bool = True,
-    ) -> QtCore.QPointF:
-        rect = self.contentsRect()
-        if self._pixmap is None or rect.width() <= 1 or rect.height() <= 1:
-            return QtCore.QPointF(0.0, 0.0)
-        width = max(1, self._pixmap.width())
-        height = max(1, self._pixmap.height())
-        x = (widget_pos.x() - rect.left()) * width / rect.width()
-        y = (widget_pos.y() - rect.top()) * height / rect.height()
-        if clamp:
-            x = float(np.clip(x, 0, width - 1))
-            y = float(np.clip(y, 0, height - 1))
-        return QtCore.QPointF(float(x), float(y))
-
-    def _update_hover_cursor(self, widget_pos: QtCore.QPointF) -> None:
-        if self._pixmap is None:
-            self.unsetCursor()
-            return
-        if self._handle_hit_test(widget_pos) is not None:
-            self.setCursor(QtCore.Qt.CursorShape.SizeAllCursor)
-            return
-        if self._edge_hit_test(widget_pos) is not None:
-            self.setCursor(QtCore.Qt.CursorShape.OpenHandCursor)
-            return
-        if self._center_hit_test(widget_pos):
-            self.setCursor(QtCore.Qt.CursorShape.OpenHandCursor)
-            return
-        self.unsetCursor()
-
-    @staticmethod
-    def _point_to_segment_distance(
-        point: QtCore.QPointF,
-        start: QtCore.QPointF,
-        end: QtCore.QPointF,
-    ) -> float:
-        dx = end.x() - start.x()
-        dy = end.y() - start.y()
-        if abs(dx) < 1e-6 and abs(dy) < 1e-6:
-            return math.hypot(point.x() - start.x(), point.y() - start.y())
-        t = ((point.x() - start.x()) * dx + (point.y() - start.y()) * dy) / (dx * dx + dy * dy)
-        t = min(1.0, max(0.0, t))
-        proj_x = start.x() + t * dx
-        proj_y = start.y() + t * dy
-        return math.hypot(point.x() - proj_x, point.y() - proj_y)
-
-
-class CornerEditorWidget(QtWidgets.QWidget):
-    corners_changed = QtCore.Signal(list)
-    export_overlay_changed = QtCore.Signal(float, float, float, float)
-    export_overlay_visibility_changed = QtCore.Signal(bool)
-    export_overlay_preview_toggled = QtCore.Signal(bool)
-    export_overlay_reset_requested = QtCore.Signal()
-    export_overlay_drag_active_changed = QtCore.Signal(bool)
-
-    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.setMinimumSize(480, 260)
-        self.setMouseTracking(True)
-        self._frame_rgb: np.ndarray | None = None
-        self._pixmap: QtGui.QPixmap | None = None
-        self._corners: np.ndarray | None = None
-        self._drag_index: int | None = None
-        self._drag_edge: int | None = None
-        self._drag_center = False
-        self._start_drag_image_pos: QtCore.QPointF | None = None
-        self._start_drag_corners: np.ndarray | None = None
-        self._handle_radius = 10.0
-        self._edge_hit_distance = 14.0
-        self._center_fraction = 0.6
-        self._center_min_size = 56.0
-        self._export_overlay_rect: QtCore.QRectF | None = None
-        self._export_overlay_visible = True
-        self._export_overlay_preview_enabled = True
-        self._export_overlay_preview_rgb: np.ndarray | None = None
-        self._export_overlay_preview_pixmap: QtGui.QPixmap | None = None
-        self._overlay_drag_corner: int | None = None
-        self._overlay_drag_edge: int | None = None
-        self._overlay_drag_center = False
-        self._overlay_drag_anchor_image_pos: QtCore.QPointF | None = None
-        self._overlay_drag_start_rect: QtCore.QRectF | None = None
-        self._loading_overlay_active = False
-        self._loading_overlay_message = ""
-        self._dim_content = False
-
-    def set_frame(self, frame_rgb: np.ndarray | None) -> None:
-        self._frame_rgb = frame_rgb
-        self._pixmap = rgb_to_qpixmap(frame_rgb) if frame_rgb is not None else None
-        self.update()
-
-    def set_loading_overlay(
-        self,
-        active: bool,
-        message: str = "",
-        *,
-        dim_content: bool = True,
-    ) -> None:
-        self._loading_overlay_active = active
-        self._loading_overlay_message = message
-        self._dim_content = dim_content
-        self.update()
-
-    def set_corners(self, corners: list[list[float]] | np.ndarray | None) -> None:
-        if corners is None or len(corners) == 0:
-            self._corners = None
-        else:
-            self._corners = np.array(corners, dtype=np.float32)
-        self.update()
-
-    def set_export_overlay(self, overlay: ExportOverlaySettings) -> None:
-        self._export_overlay_visible = overlay.visible
-        self._export_overlay_preview_enabled = overlay.preview_enabled
-        if overlay.width > 0.0 and overlay.height > 0.0:
-            self._export_overlay_rect = QtCore.QRectF(
-                overlay.x,
-                overlay.y,
-                overlay.width,
-                overlay.height,
-            )
-        else:
-            self._export_overlay_rect = None
-        self.update()
-
-    def set_export_overlay_preview_frame(self, frame_rgb: np.ndarray | None) -> None:
-        self._export_overlay_preview_rgb = frame_rgb
-        self._export_overlay_preview_pixmap = (
-            rgb_to_qpixmap(frame_rgb) if frame_rgb is not None else None
-        )
-        self.update()
-
-    def current_corners(self) -> np.ndarray | None:
-        return None if self._corners is None else self._corners.copy()
-
-    def initialize_default_corners(self) -> None:
-        if self._frame_rgb is None:
-            return
-        height, width = self._frame_rgb.shape[:2]
-        inset_x = width * 0.15
-        inset_y = height * 0.15
-        self._corners = np.array(
-            [
-                [inset_x, inset_y],
-                [width - inset_x, inset_y],
-                [width - inset_x, height - inset_y],
-                [inset_x, height - inset_y],
-            ],
-            dtype=np.float32,
-        )
-        self.corners_changed.emit(self._corners.tolist())
-        self.update()
-
-    def paintEvent(self, event: QtGui.QPaintEvent) -> None:
-        super().paintEvent(event)
-        painter = QtGui.QPainter(self)
-        try:
-            painter.fillRect(self.rect(), QtGui.QColor("#0f1720"))
-
-            if self._pixmap is None:
-                if not self._loading_overlay_active:
-                    painter.setPen(QtGui.QColor("#d7dde6"))
-                    painter.drawText(
-                        self.rect(),
-                        QtCore.Qt.AlignmentFlag.AlignCenter,
-                        "Camera Video",
-                    )
-                self._paint_loading_overlay(painter)
-                return
-
-            target_rect = self._target_rect()
-            if self._loading_overlay_active and self._dim_content:
-                painter.setOpacity(0.35)
-            painter.drawPixmap(target_rect.toRect(), self._pixmap)
-            painter.setOpacity(1.0)
-            self._paint_export_overlay(painter)
-            if self._corners is None:
-                self._paint_loading_overlay(painter)
-                return
-
-            display_corners = [
-                self._image_to_widget(QtCore.QPointF(float(x), float(y))) for x, y in self._corners
-            ]
-            pen = QtGui.QPen(QtGui.QColor("#ff4d4f"), 2)
-            painter.setPen(pen)
-            painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
-            painter.drawPolygon(QtGui.QPolygonF(display_corners))
-            brush = QtGui.QBrush(QtGui.QColor("#ffb703"))
-            painter.setBrush(brush)
-            for point in display_corners:
-                painter.drawEllipse(point, self._handle_radius, self._handle_radius)
-            self._paint_loading_overlay(painter)
-        finally:
-            painter.end()
-
-    def _paint_loading_overlay(self, painter: QtGui.QPainter) -> None:
-        if not self._loading_overlay_active:
-            return
-        painter.fillRect(
-            self.rect(),
-            QtGui.QColor(15, 23, 32, 180),
-        )
-        painter.setPen(QtGui.QColor("#d7dde6"))
-        painter.drawText(
-            self.rect(),
-            int(QtCore.Qt.AlignmentFlag.AlignCenter),
-            self._loading_overlay_message or "Loading...",
-        )
-
-    def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:
-        if self._frame_rgb is None:
-            return
-        if event.button() == QtCore.Qt.MouseButton.RightButton:
-            return
-
-        image_pos = self._widget_to_image(event.position())
-        if self._corners is not None:
-            handle_index = self._handle_hit_test(event.position())
-            if handle_index is not None:
-                self._drag_index = handle_index
-                self.setCursor(QtCore.Qt.CursorShape.SizeAllCursor)
-                return
-
-            edge_index = self._edge_hit_test(event.position())
-            if edge_index is not None:
-                self._drag_edge = edge_index
-                self._start_drag_image_pos = image_pos
-                self._start_drag_corners = self._corners.copy()
-                self.setCursor(QtCore.Qt.CursorShape.ClosedHandCursor)
-                return
-
-            if self._center_hit_test(image_pos):
-                self._drag_center = True
-                self._start_drag_image_pos = image_pos
-                self._start_drag_corners = self._corners.copy()
-                self.setCursor(QtCore.Qt.CursorShape.ClosedHandCursor)
-                return
-
-        if self._export_overlay_visible and self._export_overlay_rect is not None:
-            overlay_corner = self._export_overlay_corner_hit_test(event.position())
-            if overlay_corner is not None:
-                self._overlay_drag_corner = overlay_corner
-                self._overlay_drag_anchor_image_pos = image_pos
-                self._overlay_drag_start_rect = QtCore.QRectF(self._export_overlay_rect)
-                self.setCursor(QtCore.Qt.CursorShape.SizeAllCursor)
-                self.export_overlay_drag_active_changed.emit(True)
-                return
-
-            overlay_edge = self._export_overlay_edge_hit_test(event.position())
-            if overlay_edge is not None:
-                self._overlay_drag_edge = overlay_edge
-                self._overlay_drag_anchor_image_pos = image_pos
-                self._overlay_drag_start_rect = QtCore.QRectF(self._export_overlay_rect)
-                self.setCursor(QtCore.Qt.CursorShape.ClosedHandCursor)
-                self.export_overlay_drag_active_changed.emit(True)
-                return
-
-            if self._export_overlay_center_hit_test(image_pos):
-                self._overlay_drag_center = True
-                self._overlay_drag_anchor_image_pos = image_pos
-                self._overlay_drag_start_rect = QtCore.QRectF(self._export_overlay_rect)
-                self.setCursor(QtCore.Qt.CursorShape.ClosedHandCursor)
-                self.export_overlay_drag_active_changed.emit(True)
-                return
-
-        self.unsetCursor()
-
-    def mouseMoveEvent(self, event: QtGui.QMouseEvent) -> None:
-        if self._frame_rgb is None:
-            return
-
-        if self._overlay_drag_corner is not None:
-            self._resize_export_overlay_from_corner(self._widget_to_image(event.position()))
-            return
-
-        if self._overlay_drag_edge is not None:
-            self._resize_export_overlay_from_edge(self._widget_to_image(event.position()))
-            return
-
-        if self._overlay_drag_center:
-            self._translate_export_overlay(self._widget_to_image(event.position()))
-            return
-
-        if self._corners is None:
-            self._update_hover_cursor(event.position())
-            return
-
-        if self._drag_index is not None:
-            image_pos = self._widget_to_image(event.position())
-            height, width = self._frame_rgb.shape[:2]
-            image_x = float(np.clip(image_pos.x(), 0, width - 1))
-            image_y = float(np.clip(image_pos.y(), 0, height - 1))
-            self._corners[self._drag_index] = [image_x, image_y]
-            self.corners_changed.emit(self._corners.tolist())
-            self.update()
-            return
-
-        if self._drag_edge is not None or self._drag_center:
-            image_pos = self._widget_to_image(event.position())
-            self._translate_drag(image_pos)
-            return
-
-        self._update_hover_cursor(event.position())
-
-    def mouseReleaseEvent(self, event: QtGui.QMouseEvent) -> None:
-        self._drag_index = None
-        self._drag_edge = None
-        self._drag_center = False
-        self._start_drag_image_pos = None
-        self._start_drag_corners = None
-        overlay_was_active = (
-            self._overlay_drag_corner is not None
-            or self._overlay_drag_edge is not None
-            or self._overlay_drag_center
-        )
-        self._overlay_drag_corner = None
-        self._overlay_drag_edge = None
-        self._overlay_drag_center = False
-        self._overlay_drag_anchor_image_pos = None
-        self._overlay_drag_start_rect = None
-        if overlay_was_active:
-            self.export_overlay_drag_active_changed.emit(False)
-        self._update_hover_cursor(event.position())
-
-    def leaveEvent(self, event: QtCore.QEvent) -> None:
-        if (
-            self._drag_index is None
-            and self._drag_edge is None
-            and not self._drag_center
-            and self._overlay_drag_corner is None
-            and self._overlay_drag_edge is None
-            and not self._overlay_drag_center
-        ):
-            self.unsetCursor()
-        super().leaveEvent(event)
-
-    def contextMenuEvent(self, event: QtGui.QContextMenuEvent) -> None:
-        if self._frame_rgb is None:
-            return
-        menu = QtWidgets.QMenu(self)
-        show_overlay_action = menu.addAction("Show Export Overlay")
-        show_overlay_action.setCheckable(True)
-        show_overlay_action.setChecked(self._export_overlay_visible)
-        show_preview_action = menu.addAction("Show Overlay Preview")
-        show_preview_action.setCheckable(True)
-        show_preview_action.setChecked(self._export_overlay_preview_enabled)
-        show_preview_action.setEnabled(self._export_overlay_visible)
-        reset_overlay_action = menu.addAction("Reset Export Overlay")
-        action = menu.exec(event.globalPos())
-        if action is show_overlay_action:
-            self.export_overlay_visibility_changed.emit(show_overlay_action.isChecked())
-        elif action is show_preview_action:
-            self.export_overlay_preview_toggled.emit(show_preview_action.isChecked())
-        elif action is reset_overlay_action:
-            self.export_overlay_reset_requested.emit()
-
-    def _target_rect(self) -> QtCore.QRectF:
-        if self._pixmap is None:
-            return QtCore.QRectF(self.rect())
-        scaled = self._pixmap.size()
-        scaled.scale(self.size(), QtCore.Qt.AspectRatioMode.KeepAspectRatio)
-        x = (self.width() - scaled.width()) / 2
-        y = (self.height() - scaled.height()) / 2
-        return QtCore.QRectF(x, y, scaled.width(), scaled.height())
-
-    def _image_to_widget(self, point: QtCore.QPointF) -> QtCore.QPointF:
-        if self._frame_rgb is None:
-            return point
-        height, width = self._frame_rgb.shape[:2]
-        rect = self._target_rect()
-        scale_x = rect.width() / width
-        scale_y = rect.height() / height
-        return QtCore.QPointF(rect.left() + point.x() * scale_x, rect.top() + point.y() * scale_y)
-
-    def _widget_to_image(self, point: QtCore.QPointF) -> QtCore.QPointF:
-        if self._frame_rgb is None:
-            return point
-        height, width = self._frame_rgb.shape[:2]
-        rect = self._target_rect()
-        scale_x = width / rect.width()
-        scale_y = height / rect.height()
-        return QtCore.QPointF(
-            (point.x() - rect.left()) * scale_x, (point.y() - rect.top()) * scale_y
-        )
-
-    def _display_corners(self) -> list[QtCore.QPointF]:
-        if self._corners is None:
-            return []
-        return [
-            self._image_to_widget(QtCore.QPointF(float(x), float(y))) for x, y in self._corners
-        ]
-
-    def _handle_hit_test(self, widget_pos: QtCore.QPointF) -> int | None:
-        for idx, corner in enumerate(self._display_corners()):
-            if QtCore.QLineF(corner, widget_pos).length() <= self._handle_radius * 2.0:
-                return idx
-        return None
-
-    def _edge_hit_test(self, widget_pos: QtCore.QPointF) -> int | None:
-        display_corners = self._display_corners()
-        if len(display_corners) != 4:
-            return None
-        for idx in range(4):
-            start = display_corners[idx]
-            end = display_corners[(idx + 1) % 4]
-            if self._point_to_segment_distance(widget_pos, start, end) <= self._edge_hit_distance:
-                return idx
-        return None
-
-    def _center_hit_test(self, image_pos: QtCore.QPointF) -> bool:
-        if self._corners is None:
-            return False
-        min_x = float(np.min(self._corners[:, 0]))
-        max_x = float(np.max(self._corners[:, 0]))
-        min_y = float(np.min(self._corners[:, 1]))
-        max_y = float(np.max(self._corners[:, 1]))
-        width = max_x - min_x
-        height = max_y - min_y
-        center_width = min(width, max(width * self._center_fraction, self._center_min_size))
-        center_height = min(height, max(height * self._center_fraction, self._center_min_size))
-        center_x = (min_x + max_x) / 2.0
-        center_y = (min_y + max_y) / 2.0
-        return (
-            abs(image_pos.x() - center_x) <= center_width / 2.0
-            and abs(image_pos.y() - center_y) <= center_height / 2.0
-        )
-
-    def _translate_drag(self, image_pos: QtCore.QPointF) -> None:
-        if (
-            self._corners is None
-            or self._frame_rgb is None
-            or self._start_drag_image_pos is None
-            or self._start_drag_corners is None
-        ):
-            return
-        height, width = self._frame_rgb.shape[:2]
-        dx = image_pos.x() - self._start_drag_image_pos.x()
-        dy = image_pos.y() - self._start_drag_image_pos.y()
-
-        if self._drag_edge is None:
-            indices = [0, 1, 2, 3]
-        else:
-            indices = [self._drag_edge, (self._drag_edge + 1) % 4]
-
-        trial = self._start_drag_corners.copy()
-        trial[indices, 0] += dx
-        trial[indices, 1] += dy
-
-        min_dx = 0.0
-        max_dx = 0.0
-        min_dy = 0.0
-        max_dy = 0.0
-        subset = trial[indices]
-        min_x = float(np.min(subset[:, 0]))
-        max_x = float(np.max(subset[:, 0]))
-        min_y = float(np.min(subset[:, 1]))
-        max_y = float(np.max(subset[:, 1]))
-        if min_x < 0.0:
-            min_dx = -min_x
-        if max_x > width - 1:
-            max_dx = (width - 1) - max_x
-        if min_y < 0.0:
-            min_dy = -min_y
-        if max_y > height - 1:
-            max_dy = (height - 1) - max_y
-
-        adjusted_dx = dx + min_dx + max_dx
-        adjusted_dy = dy + min_dy + max_dy
-        self._corners = self._start_drag_corners.copy()
-        self._corners[indices, 0] = np.clip(
-            self._start_drag_corners[indices, 0] + adjusted_dx,
-            0,
-            width - 1,
-        )
-        self._corners[indices, 1] = np.clip(
-            self._start_drag_corners[indices, 1] + adjusted_dy,
-            0,
-            height - 1,
-        )
-        self.corners_changed.emit(self._corners.tolist())
-        self.update()
-
-    def _update_hover_cursor(self, widget_pos: QtCore.QPointF) -> None:
-        if self._frame_rgb is None:
-            self.unsetCursor()
-            return
-        image_pos = self._widget_to_image(widget_pos)
-        if self._corners is None:
-            if self._export_overlay_visible and self._export_overlay_rect is not None:
-                if self._export_overlay_corner_hit_test(widget_pos) is not None:
-                    self.setCursor(QtCore.Qt.CursorShape.SizeAllCursor)
-                    return
-                if self._export_overlay_edge_hit_test(widget_pos) is not None:
-                    self.setCursor(QtCore.Qt.CursorShape.OpenHandCursor)
-                    return
-                if self._export_overlay_center_hit_test(image_pos):
-                    self.setCursor(QtCore.Qt.CursorShape.OpenHandCursor)
-                    return
-            self.unsetCursor()
-            return
-        if self._handle_hit_test(widget_pos) is not None:
-            self.setCursor(QtCore.Qt.CursorShape.SizeAllCursor)
-            return
-        if self._edge_hit_test(widget_pos) is not None:
-            self.setCursor(QtCore.Qt.CursorShape.OpenHandCursor)
-            return
-        if self._center_hit_test(image_pos):
-            self.setCursor(QtCore.Qt.CursorShape.OpenHandCursor)
-            return
-        if self._export_overlay_visible and self._export_overlay_rect is not None:
-            if self._export_overlay_corner_hit_test(widget_pos) is not None:
-                self.setCursor(QtCore.Qt.CursorShape.SizeAllCursor)
-                return
-            if self._export_overlay_edge_hit_test(widget_pos) is not None:
-                self.setCursor(QtCore.Qt.CursorShape.OpenHandCursor)
-                return
-            if self._export_overlay_center_hit_test(image_pos):
-                self.setCursor(QtCore.Qt.CursorShape.OpenHandCursor)
-                return
-        self.unsetCursor()
-
-    def _paint_export_overlay(self, painter: QtGui.QPainter) -> None:
-        if not self._export_overlay_visible or self._export_overlay_rect is None:
-            return
-        top_left = self._image_to_widget(
-            QtCore.QPointF(self._export_overlay_rect.left(), self._export_overlay_rect.top())
-        )
-        bottom_right = self._image_to_widget(
-            QtCore.QPointF(self._export_overlay_rect.right(), self._export_overlay_rect.bottom())
-        )
-        display_rect = QtCore.QRectF(top_left, bottom_right).normalized()
-        if (
-            self._export_overlay_preview_enabled
-            and self._export_overlay_preview_pixmap is not None
-        ):
-            painter.drawPixmap(display_rect.toRect(), self._export_overlay_preview_pixmap)
-
-        pen = QtGui.QPen(QtGui.QColor("#38bdf8"), 2)
-        painter.setPen(pen)
-        painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
-        painter.drawRect(display_rect)
-
-        handle_brush = QtGui.QBrush(QtGui.QColor("#7dd3fc"))
-        painter.setBrush(handle_brush)
-        for point in self._export_overlay_display_corners():
-            painter.drawEllipse(point, self._handle_radius, self._handle_radius)
-
-    def _export_overlay_display_corners(self) -> list[QtCore.QPointF]:
-        if self._export_overlay_rect is None:
-            return []
-        rect = self._export_overlay_rect
-        return [
-            self._image_to_widget(QtCore.QPointF(rect.left(), rect.top())),
-            self._image_to_widget(QtCore.QPointF(rect.right(), rect.top())),
-            self._image_to_widget(QtCore.QPointF(rect.right(), rect.bottom())),
-            self._image_to_widget(QtCore.QPointF(rect.left(), rect.bottom())),
-        ]
-
-    def _export_overlay_corner_hit_test(self, widget_pos: QtCore.QPointF) -> int | None:
-        for idx, corner in enumerate(self._export_overlay_display_corners()):
-            if QtCore.QLineF(corner, widget_pos).length() <= self._handle_radius * 2.0:
-                return idx
-        return None
-
-    def _export_overlay_edge_hit_test(self, widget_pos: QtCore.QPointF) -> int | None:
-        corners = self._export_overlay_display_corners()
-        if len(corners) != 4:
-            return None
-        for idx in range(4):
-            start = corners[idx]
-            end = corners[(idx + 1) % 4]
-            if self._point_to_segment_distance(widget_pos, start, end) <= self._edge_hit_distance:
-                return idx
-        return None
-
-    def _export_overlay_center_hit_test(self, image_pos: QtCore.QPointF) -> bool:
-        return self._export_overlay_rect is not None and self._export_overlay_rect.contains(
-            image_pos
-        )
-
-    def _translate_export_overlay(self, image_pos: QtCore.QPointF) -> None:
-        if (
-            self._overlay_drag_anchor_image_pos is None
-            or self._overlay_drag_start_rect is None
-            or self._frame_rgb is None
-        ):
-            return
-        height, width = self._frame_rgb.shape[:2]
-        dx = image_pos.x() - self._overlay_drag_anchor_image_pos.x()
-        dy = image_pos.y() - self._overlay_drag_anchor_image_pos.y()
-        rect = QtCore.QRectF(self._overlay_drag_start_rect)
-        rect.translate(dx, dy)
-        if rect.left() < 0.0:
-            rect.moveLeft(0.0)
-        if rect.right() > width - 1:
-            rect.moveRight(width - 1)
-        if rect.top() < 0.0:
-            rect.moveTop(0.0)
-        if rect.bottom() > height - 1:
-            rect.moveBottom(height - 1)
-        self._set_export_overlay_rect(rect)
-
-    def _resize_export_overlay_from_corner(self, image_pos: QtCore.QPointF) -> None:
-        if (
-            self._overlay_drag_corner is None
-            or self._overlay_drag_start_rect is None
-            or self._frame_rgb is None
-        ):
-            return
-        rect = self._overlay_drag_start_rect
-        opposite_points = [
-            QtCore.QPointF(rect.right(), rect.bottom()),
-            QtCore.QPointF(rect.left(), rect.bottom()),
-            QtCore.QPointF(rect.left(), rect.top()),
-            QtCore.QPointF(rect.right(), rect.top()),
-        ]
-        opposite = opposite_points[self._overlay_drag_corner]
-        self._set_export_overlay_rect(
-            self._normalized_overlay_rect(
-                opposite,
-                self._clamp_image_point(image_pos),
-            )
-        )
-
-    def _resize_export_overlay_from_edge(self, image_pos: QtCore.QPointF) -> None:
-        if self._overlay_drag_edge is None or self._overlay_drag_start_rect is None:
-            return
-        point = self._clamp_image_point(image_pos)
-        rect = QtCore.QRectF(self._overlay_drag_start_rect)
-        if self._overlay_drag_edge == 0:
-            rect.setTop(min(point.y(), rect.bottom() - 1.0))
-        elif self._overlay_drag_edge == 1:
-            rect.setRight(max(point.x(), rect.left() + 1.0))
-        elif self._overlay_drag_edge == 2:
-            rect.setBottom(max(point.y(), rect.top() + 1.0))
-        else:
-            rect.setLeft(min(point.x(), rect.right() - 1.0))
-        self._set_export_overlay_rect(rect.normalized())
-
-    def _normalized_overlay_rect(
-        self,
-        point_a: QtCore.QPointF,
-        point_b: QtCore.QPointF,
-    ) -> QtCore.QRectF:
-        left = min(point_a.x(), point_b.x())
-        right = max(point_a.x(), point_b.x())
-        top = min(point_a.y(), point_b.y())
-        bottom = max(point_a.y(), point_b.y())
-        if math.isclose(left, right):
-            right = left + 1.0
-        if math.isclose(top, bottom):
-            bottom = top + 1.0
-        return QtCore.QRectF(left, top, right - left, bottom - top)
-
-    def _clamp_image_point(self, point: QtCore.QPointF) -> QtCore.QPointF:
-        if self._frame_rgb is None:
-            return point
-        height, width = self._frame_rgb.shape[:2]
-        return QtCore.QPointF(
-            float(np.clip(point.x(), 0.0, width - 1.0)),
-            float(np.clip(point.y(), 0.0, height - 1.0)),
-        )
-
-    def _set_export_overlay_rect(self, rect: QtCore.QRectF) -> None:
-        self._export_overlay_rect = rect.normalized()
-        self.export_overlay_changed.emit(
-            float(self._export_overlay_rect.x()),
-            float(self._export_overlay_rect.y()),
-            float(self._export_overlay_rect.width()),
-            float(self._export_overlay_rect.height()),
-        )
-        self.update()
-
-    @staticmethod
-    def _point_to_segment_distance(
-        point: QtCore.QPointF,
-        start: QtCore.QPointF,
-        end: QtCore.QPointF,
-    ) -> float:
-        dx = end.x() - start.x()
-        dy = end.y() - start.y()
-        if abs(dx) < 1e-6 and abs(dy) < 1e-6:
-            return math.hypot(point.x() - start.x(), point.y() - start.y())
-        t = ((point.x() - start.x()) * dx + (point.y() - start.y()) * dy) / (dx * dx + dy * dy)
-        t = min(1.0, max(0.0, t))
-        proj_x = start.x() + t * dx
-        proj_y = start.y() + t * dy
-        return math.hypot(point.x() - proj_x, point.y() - proj_y)
+from heatmap_alignment_timeline_widgets import (  # noqa: F401
+    AlignmentTimelineWidget,
+    SignalPlotWidget,
+    TimeAxisGeometry,
+    TimelineRangeModel,
+    _make_h5_signal_plot_pens,
+    _make_leg2_signal_plot_pens,
+    _plot_color_with_alpha,
+    format_track_offset_label,
+    track_offset_label_rect,
+    track_offset_label_should_show,
+    TIMELINE_LABEL_GUTTER_PX,
+    TIMELINE_OFFSET_LABEL_COLOR_HEX,
+    TIMELINE_TRACK_OFFSET_LABEL_MARGIN_PX,
+)
+
+
+from heatmap_alignment_viewport_widgets import (  # noqa: F401
+    CornerEditorWidget,
+    ViewportEditorWidget,
+)
 
 
 class SourceResolutionViewportWorker(QtCore.QObject):
@@ -2464,758 +292,10 @@ class SourceResolutionViewportWorker(QtCore.QObject):
         self.render_finished.emit(result)
 
 
-class ResourceColorSwatchDelegate(QtWidgets.QStyledItemDelegate):
-    def paint(
-        self,
-        painter: QtGui.QPainter,
-        option: QtWidgets.QStyleOptionViewItem,
-        index: QtCore.QModelIndex,
-    ) -> None:
-        item_option = QtWidgets.QStyleOptionViewItem(option)
-        self.initStyleOption(item_option, index)
-        item_option.text = ""
-        style = option.widget.style() if option.widget is not None else QtWidgets.QApplication.style()
-        style.drawControl(
-            QtWidgets.QStyle.ControlElement.CE_ItemViewItem,
-            item_option,
-            painter,
-            option.widget,
-        )
-
-        color_hex = index.data(QtCore.Qt.ItemDataRole.UserRole)
-        painter.save()
-        try:
-            rect = option.rect.adjusted(6, 8, -6, -8)
-            if not color_hex:
-                painter.setPen(QtGui.QPen(QtGui.QColor("#475569")))
-                painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
-                painter.drawRect(rect)
-                return
-            color = QtGui.QColor(str(color_hex))
-            if index.data(QtCore.Qt.ItemDataRole.UserRole + 1):
-                color.setAlpha(96)
-            painter.setPen(QtCore.Qt.PenStyle.NoPen)
-            painter.setBrush(color)
-            painter.drawRoundedRect(rect, 3, 3)
-        finally:
-            painter.restore()
-
-
-class _ResourceJobRunnable(QtCore.QRunnable):
-    def __init__(
-        self,
-        manager: ResourceJobManager,
-        kind: ResourceJobKind,
-        generation: int,
-        worker: object,
-    ) -> None:
-        super().__init__()
-        self._manager = manager
-        self._kind = kind
-        self._generation = generation
-        self._worker = worker
-        self.setAutoDelete(True)
-
-    def run(self) -> None:
-        try:
-            result = self._worker()
-        except Exception as exc:
-            if not self._manager._abandoned:
-                self._manager._dispatch_job_failure(self._kind, self._generation, exc)
-            return
-        if self._manager._abandoned:
-            self._manager._release_abandoned_worker_result(
-                self._kind,
-                self._generation,
-                result,
-            )
-            return
-        self._manager._dispatch_job_success(self._kind, self._generation, result)
-
-
-class ResourceJobManager(QtCore.QObject):
-    """Schedules camera and H5 resource jobs off the GUI thread."""
-
-    job_state_changed = QtCore.Signal()
-    job_succeeded = QtCore.Signal(str, int, object)
-    job_failed = QtCore.Signal(str, int, str)
-
-    def __init__(self, parent: QtCore.QObject | None = None) -> None:
-        super().__init__(parent)
-        self._board = ResourceJobBoard()
-        self._thread_pool = QtCore.QThreadPool.globalInstance()
-        self._proxy_active = False
-        self._h5_active = False
-        self._proxy_processes: dict[int, object] = {}
-        self._pending_results: dict[tuple[ResourceJobKind, int], object] = {}
-        self._cancelled_generations: set[tuple[ResourceJobKind, int]] = set()
-        self._abandoned = False
-        self.job_succeeded.connect(self._handle_job_success)
-        self.job_failed.connect(self._handle_job_failure)
-
-    def board(self) -> ResourceJobBoard:
-        return self._board
-
-    def snapshots(self) -> tuple[ResourceJobSnapshot, ...]:
-        return (
-            self._board.camera.snapshot("camera"),
-            self._board.radar_h5.snapshot("radar_h5"),
-        )
-
-    def blocks_export(self) -> bool:
-        return resource_job_blocks_export(self._board)
-
-    def _generation_cancelled(self, kind: ResourceJobKind, generation: int) -> bool:
-        return (kind, generation) in self._cancelled_generations
-
-    def _cancel_generation(self, kind: ResourceJobKind, generation: int) -> None:
-        if generation <= 0:
-            return
-        self._cancelled_generations.add((kind, generation))
-        if kind != "camera":
-            return
-        process = self._proxy_processes.pop(generation, None)
-        if process is None:
-            return
-        try:
-            process.terminate()
-        except OSError:
-            pass
-
-    def _release_job_result(self, kind: ResourceJobKind, generation: int, result: object) -> None:
-        release_resource_job_result(kind, result)
-        self._pending_results.pop((kind, generation), None)
-
-    def _discard_all_pending_results(self) -> None:
-        for (kind, generation), result in list(self._pending_results.items()):
-            self._release_job_result(kind, generation, result)
-
-    def abandon_all_jobs(self) -> None:
-        self._abandoned = True
-        for kind in ("camera", "radar_h5"):
-            slot = self._board.slot(kind)
-            if slot.phase not in ("idle", "failed"):
-                self._cancel_generation(kind, slot.generation)
-            clear_resource_job(self._board, kind)
-        self._discard_all_pending_results()
-        self.job_state_changed.emit()
-
-    def _release_abandoned_worker_result(
-        self,
-        kind: ResourceJobKind,
-        generation: int,
-        result: object,
-    ) -> None:
-        self._release_job_result(kind, generation, result)
-
-    def start_camera_job(
-        self,
-        camera_path: Path,
-        *,
-        replaces_active: bool,
-        cache_root: Path | None = None,
-    ) -> int:
-        self._abandoned = False
-        slot = self._board.camera
-        if slot.phase not in ("idle", "failed"):
-            self._cancel_generation("camera", slot.generation)
-        generation = begin_resource_job(
-            self._board,
-            "camera",
-            target_path=camera_path,
-            replaces_active=replaces_active,
-            initial_phase="pending",
-            message=f"Loading {camera_path.name}...",
-        )
-        self._schedule_camera_job(generation, camera_path, cache_root=cache_root)
-        self.job_state_changed.emit()
-        return generation
-
-    def start_h5_job(
-        self,
-        h5_path: Path,
-        *,
-        replaces_active: bool,
-        session_idx: int | None,
-        group_idx: int | None,
-        entry_idx: int | None,
-        subsweep_idx: int | None,
-        color_min: float,
-        color_max: float | None,
-        fixed_levels: bool,
-    ) -> int:
-        self._abandoned = False
-        slot = self._board.radar_h5
-        if slot.phase not in ("idle", "failed"):
-            self._cancel_generation("radar_h5", slot.generation)
-        generation = begin_resource_job(
-            self._board,
-            "radar_h5",
-            target_path=h5_path,
-            replaces_active=replaces_active,
-            initial_phase="loading",
-            message=f"Loading {h5_path.name}...",
-        )
-        self._schedule_h5_job(
-            generation,
-            h5_path,
-            session_idx=session_idx,
-            group_idx=group_idx,
-            entry_idx=entry_idx,
-            subsweep_idx=subsweep_idx,
-            color_min=color_min,
-            color_max=color_max,
-            fixed_levels=fixed_levels,
-        )
-        self.job_state_changed.emit()
-        return generation
-
-    def cancel_job(self, kind: ResourceJobKind) -> bool:
-        if not request_cancel_resource_job(self._board, kind):
-            return False
-        slot = self._board.slot(kind)
-        generation = slot.generation
-        self._cancel_generation(kind, generation)
-        pending = self._pending_results.pop((kind, generation), None)
-        if pending is not None:
-            self._release_job_result(kind, generation, pending)
-        complete_resource_job(self._board, kind, generation, phase="idle")
-        self.job_state_changed.emit()
-        return True
-
-    def _schedule_camera_job(
-        self,
-        generation: int,
-        camera_path: Path,
-        *,
-        cache_root: Path | None,
-    ) -> None:
-        def _wait_for_proxy_slot() -> None:
-            if self._proxy_active:
-                mark_resource_job_phase(
-                    self._board,
-                    "camera",
-                    generation,
-                    "waiting",
-                    message=f"Waiting to build preview proxy for {camera_path.name}...",
-                )
-                QtCore.QMetaObject.invokeMethod(
-                    self,
-                    "_emit_job_state_changed",
-                    QtCore.Qt.ConnectionType.QueuedConnection,
-                )
-            while self._proxy_active:
-                if self._generation_cancelled("camera", generation):
-                    raise ResourceJobError("Camera load cancelled.")
-                QtCore.QThread.msleep(25)
-
-        def _worker() -> CameraResourceJobResult:
-            _wait_for_proxy_slot()
-            if self._generation_cancelled("camera", generation):
-                raise ResourceJobError("Camera load cancelled.")
-            self._proxy_active = True
-            mark_resource_job_phase(
-                self._board,
-                "camera",
-                generation,
-                "building",
-                message=f"Building preview proxy for {camera_path.name}...",
-            )
-            QtCore.QMetaObject.invokeMethod(
-                self,
-                "_emit_job_state_changed",
-                QtCore.Qt.ConnectionType.QueuedConnection,
-            )
-
-            def _process_hook(process: object) -> None:
-                self._proxy_processes[generation] = process
-
-            try:
-                return run_camera_resource_job(
-                    camera_path,
-                    cache_root=cache_root,
-                    cancel_check=lambda: self._generation_cancelled("camera", generation),
-                    process_hook=_process_hook,
-                )
-            finally:
-                self._proxy_active = False
-                self._proxy_processes.pop(generation, None)
-                self._cancelled_generations.discard(("camera", generation))
-
-        runnable = _ResourceJobRunnable(self, "camera", generation, _worker)
-        self._thread_pool.start(runnable, priority=0)
-
-    def _schedule_h5_job(
-        self,
-        generation: int,
-        h5_path: Path,
-        *,
-        session_idx: int | None,
-        group_idx: int | None,
-        entry_idx: int | None,
-        subsweep_idx: int | None,
-        color_min: float,
-        color_max: float | None,
-        fixed_levels: bool,
-    ) -> None:
-        def _wait_for_h5_slot() -> None:
-            if self._h5_active:
-                mark_resource_job_phase(
-                    self._board,
-                    "radar_h5",
-                    generation,
-                    "waiting",
-                    message=f"Waiting to load {h5_path.name}...",
-                )
-                QtCore.QMetaObject.invokeMethod(
-                    self,
-                    "_emit_job_state_changed",
-                    QtCore.Qt.ConnectionType.QueuedConnection,
-                )
-            while self._h5_active:
-                if self._generation_cancelled("radar_h5", generation):
-                    raise ResourceJobError("H5 load cancelled.")
-                QtCore.QThread.msleep(25)
-
-        def _worker() -> LoadedH5ResourcePayload:
-            _wait_for_h5_slot()
-            if self._generation_cancelled("radar_h5", generation):
-                raise ResourceJobError("H5 load cancelled.")
-            self._h5_active = True
-            try:
-                return load_h5_resource_payload(
-                    h5_path,
-                    session_idx=session_idx,
-                    group_idx=group_idx,
-                    entry_idx=entry_idx,
-                    subsweep_idx=subsweep_idx,
-                    color_min=color_min,
-                    color_max=color_max,
-                    fixed_levels=fixed_levels,
-                    cancel_check=lambda: self._generation_cancelled("radar_h5", generation),
-                )
-            finally:
-                self._h5_active = False
-                self._cancelled_generations.discard(("radar_h5", generation))
-
-        runnable = _ResourceJobRunnable(self, "radar_h5", generation, _worker)
-        self._thread_pool.start(runnable, priority=0)
-
-    @QtCore.Slot()
-    def _emit_job_state_changed(self) -> None:
-        self.job_state_changed.emit()
-
-    def _dispatch_job_success(
-        self,
-        kind: ResourceJobKind,
-        generation: int,
-        result: object,
-    ) -> None:
-        try:
-            self.job_succeeded.emit(kind, generation, result)
-        except RuntimeError as exc:
-            if "Internal C++ object" not in str(exc):
-                raise
-            self._release_job_result(kind, generation, result)
-
-    def _dispatch_job_failure(
-        self,
-        kind: ResourceJobKind,
-        generation: int,
-        error: Exception,
-    ) -> None:
-        try:
-            self.job_failed.emit(kind, generation, str(error))
-        except RuntimeError as exc:
-            if "Internal C++ object" not in str(exc):
-                raise
-            return
-
-    def _handle_job_success(
-        self,
-        kind: ResourceJobKind,
-        generation: int,
-        result: object,
-    ) -> None:
-        slot = self._board.slot(kind)
-        if slot.cancel_requested or self._generation_cancelled(kind, generation):
-            self._release_job_result(kind, generation, result)
-            return
-        if not should_apply_job_result(slot, generation):
-            self._release_job_result(kind, generation, result)
-            return
-        complete_resource_job(self._board, kind, generation, phase="idle")
-        self._pending_results[(kind, generation)] = result
-        self.job_state_changed.emit()
-
-    def _handle_job_failure(self, kind: ResourceJobKind, generation: int, message: str) -> None:
-        slot = self._board.slot(kind)
-        if not should_apply_job_result(slot, generation):
-            return
-        if slot.cancel_requested or self._generation_cancelled(kind, generation):
-            complete_resource_job(self._board, kind, generation, phase="idle")
-        else:
-            complete_resource_job(
-                self._board,
-                kind,
-                generation,
-                phase="failed",
-                message=message,
-            )
-        self.job_state_changed.emit()
-
-    def take_pending_result(self, kind: ResourceJobKind, generation: int) -> object | None:
-        return self._pending_results.pop((kind, generation), None)
-
-
-class ElidedPathItemDelegate(QtWidgets.QStyledItemDelegate):
-    def initStyleOption(
-        self,
-        option: QtWidgets.QStyleOptionViewItem,
-        index: QtCore.QModelIndex,
-    ) -> None:
-        super().initStyleOption(option, index)
-        full_path = str(index.data(QtCore.Qt.ItemDataRole.UserRole) or "")
-        if not full_path:
-            option.text = ""
-            return
-        metrics = option.fontMetrics
-        available_px = max(24, option.rect.width() - 12)
-        avg_char_px = max(1, metrics.horizontalAdvance("n"))
-        max_chars = max(12, available_px // avg_char_px)
-        option.text = elide_path_middle(full_path, max_chars)
-
-
-class ResourcesWindow(QtWidgets.QDialog):
-    """Modeless resource manager owned by the alignment main window."""
-
-    def __init__(self, main_window: HeatmapAlignmentWindow) -> None:
-        super().__init__(main_window)
-        self._main_window = main_window
-        self.setWindowTitle("Resources")
-        self.setModal(False)
-        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose, False)
-        self.resize(920, 520)
-
-        layout = QtWidgets.QVBoxLayout(self)
-
-        self.session_label = QtWidgets.QLabel()
-        self.session_label.setWordWrap(True)
-        layout.addWidget(self.session_label)
-
-        self.table = QtWidgets.QTableWidget(0, 5)
-        self.table.setHorizontalHeaderLabels(["", "Resource", "Role", "Status", "Path"])
-        table_header = self.table.horizontalHeader()
-        table_header.setStretchLastSection(True)
-        table_header.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.Fixed)
-        table_header.setSectionsClickable(False)
-        table_header.setHighlightSections(False)
-        self.table.setColumnWidth(0, 34)
-        table_metrics = self.table.fontMetrics()
-        resource_default_width = max(
-            RESOURCES_TABLE_RESOURCE_COLUMN_DEFAULT_WIDTH_PX,
-            table_metrics.horizontalAdvance("Radar Peak (JSON)") + 20,
-        )
-        status_default_width = max(
-            RESOURCES_TABLE_STATUS_COLUMN_DEFAULT_WIDTH_PX,
-            table_metrics.horizontalAdvance("Generated (unsaved)") + 20,
-        )
-        self.table.setColumnWidth(1, resource_default_width)
-        self.table.setColumnWidth(3, status_default_width)
-        self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
-        self.table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
-        self.table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.table.setAlternatingRowColors(True)
-        self.table.setShowGrid(False)
-        self.table.setCornerButtonEnabled(False)
-        self.table.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
-        self.table.customContextMenuRequested.connect(self._show_row_context_menu)
-        self.table.itemSelectionChanged.connect(self._update_details_for_selection)
-        self.table.setItemDelegateForColumn(0, ResourceColorSwatchDelegate(self.table))
-        self.table.setItemDelegateForColumn(4, ElidedPathItemDelegate(self.table))
-        layout.addWidget(self.table, stretch=1)
-
-        details_group = QtWidgets.QGroupBox("Selected Resource")
-        details_layout = QtWidgets.QVBoxLayout(details_group)
-        details_layout.setSpacing(0)
-        self.details_identity_label = QtWidgets.QLabel()
-        self.details_identity_label.setWordWrap(True)
-        self.details_status_label = QtWidgets.QLabel()
-        self.details_status_label.setWordWrap(True)
-        self.details_messages_label = QtWidgets.QLabel()
-        self.details_messages_label.setWordWrap(True)
-        self.details_messages_label.setTextInteractionFlags(
-            QtCore.Qt.TextInteractionFlag.TextSelectableByMouse
-        )
-        self.details_path_widget = QtWidgets.QWidget()
-        path_block_layout = QtWidgets.QVBoxLayout(self.details_path_widget)
-        path_block_layout.setContentsMargins(
-            0,
-            RESOURCES_DETAILS_PATH_BLOCK_TOP_MARGIN_PX,
-            0,
-            0,
-        )
-        path_block_layout.setSpacing(0)
-        self.details_path_label = QtWidgets.QLabel()
-        self.details_path_label.setWordWrap(True)
-        self.details_path_label.setTextInteractionFlags(
-            QtCore.Qt.TextInteractionFlag.TextSelectableByMouse
-        )
-        path_block_layout.addWidget(self.details_path_label)
-        details_layout.addWidget(self.details_identity_label)
-        details_layout.addSpacing(RESOURCES_DETAILS_SECTION_SPACING_PX)
-        details_layout.addWidget(self.details_status_label)
-        details_layout.addWidget(self.details_messages_label)
-        details_layout.addWidget(self.details_path_widget)
-        details_layout.addSpacing(RESOURCES_DETAILS_SECTION_SPACING_PX)
-
-        action_row = QtWidgets.QHBoxLayout()
-        self.load_button = QtWidgets.QPushButton(RESOURCE_ACTION_LABELS["load"])
-        self.replace_button = QtWidgets.QPushButton(RESOURCE_ACTION_LABELS["replace"])
-        self.unload_button = QtWidgets.QPushButton(RESOURCE_ACTION_LABELS["unload"])
-        self.reload_button = QtWidgets.QPushButton(RESOURCE_ACTION_LABELS["reload"])
-        self.reveal_button = QtWidgets.QPushButton(RESOURCE_ACTION_LABELS["reveal"])
-        self.inspect_button = QtWidgets.QPushButton(RESOURCE_ACTION_LABELS["inspect"])
-        self.cancel_button = QtWidgets.QPushButton(RESOURCE_ACTION_LABELS["cancel"])
-        self.generate_button = QtWidgets.QPushButton(RESOURCE_ACTION_LABELS["generate"])
-        self.save_peaks_button = QtWidgets.QPushButton(RESOURCE_ACTION_LABELS["save"])
-        self.save_peaks_as_button = QtWidgets.QPushButton(RESOURCE_ACTION_LABELS["save_as"])
-        for button in (
-            self.load_button,
-            self.replace_button,
-            self.unload_button,
-            self.reload_button,
-            self.reveal_button,
-            self.inspect_button,
-            self.cancel_button,
-            self.generate_button,
-            self.save_peaks_button,
-            self.save_peaks_as_button,
-        ):
-            action_row.addWidget(button)
-        action_row.addStretch(1)
-        details_layout.addLayout(action_row)
-        layout.addWidget(details_group)
-
-        self.load_button.clicked.connect(lambda: self._invoke_action("load"))
-        self.replace_button.clicked.connect(lambda: self._invoke_action("replace"))
-        self.unload_button.clicked.connect(lambda: self._invoke_action("unload"))
-        self.reload_button.clicked.connect(lambda: self._invoke_action("reload"))
-        self.reveal_button.clicked.connect(lambda: self._invoke_action("reveal"))
-        self.inspect_button.clicked.connect(lambda: self._invoke_action("inspect"))
-        self.cancel_button.clicked.connect(lambda: self._invoke_action("cancel"))
-        self.generate_button.clicked.connect(lambda: self._invoke_action("generate"))
-        self.save_peaks_button.clicked.connect(lambda: self._invoke_action("save"))
-        self.save_peaks_as_button.clicked.connect(lambda: self._invoke_action("save_as"))
-
-        bottom_row = QtWidgets.QHBoxLayout()
-        self.clear_all_button = QtWidgets.QPushButton("Clear All Resources...")
-        self.clear_all_button.clicked.connect(self._main_window.clear_all_resources)
-        bottom_row.addWidget(self.clear_all_button)
-        self.generate_peak_series_button = QtWidgets.QPushButton("&Generate Peak Series...")
-        self.generate_peak_series_button.clicked.connect(
-            lambda: self._main_window.invoke_resource_action("radar_peak", "generate")
-        )
-        bottom_row.addWidget(self.generate_peak_series_button)
-        self.import_peak_series_button = QtWidgets.QPushButton("&Import Peak Series...")
-        self.import_peak_series_button.clicked.connect(
-            lambda: self._main_window.invoke_resource_action("radar_peak", "load")
-        )
-        bottom_row.addWidget(self.import_peak_series_button)
-        bottom_row.addStretch(1)
-        self.close_button = QtWidgets.QPushButton("&Close")
-        self.close_button.clicked.connect(self._dismiss)
-        bottom_row.addWidget(self.close_button)
-        layout.addLayout(bottom_row)
-
-        self._summaries: tuple[ResourceSummary, ...] = ()
-        self._selected_series_id: str = ""  # Series id of the selected peak row (if any).
-
-    def _dismiss(self) -> None:
-        self.hide()
-
-    def closeEvent(self, event: QtGui.QCloseEvent) -> None:
-        event.accept()
-        self.hide()
-
-    @staticmethod
-    def _configure_table_item(item: QtWidgets.QTableWidgetItem) -> None:
-        item.setFlags(
-            QtCore.Qt.ItemFlag.ItemIsSelectable
-            | QtCore.Qt.ItemFlag.ItemIsEnabled
-        )
-
-    def _selected_table_row(self) -> int:
-        selection_model = self.table.selectionModel()
-        if selection_model is not None:
-            selected_rows = selection_model.selectedRows()
-            if selected_rows:
-                return selected_rows[0].row()
-        return self.table.currentRow()
-
-    def _select_table_row(self, row: int) -> None:
-        if row < 0 or row >= self.table.rowCount():
-            return
-        self.table.blockSignals(True)
-        try:
-            self.table.clearSelection()
-            self.table.selectRow(row)
-            self.table.setCurrentCell(row, 0)
-        finally:
-            self.table.blockSignals(False)
-
-    def refresh(self, summaries: tuple[ResourceSummary, ...], session_path: Path | None) -> None:
-        if session_path is None:
-            self.session_label.setText("Session: Untitled Session")
-        else:
-            self.session_label.setText(f"Session: {session_path}")
-        self._summaries = summaries
-        selected_kind = self._selected_kind()
-        prev_series_id = self._selected_series_id
-        self.table.blockSignals(True)
-        try:
-            self.table.setRowCount(len(summaries))
-            for row_index, summary in enumerate(summaries):
-                swatch_item = QtWidgets.QTableWidgetItem()
-                swatch_item.setData(QtCore.Qt.ItemDataRole.UserRole, summary.color_hex)
-                swatch_item.setData(QtCore.Qt.ItemDataRole.UserRole + 1, summary.color_muted)
-                self._configure_table_item(swatch_item)
-                self.table.setItem(row_index, 0, swatch_item)
-
-                name_item = QtWidgets.QTableWidgetItem(summary.display_name)
-                self._configure_table_item(name_item)
-                self.table.setItem(row_index, 1, name_item)
-
-                role_item = QtWidgets.QTableWidgetItem(summary.role)
-                self._configure_table_item(role_item)
-                self.table.setItem(row_index, 2, role_item)
-
-                status_text = summary.status_label if summary.status_label else RESOURCE_STATUS_LABELS[summary.status]
-                if summary.job_phase not in ("idle", "superseded"):
-                    status_text = RESOURCE_JOB_STATUS_LABELS[summary.job_phase]
-                status_item = QtWidgets.QTableWidgetItem(status_text)
-                self._configure_table_item(status_item)
-                self.table.setItem(row_index, 3, status_item)
-
-                path_item = QtWidgets.QTableWidgetItem()
-                path_item.setData(QtCore.Qt.ItemDataRole.UserRole, summary.path)
-                if summary.path:
-                    path_item.setToolTip(summary.path)
-                self._configure_table_item(path_item)
-                self.table.setItem(row_index, 4, path_item)
-
-            # Restore selection: prefer series_id match for peak rows; fall back to kind match.
-            restored = False
-            if prev_series_id:
-                for row_index, summary in enumerate(summaries):
-                    if summary.series_id == prev_series_id:
-                        self._select_table_row(row_index)
-                        restored = True
-                        break
-            if not restored and selected_kind is not None:
-                for row_index, summary in enumerate(summaries):
-                    if summary.kind == selected_kind and not summary.series_id:
-                        self._select_table_row(row_index)
-                        restored = True
-                        break
-            if not restored and summaries:
-                self._select_table_row(0)
-        finally:
-            self.table.blockSignals(False)
-        self._update_details_for_selection()
-
-    def _selected_summary(self) -> ResourceSummary | None:
-        row = self._selected_table_row()
-        if row < 0 or row >= len(self._summaries):
-            return None
-        return self._summaries[row]
-
-    def _selected_kind(self) -> ResourceKind | None:
-        summary = self._selected_summary()
-        return None if summary is None else summary.kind
-
-    def _update_details_for_selection(self) -> None:
-        summary = self._selected_summary()
-        self._selected_series_id = summary.series_id if summary is not None else ""
-        if summary is None:
-            self.details_identity_label.setText("")
-            self.details_status_label.setText("")
-            self.details_messages_label.setText("")
-            self.details_messages_label.setVisible(False)
-            self.details_path_label.clear()
-            self.details_path_widget.setVisible(False)
-            for button in (
-                self.load_button,
-                self.replace_button,
-                self.unload_button,
-                self.reload_button,
-                self.reveal_button,
-                self.inspect_button,
-                self.cancel_button,
-                self.generate_button,
-                self.save_peaks_button,
-                self.save_peaks_as_button,
-            ):
-                button.setEnabled(False)
-            return
-
-        self.details_identity_label.setText(
-            f"{summary.display_name} ({summary.role})"
-        )
-        display_status = summary.status_label if summary.status_label else RESOURCE_STATUS_LABELS[summary.status]
-        self.details_status_label.setText(f"{display_status}\n{summary.details}")
-        if summary.messages:
-            self.details_messages_label.setText("\n".join(summary.messages))
-            self.details_messages_label.setVisible(True)
-        else:
-            self.details_messages_label.clear()
-            self.details_messages_label.setVisible(False)
-
-        if summary.path:
-            self.details_path_label.setText(f"Path: {summary.path}")
-            self.details_path_widget.setVisible(True)
-        else:
-            self.details_path_label.clear()
-            self.details_path_widget.setVisible(False)
-
-        action_set = set(summary.actions)
-        is_peak_series_row = bool(summary.series_id)
-        self.load_button.setEnabled("load" in action_set)
-        # Replace is not supported for individual peak series rows; leave it disabled.
-        self.replace_button.setEnabled("replace" in action_set and not is_peak_series_row)
-        self.unload_button.setEnabled("unload" in action_set)
-        self.reload_button.setEnabled("reload" in action_set)
-        self.reveal_button.setEnabled("reveal" in action_set)
-        self.inspect_button.setEnabled("inspect" in action_set)
-        self.cancel_button.setEnabled("cancel" in action_set)
-        # Generate is a global append action in the footer; disable it on individual series rows.
-        self.generate_button.setEnabled("generate" in action_set and not is_peak_series_row)
-        self.save_peaks_button.setEnabled("save" in action_set)
-        self.save_peaks_as_button.setEnabled("save_as" in action_set)
-
-    def _invoke_action(self, action: ResourceAction) -> None:
-        summary = self._selected_summary()
-        if summary is None:
-            return
-        self._main_window.invoke_resource_action(summary.kind, action, series_id=summary.series_id)
-
-    def _show_row_context_menu(self, position: QtCore.QPoint) -> None:
-        index = self.table.indexAt(position)
-        if not index.isValid():
-            return
-        self._select_table_row(index.row())
-        summary = self._selected_summary()
-        if summary is None:
-            return
-        menu = QtWidgets.QMenu(self)
-        for action in summary.actions:
-            menu_action = menu.addAction(RESOURCE_ACTION_LABELS[action])
-            menu_action.triggered.connect(
-                lambda _checked=False, kind=summary.kind, chosen=action, sid=summary.series_id: (
-                    self._main_window.invoke_resource_action(kind, chosen, series_id=sid)
-                )
-            )
-        menu.exec(self.table.viewport().mapToGlobal(position))
+from heatmap_alignment_resource_job_manager import (  # noqa: F401
+    _ResourceJobRunnable,
+    ResourceJobManager,
+)
 
 
 @dataclass
@@ -3237,175 +317,6 @@ class _H5ResourceBackup:
     viewport_output_height: int
 
 
-class GeneratePeakSeriesDialog(QtWidgets.QDialog):
-    """Dialog for configuring a new generated peak series."""
-
-    def __init__(self, parent=None, *, default_threshold: float = DEFAULT_PEAK_THRESHOLD) -> None:
-        super().__init__(parent)
-        self.setWindowTitle("Generate Peak Series")
-        layout = QtWidgets.QFormLayout(self)
-        self._algo_combo = QtWidgets.QComboBox()
-        self._algo_combo.addItem(ALGORITHM_LABEL_SUM_VELOCITY, PEAK_EXTRACTION_METHOD_SUM_VELOCITY)
-        self._algo_combo.addItem(ALGORITHM_LABEL_ZERO_VELOCITY_SLICE, PEAK_EXTRACTION_METHOD_ZERO_VELOCITY_SLICE)
-        layout.addRow("Algorithm:", self._algo_combo)
-        self._threshold_spin = QtWidgets.QDoubleSpinBox()
-        self._threshold_spin.setRange(0.0, 1_000_000.0)
-        self._threshold_spin.setDecimals(1)
-        self._threshold_spin.setValue(default_threshold)
-        layout.addRow("Threshold:", self._threshold_spin)
-        self._name_edit = QtWidgets.QLineEdit()
-        layout.addRow("Name:", self._name_edit)
-        self._algo_combo.currentIndexChanged.connect(self._update_default_name)
-        self._threshold_spin.valueChanged.connect(self._update_default_name)
-        self._update_default_name()
-        buttons = QtWidgets.QDialogButtonBox(
-            QtWidgets.QDialogButtonBox.StandardButton.Ok | QtWidgets.QDialogButtonBox.StandardButton.Cancel
-        )
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addRow(buttons)
-
-    def _update_default_name(self) -> None:
-        algo_id = self._algo_combo.currentData()
-        thresh = self._threshold_spin.value()
-        self._name_edit.setPlaceholderText(default_generated_name(algo_id, thresh))
-
-    @property
-    def algorithm_id(self) -> str:
-        return self._algo_combo.currentData()
-
-    @property
-    def threshold(self) -> float:
-        return self._threshold_spin.value()
-
-    @property
-    def display_name(self) -> str:
-        text = self._name_edit.text().strip()
-        if text:
-            return text
-        return default_generated_name(self.algorithm_id, self.threshold)
-
-
-class HeatmapDistanceHeader(QtWidgets.QWidget):
-    """Compact header showing distance extent labels and peak distance cue."""
-
-    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
-        super().__init__(parent)
-        self._dist_min: float | None = None
-        self._dist_max: float | None = None
-        self._peak_dist_m: float | None = None
-        self.setFixedHeight(20)
-        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
-
-    def set_extent(self, dist_min: float | None, dist_max: float | None) -> None:
-        self._dist_min = dist_min
-        self._dist_max = dist_max
-        self.update()
-
-    def set_peak_distance(self, peak_dist_m: float | None) -> None:
-        self._peak_dist_m = peak_dist_m
-        self.update()
-
-    def paintEvent(self, event: QtGui.QPaintEvent) -> None:
-        del event
-        painter = QtGui.QPainter(self)
-        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
-        try:
-            w = self.width()
-            h = self.height()
-            fg = QtGui.QColor("#d7dde6")
-            painter.setPen(fg)
-
-            font = painter.font()
-            font.setPointSizeF(max(6.0, font.pointSizeF() * 0.85))
-            painter.setFont(font)
-            fm = QtGui.QFontMetrics(font)
-
-            # Reserve the bottom pixels for the triangle so text sits in the upper band.
-            triangle_size = 5
-            text_h = h - triangle_size - 2  # text rect height, clear of the triangle
-
-            # Gap between adjacent labels (pixels).
-            label_gap = 4
-            # Left margin where extent labels are drawn.
-            margin = 4
-
-            has_peak = (
-                self._peak_dist_m is not None
-                and self._dist_min is not None
-                and self._dist_max is not None
-                and self._dist_max != self._dist_min
-            )
-
-            # Measure extent labels when we have the data (regardless of show_extents threshold).
-            left_text = right_text = ""
-            left_w = right_w = 0
-            if self._dist_min is not None and self._dist_max is not None:
-                left_text = "{:.3f} m".format(self._dist_min)
-                right_text = "{:.3f} m".format(self._dist_max)
-                left_w = fm.horizontalAdvance(left_text)
-                right_w = fm.horizontalAdvance(right_text)
-
-            # Measure peak label.
-            peak_text = ""
-            peak_text_w = 0
-            peak_x = 0
-            if has_peak:
-                peak_text = "{:.3f} m".format(self._peak_dist_m)
-                peak_text_w = fm.horizontalAdvance(peak_text)
-                x_frac = (self._peak_dist_m - self._dist_min) / (self._dist_max - self._dist_min)
-                x_frac = max(0.0, min(1.0, x_frac))
-                peak_x = int(x_frac * w)
-
-            # Decide whether extent labels can coexist with the peak label without overlap.
-            # Extent labels sit at [margin, margin+left_w] and [w-margin-right_w, w-margin].
-            # Peak text center is clamped within [peak_left_bound, peak_right_bound].
-            # If the available gap is too small, suppress extent labels to keep peak cue visible.
-            half_peak = peak_text_w // 2
-            if has_peak and w >= 120 and left_w > 0:
-                # Space available for the peak label center, bounded by extent labels.
-                peak_left_bound = margin + left_w + label_gap + half_peak
-                peak_right_bound = w - margin - right_w - label_gap - half_peak
-                show_extents = peak_left_bound <= peak_right_bound
-            else:
-                show_extents = w >= 120 and left_w > 0
-                peak_left_bound = margin + half_peak
-                peak_right_bound = w - margin - half_peak
-
-            if show_extents:
-                painter.drawText(margin, 0, w - 2 * margin, text_h, int(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter), left_text)
-                painter.drawText(margin, 0, w - 2 * margin, text_h, int(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter), right_text)
-
-            if has_peak:
-                # Clamp peak label center to avoid running off the widget edges.
-                text_center = max(
-                    margin + half_peak,
-                    min(w - margin - half_peak, peak_x),
-                )
-                # Further clamp within the measured extent-label bounds when extents are shown.
-                if show_extents:
-                    text_center = max(peak_left_bound, min(peak_right_bound, text_center))
-                text_left = text_center - half_peak
-
-                # Draw peak label text in the same upper band as extent labels.
-                painter.setPen(fg)
-                painter.drawText(text_left, 0, peak_text_w + 2, text_h, int(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter), peak_text)
-
-                # Triangle always tracks true peak_x regardless of label clamping.
-                tri_tip_y = h - 1
-                tri_top_y = tri_tip_y - triangle_size
-                path = QtGui.QPainterPath()
-                path.moveTo(peak_x, tri_tip_y)
-                path.lineTo(peak_x - triangle_size, tri_top_y)
-                path.lineTo(peak_x + triangle_size, tri_top_y)
-                path.closeSubpath()
-                painter.setBrush(fg)
-                painter.setPen(QtCore.Qt.PenStyle.NoPen)
-                painter.drawPath(path)
-        finally:
-            painter.end()
-
-
 class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
     """Main window for the manual alignment workbench."""
 
@@ -3417,9 +328,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.resize(1600, 980)
 
         self.session = AlignmentSession()
-        self._session_dirty = False
-        self._session_dirty_guard_depth = 0
-        self._current_session_path: Path | None = None
+        self._session_lifecycle = SessionLifecycleState()
         self._resources_window: ResourcesWindow | None = None
         self._resource_reload_errors: dict[ResourceKind, str] = {}
         self._resource_load_warnings: dict[ResourceKind, tuple[str, ...]] = {}
@@ -3453,6 +362,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._camera_replacement_backup: _CameraResourceBackup | None = None
         self._h5_replacement_backup: _H5ResourceBackup | None = None
         self._inflight_h5_identity: H5SlotIdentity | None = None
+        self._pending_peak_session_reload: bool = False
 
         self.viewport_source_resolution_timer = QtCore.QTimer(self)
         self.viewport_source_resolution_timer.setSingleShot(True)
@@ -3492,14 +402,9 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         QtCore.QTimer.singleShot(0, self.schedule_timeline_axis_geometry_sync)
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
-        if self._session_dirty or self._any_peaks_unsaved():
-            choice = self._prompt_save_discard_cancel("quit")
-            if choice == "cancel":
-                event.ignore()
-                return
-            if choice == "save" and not self._save_session_for_prompt():
-                event.ignore()
-                return
+        if not self._handle_session_transition_guard("quit"):
+            event.ignore()
+            return
         self.viewport_source_resolution_timer.stop()
         self._source_resolution_thread.quit()
         self._source_resolution_thread.wait()
@@ -3511,6 +416,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._camera_replacement_backup = None
         self._h5_replacement_backup = None
         self._inflight_h5_identity = None
+        self._pending_peak_session_reload = False
 
     def _create_menu_bar(self) -> None:
         file_menu = self.menuBar().addMenu("&File")
@@ -3657,23 +563,19 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             self._refresh_recent_sessions_menu()
             return
 
-        self._open_session_from_path(session_path, prompt_for_unsaved=True)
+        self._open_session(
+            LoadSessionPlan(session_path=session_path, prompt_for_unsaved=True)
+        )
 
-    def _open_session_from_path(
-        self, session_path: Path, *, prompt_for_unsaved: bool
-    ) -> bool:
-        if prompt_for_unsaved and (self._session_dirty or self._any_peaks_unsaved()):
-            choice = self._prompt_save_discard_cancel("open")
-            if choice == "cancel":
-                return False
-            if choice == "save" and not self._save_session_for_prompt():
-                return False
+    def _open_session(self, plan: LoadSessionPlan) -> bool:
+        if plan.prompt_for_unsaved and not self._handle_session_transition_guard("open"):
+            return False
 
         try:
-            self.load_session_from_path(session_path)
+            self.load_session_from_path(plan.session_path)
         except (OSError, ValueError) as exc:
             QtWidgets.QMessageBox.warning(self, "Open session failed", str(exc))
-            self.statusBar().showMessage(f"Could not open session: {session_path}")
+            self.statusBar().showMessage(f"Could not open session: {plan.session_path}")
             return False
 
         return True
@@ -3714,6 +616,8 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         rendered_heatmap_layout.setSpacing(0)
         self._heatmap_distance_header = HeatmapDistanceHeader()
         rendered_heatmap_layout.addWidget(self._heatmap_distance_header)
+        self._detection_strip = DetectionStripWidget()
+        rendered_heatmap_layout.addWidget(self._detection_strip)
         rendered_heatmap_layout.addWidget(self.truth_view)
         self.truth_view.setMouseTracking(True)
         self.truth_view.installEventFilter(self)
@@ -3742,13 +646,13 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._heatmap_vel_extent_label.setStyleSheet("color: #d7dde6; font-size: 10px;")
         rendered_heatmap_color_row.addWidget(self._heatmap_vel_extent_label)
         rendered_heatmap_controls_layout.addLayout(rendered_heatmap_color_row)
-        # Peak series marker selector.
+        # Detection algorithm selector.
         rendered_heatmap_peak_row = QtWidgets.QHBoxLayout()
-        rendered_heatmap_peak_row.addWidget(QtWidgets.QLabel("Peak Marker:"))
+        rendered_heatmap_peak_row.addWidget(QtWidgets.QLabel("Detection Algorithm:"))
         self._heatmap_peak_combo = QtWidgets.QComboBox()
         self._heatmap_peak_combo.addItem("None", None)
         self._heatmap_peak_combo.setToolTip(
-            "Select which peak series to use for the rendered heatmap marker. "
+            "Select which detection series to use for the rendered heatmap marker. "
             "Independent of Signals plot visibility."
         )
         self._heatmap_peak_combo.currentIndexChanged.connect(self._on_heatmap_peak_combo_changed)
@@ -3971,10 +875,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         if self.heatmap_source is not None:
             self.heatmap_source.close()
             self.heatmap_source = None
-        self.peak_distance_datasource = None
         self._peak_series_list = []
-        self._generated_peak_result = None
-        self._peaks_dirty = False
         self.leg2_ultrasonic_datasource = None
         self.camera_view.set_export_overlay_preview_frame(None)
         self.camera_view.set_corners(None)
@@ -4060,77 +961,6 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             "Use the canonical JSON export from `hatch run app:peak-distances`."
         )
 
-    def load_peak_distance_from_path(
-        self,
-        json_path: Path,
-        *,
-        show_dialogs: bool = False,
-        require_heatmap: bool = False,
-        mark_dirty: bool = True,
-    ) -> bool:
-        if mark_dirty:
-            self._mark_session_dirty()
-        if require_heatmap and self.heatmap_source is None:
-            if show_dialogs:
-                QtWidgets.QMessageBox.information(
-                    self,
-                    "Import peak-distance JSON",
-                    "Load an H5 recording before importing a peak-distance JSON file.",
-                )
-            return False
-
-        if json_path.suffix.lower() == ".csv":
-            message = self._peak_csv_rejection_message()
-            if show_dialogs:
-                QtWidgets.QMessageBox.warning(self, "Import peak-distance JSON", message)
-            else:
-                self.statusBar().showMessage(message)
-            return False
-
-        try:
-            datasource, warnings = import_peak_distance_json_for_heatmap(
-                json_path,
-                self.heatmap_source,
-            )
-        except ValueError as exc:
-            if isinstance(exc, PeakDistanceJsonImportError):
-                message = exc.user_message()
-                status_message = exc.primary_message
-            else:
-                message = str(exc)
-                status_message = f"Could not load peak-distance JSON: {exc}"
-            if show_dialogs:
-                QtWidgets.QMessageBox.warning(self, "Import failed", message)
-            else:
-                self.statusBar().showMessage(status_message)
-            self._set_resource_reload_error("radar_peak", status_message)
-            self._refresh_resources_ui()
-            return False
-
-        self._generated_peak_result = None
-        self._peaks_dirty = False
-        self.peak_distance_datasource = datasource
-        self.settings.setValue("last_peak_json_path", str(json_path))
-        self._set_resource_reload_error("radar_peak", None)
-        self._set_resource_warnings("radar_peak", tuple(warnings))
-        self._sync_previews(camera_access_hint="auto")
-
-        if self.heatmap_source is None:
-            message = (
-                f"Loaded peak-distance JSON: {json_path.name} "
-                "(H5 validation pending until a recording is loaded)."
-            )
-        else:
-            message = f"Loaded peak-distance JSON: {json_path.name}"
-        if warnings:
-            warning_text = "\n".join(f"- {warning}" for warning in warnings)
-            message = f"{message}\n\nWarnings:\n{warning_text}"
-            if show_dialogs:
-                QtWidgets.QMessageBox.warning(self, "Import warnings", message)
-        self.statusBar().showMessage(message.splitlines()[0])
-        self._refresh_resources_ui()
-        return True
-
     def _confirm_action_dialog(
         self,
         *,
@@ -4159,164 +989,22 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         box.setDefaultButton(QtWidgets.QMessageBox.StandardButton.Yes)
         return box.exec() == QtWidgets.QMessageBox.StandardButton.Yes
 
-    def _import_peak_distance_json(self) -> None:
-        if self._any_peaks_unsaved() and not self._confirm_action_dialog(
-            title="Replace peaks",
-            question="Replace the current in-memory peak data with the selected JSON file?",
-            informative="Files on disk are unchanged until you save peaks.",
-            accept_label="Replace",
-        ):
-            return
-
-        filename, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self,
-            "Import peak-distance JSON",
-            self._dialog_start_path("last_peak_json_path"),
-            "Peak-distance JSON (*.json);;All files (*)",
-        )
-        if not filename:
-            return
-
-        self.load_peak_distance_from_path(
-            Path(filename),
-            show_dialogs=True,
-            require_heatmap=True,
-        )
-
-    def _clear_peak_distance_datasource(self, *, mark_dirty: bool = True, confirm: bool = True) -> None:
+    def _clear_peak_series(self, *, mark_dirty: bool = True, confirm: bool = True) -> None:
         if confirm and self._any_peaks_unsaved() and not self._confirm_action_dialog(
             title="Discard peaks",
             question="Discard unsaved peak-distance data?",
             accept_label="Discard",
         ):
             return
-        self._peaks_dirty = False
-        self._generated_peak_result = None
         if mark_dirty:
             self._mark_session_dirty()
-        self.peak_distance_datasource = None
         self._peak_series_list = []
+        self._heatmap_peak_selector_id = None
         self._set_resource_reload_error("radar_peak", None)
         self._set_resource_warnings("radar_peak", ())
         self._sync_previews(camera_access_hint="auto")
         self._refresh_resources_ui()
         self.statusBar().showMessage("Peak series cleared.")
-
-    def _generate_peak_distances(self) -> None:
-        if self.heatmap_source is None:
-            return
-        if self._has_peaks_in_memory() and not self._confirm_action_dialog(
-            title="Replace peaks",
-            question="Replace the current in-memory peak data?",
-            informative="Files on disk are unchanged until you save peaks.",
-            accept_label="Replace",
-        ):
-            return
-
-        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.CursorShape.WaitCursor)
-        self.statusBar().showMessage("Generating peak distances...")
-        try:
-            result = generate_peak_distances_from_heatmap_record(
-                self.heatmap_source.record,
-                h5_path=self.heatmap_source.path,
-                subsweep_idx=self.heatmap_source.subsweep_idx,
-            )
-        except Exception as exc:
-            QtWidgets.QApplication.restoreOverrideCursor()
-            QtWidgets.QMessageBox.warning(
-                self, "Generation failed", f"Could not generate peak distances: {exc}"
-            )
-            return
-        finally:
-            QtWidgets.QApplication.restoreOverrideCursor()
-
-        self.peak_distance_datasource = None
-        self._generated_peak_result = result
-        self._peaks_dirty = True
-        self._set_resource_reload_error("radar_peak", None)
-        self._set_resource_warnings("radar_peak", ())
-        self._sync_previews(camera_access_hint="auto")
-        self._refresh_resources_ui()
-        counts = peak_state_detected_counts(result)
-        if counts:
-            detected, total = counts
-            self.statusBar().showMessage(
-                f"Generated peaks: {detected}/{total} frames detected."
-            )
-        else:
-            self.statusBar().showMessage("Generated peaks.")
-
-    def _save_peaks(self) -> None:
-        peak_state = self._active_peak_state()
-        if peak_state is None or not self._peaks_dirty:
-            return
-        # Fall back to existing datasource path from the live datasource object.
-        existing_path = (
-            str(self.peak_distance_datasource.path)
-            if self.peak_distance_datasource is not None
-            and hasattr(self.peak_distance_datasource, "path")
-            and self.peak_distance_datasource.path
-            else ""
-        )
-        if not existing_path:
-            self._save_peaks_as()
-            return
-        output_path = Path(existing_path)
-        if output_path.exists():
-            reply = QtWidgets.QMessageBox.question(
-                self,
-                "Overwrite peaks file?",
-                f"Overwrite existing file?\n{output_path}",
-                QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
-                QtWidgets.QMessageBox.StandardButton.No,
-            )
-            if reply != QtWidgets.QMessageBox.StandardButton.Yes:
-                return
-        self._write_peaks_to_path(peak_state, output_path)
-
-    def _save_peaks_as(self) -> None:
-        peak_state = self._active_peak_state()
-        if peak_state is None:
-            return
-        default_path = ""
-        if self.heatmap_source is not None:
-            h5_path = self.heatmap_source.path
-            default_path = str(h5_path.parent / (h5_path.stem + "_peak_distances.json"))
-        else:
-            # Use path from first series with a saved json_path
-            for s in self._peak_series_list:
-                if s.json_path is not None:
-                    default_path = str(s.json_path)
-                    break
-        filename, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self,
-            "Save peaks as",
-            default_path or self._dialog_start_path("last_peak_json_path"),
-            "Peak-distance JSON (*.json);;All files (*)",
-        )
-        if not filename:
-            return
-        self._write_peaks_to_path(peak_state, Path(filename))
-
-    def _write_peaks_to_path(self, peak_state: PeakDistanceResourceState, output_path: Path) -> bool:
-        try:
-            saved_datasource = save_peak_state_to_path(peak_state, output_path)
-        except OSError as exc:
-            QtWidgets.QMessageBox.warning(
-                self, "Save peaks failed", f"Could not save peak distances:\n{exc}"
-            )
-            return False
-
-        self.peak_distance_datasource = saved_datasource
-        self._generated_peak_result = None
-        self._peaks_dirty = False
-        self._mark_session_dirty()
-        self.settings.setValue("last_peak_json_path", str(output_path))
-        self._set_resource_reload_error("radar_peak", None)
-        self._sync_previews(camera_access_hint="auto")
-        self._refresh_resources_ui()
-        self.statusBar().showMessage(f"Saved peaks: {output_path.name}")
-        return True
 
     def load_leg2_mat_from_path(
         self,
@@ -4354,7 +1042,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             return False
 
         self.leg2_ultrasonic_datasource = datasource
-        self.session.leg2_ultrasonic_datasource.path = str(mat_path)
+        self._leg2_adapter().remember_path(mat_path)
         self.settings.setValue("last_leg2_mat_path", str(mat_path))
         self._set_resource_reload_error("leg2_mat", None)
         self._set_resource_warnings("leg2_mat", ())
@@ -4379,8 +1067,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         if mark_dirty:
             self._mark_session_dirty()
         self.leg2_ultrasonic_datasource = None
-        self.session.leg2_ultrasonic_datasource.path = ""
-        self.session.leg2_ultrasonic_datasource.offset_s = 0.0
+        self._leg2_adapter().clear_settings()
         self._set_resource_reload_error("leg2_mat", None)
         self._set_resource_warnings("leg2_mat", ())
         self._update_leg2_datasource_controls()
@@ -4422,17 +1109,15 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._sync_previews(camera_access_hint="auto")
 
     def _update_leg2_datasource_controls(self) -> None:
-        datasource = self.leg2_ultrasonic_datasource
-        has_datasource = datasource is not None
-        self.leg2_signal_kind_combo.setEnabled(has_datasource)
+        self.leg2_signal_kind_combo.setEnabled(self._leg2_adapter().is_loaded())
         self.timeline_view.update()
 
-    def _reload_peak_distance_datasource_from_session(self) -> None:
+    def _reload_peak_series_from_session(self) -> None:
         from sparse_iq_peak_distance_core import load_peak_distance_json
 
         self._peak_series_list = []
         for entry in self.session.peak_series:
-            json_path_text = entry.get("path", "")
+            json_path_text = entry.path
             if not json_path_text:
                 continue
 
@@ -4454,17 +1139,14 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
                 self._refresh_resources_ui()
                 continue
 
-            series = PeakSeriesResource(
-                series_id=str(uuid.uuid4()),
-                display_name=entry.get("display_name", json_path.stem),
-                provenance="imported",
-                measurements=datasource.measurements,
-                metadata=datasource.metadata,
-                color=entry.get("color", assign_peak_series_color(self._peak_series_list)),
-                json_path=json_path,
-                visible=entry.get("visible", True),
-                heatmap_selected=entry.get("heatmap_selected", False),
-                unsaved=False,
+            series = build_imported_peak_series(
+                datasource,
+                json_path,
+                display_name=entry.display_name or json_path.stem,
+                existing_series=self._peak_series_list,
+                color=entry.color or None,
+                visible=entry.visible,
+                heatmap_selected=entry.heatmap_selected,
             )
             self._peak_series_list.append(series)
             self._set_resource_reload_error("radar_peak", None)
@@ -4487,19 +1169,22 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         """Open the Generate Peak Series dialog and add a new series."""
         if self.heatmap_source is None:
             return
-        dialog = GeneratePeakSeriesDialog(self)
+        dialog = GenerateDetectionSeriesDialog(self)
         if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
             return
 
         QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.CursorShape.WaitCursor)
         self.statusBar().showMessage("Generating peak series...")
         try:
-            result = generate_peak_distances_from_heatmap_record(
+            result = generate_detection_series_from_heatmap_record(
                 self.heatmap_source.record,
                 h5_path=self.heatmap_source.path,
                 subsweep_idx=self.heatmap_source.subsweep_idx,
                 threshold=dialog.threshold,
                 peak_extraction_method=dialog.algorithm_id,
+                threshold_max=dialog.threshold_max,
+                threshold_min=dialog.threshold_min,
+                reference_distance_m=dialog.reference_distance_m,
             )
         except Exception as exc:
             QtWidgets.QApplication.restoreOverrideCursor()
@@ -4510,16 +1195,15 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         finally:
             QtWidgets.QApplication.restoreOverrideCursor()
 
-        series = PeakSeriesResource(
-            series_id=str(uuid.uuid4()),
+        series = build_generated_peak_series(
+            result,
             display_name=dialog.display_name,
-            provenance="generated",
-            measurements=result.measurements,
-            metadata=result.metadata,
             algorithm_id=dialog.algorithm_id,
-            algorithm_params={"threshold": dialog.threshold},
-            color=assign_peak_series_color(self._peak_series_list),
-            unsaved=True,
+            threshold=dialog.threshold,
+            existing_series=self._peak_series_list,
+            threshold_max=dialog.threshold_max,
+            threshold_min=dialog.threshold_min,
+            reference_distance_m=dialog.reference_distance_m,
         )
         self._peak_series_list.append(series)
         self._heatmap_peak_selector_id = series.series_id
@@ -4572,15 +1256,11 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
 
             display_name = default_imported_name(json_path, existing_names)
             existing_names.append(display_name)
-            series = PeakSeriesResource(
-                series_id=str(uuid.uuid4()),
+            series = build_imported_peak_series(
+                datasource,
+                json_path,
                 display_name=display_name,
-                provenance="imported",
-                measurements=datasource.measurements,
-                metadata=datasource.metadata,
-                color=assign_peak_series_color(self._peak_series_list),
-                json_path=json_path,
-                unsaved=False,
+                existing_series=self._peak_series_list,
                 warnings=tuple(warnings),
             )
             self._peak_series_list.append(series)
@@ -4622,15 +1302,11 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
 
         existing_names = [s.display_name for s in self._peak_series_list]
         display_name = default_imported_name(json_path, existing_names)
-        series = PeakSeriesResource(
-            series_id=str(uuid.uuid4()),
+        series = build_imported_peak_series(
+            datasource,
+            json_path,
             display_name=display_name,
-            provenance="imported",
-            measurements=datasource.measurements,
-            metadata=datasource.metadata,
-            color=assign_peak_series_color(self._peak_series_list),
-            json_path=json_path,
-            unsaved=False,
+            existing_series=self._peak_series_list,
             warnings=tuple(warnings),
         )
         self._peak_series_list.append(series)
@@ -4694,11 +1370,11 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             self._write_peak_series_to_path(series, Path(path))
 
     def _write_peak_series_to_path(self, series: PeakSeriesResource, output_path: Path) -> None:
-        from sparse_iq_peak_distance_core import PeakDistanceExportResult, write_peak_distance_json
+        from sparse_iq_peak_distance_core import DetectionExportResult, write_peak_distance_json
 
         if series.metadata is None:
             return
-        result = PeakDistanceExportResult(
+        result = DetectionExportResult(
             metadata=series.metadata, measurements=series.measurements
         )
         try:
@@ -4732,29 +1408,55 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
 
     def _active_peak_state(self):
         """Return measurements/metadata for the heatmap-selected peak series, or None."""
-        if not self._peak_series_list:
-            return None
-        if self._heatmap_peak_selector_id:
-            for s in self._peak_series_list:
-                if s.series_id == self._heatmap_peak_selector_id:
-                    return s
-        return None
+        return self._peak_adapter().active()
+
+    def _peak_adapter(self) -> PeakSeriesResourceAdapter:
+        return PeakSeriesResourceAdapter(
+            self._peak_series_list,
+            selected_series_id=self._heatmap_peak_selector_id or "",
+        )
+
+    def _leg2_adapter(self) -> Leg2ResourceAdapter:
+        return Leg2ResourceAdapter(
+            self.session.leg2_ultrasonic_datasource,
+            self.leg2_ultrasonic_datasource,
+        )
+
+    def _resolve_peak_series_target(
+        self,
+        series_id: str = "",
+        *,
+        prefer_unsaved: bool = False,
+        fallback_last: bool = False,
+        fallback_active: bool = True,
+    ) -> PeakSeriesResource | None:
+        """Resolve a peak-series action target using the Resources row or UI selection."""
+        return self._peak_adapter().resolve_target(
+            series_id,
+            prefer_unsaved=prefer_unsaved,
+            fallback_last=fallback_last,
+            fallback_active=fallback_active,
+        )
 
     def _has_peaks_in_memory(self) -> bool:
-        return bool(self._peak_series_list)
+        return self._peak_adapter().has_rows()
 
     def _any_peaks_unsaved(self) -> bool:
-        return any(s.unsaved for s in self._peak_series_list)
+        return self._peak_adapter().any_unsaved()
 
     def _unload_last_peak_series(self) -> None:
         """Unload action from top-level menu: unload the selected series or the last one."""
-        target = self._active_peak_state()
-        if target is None and self._peak_series_list:
-            target = self._peak_series_list[-1]
+        target = self._resolve_peak_series_target(fallback_last=True)
         if target is not None:
             self._unload_peak_series(target.series_id)
 
-    def _peak_overlay_for_frame(self, frame_idx: int) -> tuple[float, float] | None:
+    def _peak_overlay_for_frame(
+        self, frame_idx: int
+    ) -> tuple[float, float, np.ndarray | None] | None:
+        """Return (target_distance_m, zero_velocity_m_s, detection_ratio) for the active series.
+
+        Returns None if no series is active or the frame has no detection.
+        """
         peak_state = self._active_peak_state()
         if peak_state is None:
             return None
@@ -4765,12 +1467,22 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             (m for m in measurements if m.frame_index == frame_idx), None
         )
         if measurement is None or measurement.status != STATUS_DETECTED:
+            # Still return detection_ratio even when no detection, so the strip renders.
+            if measurement is not None:
+                ratio = measurement.detection_ratio if len(measurement.detection_ratio) > 0 else None
+                return (
+                    None,  # type: ignore[return-value]
+                    active_peak_zero_velocity_m_s(peak_state),
+                    ratio,
+                )
             return None
-        if measurement.peak_distance_m is None:
+        if measurement.target_distance_m is None:
             return None
+        ratio = measurement.detection_ratio if len(measurement.detection_ratio) > 0 else None
         return (
-            measurement.peak_distance_m,
+            measurement.target_distance_m,
             active_peak_zero_velocity_m_s(peak_state),
+            ratio,
         )
 
     def _annotate_truth_frame_with_peak(
@@ -4800,10 +1512,10 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             self._heatmap_distance_header.set_peak_distance(None)
             return
         peak_overlay = self._peak_overlay_for_frame(frame_idx)
-        if peak_overlay is None:
+        dist = None if peak_overlay is None else peak_overlay[0]
+        if dist is None:
             self._heatmap_distance_header.set_peak_distance(None)
         else:
-            dist = peak_overlay[0]
             if self._heatmap_axes is not None:
                 d_min = float(self._heatmap_axes.distances_m[0])
                 d_max = float(self._heatmap_axes.distances_m[-1])
@@ -4848,14 +1560,30 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         dvm = self._hover_dvm_cache[1]
         magnitude = int(round(float(dvm[vel_idx, dist_idx])))
         text = "Distance: {:.3f} m\nVelocity: {:.3f} m/s\nMagnitude: {}".format(dist_val, vel_val, magnitude)
+
+        # Append detection ratio from the active series if one is selected.
+        frame_idx = self._hover_dvm_cache[0]
+        active_series = self._active_peak_state()
+        if active_series is not None:
+            measurement = next(
+                (m for m in active_series.measurements if m.frame_index == frame_idx), None
+            )
+            if (
+                measurement is not None
+                and measurement.detection_ratio is not None
+                and len(measurement.detection_ratio) > dist_idx
+            ):
+                ratio_val = float(measurement.detection_ratio[dist_idx])
+                text += "\nDetection ratio: {:.2f}".format(ratio_val)
+
         global_pos = self.truth_view.mapToGlobal(pos)
         QtWidgets.QToolTip.showText(global_pos, text, self.truth_view)
 
     def _save_session(self) -> None:
-        if self._current_session_path is None:
+        if self._session_lifecycle.current_path is None:
             self._save_session_as()
             return
-        self._write_session_to_path(self._current_session_path)
+        self._write_session_to_path(self._session_lifecycle.current_path)
 
     def _save_session_as(self) -> None:
         filename, _ = QtWidgets.QFileDialog.getSaveFileName(
@@ -4869,21 +1597,11 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._write_session_to_path(Path(filename))
 
     def _write_session_to_path(self, session_path: Path) -> bool:
-        # Sync peak_series from live list before saving; only include series with a saved path.
-        self.session.peak_series = [
-            {
-                "path": str(s.json_path),
-                "display_name": s.display_name,
-                "color": s.color,
-                "visible": s.visible,
-                "heatmap_selected": s.series_id == self._heatmap_peak_selector_id,
-            }
-            for s in self._peak_series_list
-            if s.json_path is not None
-        ]
-
         try:
-            validate_alignment_session(self.session, allow_missing_sources=True)
+            self._session_lifecycle.prepare_session_for_save(
+                self.session,
+                peak_entries=self._peak_adapter().saved_session_entries(),
+            )
         except ValueError as exc:
             QtWidgets.QMessageBox.warning(self, "Cannot save session", str(exc))
             return False
@@ -4903,8 +1621,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             if reply != QtWidgets.QMessageBox.StandardButton.Yes:
                 return False
 
-        save_alignment_session(self.session, session_path)
-        self._current_session_path = session_path
+        self._session_lifecycle.save_to_path(self.session, session_path)
         self.settings.setValue("last_session_path", str(session_path))
         self._clear_session_dirty()
         self._refresh_session_title()
@@ -4914,7 +1631,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         return True
 
     def _save_session_for_prompt(self) -> bool:
-        if self._current_session_path is None:
+        if self._session_lifecycle.current_path is None:
             filename, _ = QtWidgets.QFileDialog.getSaveFileName(
                 self,
                 "Save session as",
@@ -4924,15 +1641,11 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             if not filename:
                 return False
             return self._write_session_to_path(Path(filename))
-        return self._write_session_to_path(self._current_session_path)
+        return self._write_session_to_path(self._session_lifecycle.current_path)
 
     def _load_session(self) -> None:
-        if self._session_dirty or self._any_peaks_unsaved():
-            choice = self._prompt_save_discard_cancel("open")
-            if choice == "cancel":
-                return
-            if choice == "save" and not self._save_session_for_prompt():
-                return
+        if not self._handle_session_transition_guard("open"):
+            return
 
         filename, _ = QtWidgets.QFileDialog.getOpenFileName(
             self,
@@ -4941,7 +1654,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             "JSON files (*.json);;All files (*)",
         )
         if filename:
-            self._open_session_from_path(Path(filename), prompt_for_unsaved=False)
+            self._open_session(LoadSessionPlan(session_path=Path(filename), prompt_for_unsaved=False))
 
     def _loaded_h5_identity(self) -> H5SlotIdentity | None:
         """Return identity of the currently loaded H5 source, or None."""
@@ -4965,62 +1678,48 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         Per-slot registry approach: new resource types must add an entry here.
         See OpenSpec change: session-load-responsiveness.
         """
-        # Camera slot
-        camera_desired = desired_camera_identity(desired_session)
+        # Reset on every reconcile so stale True from a previous session load cannot
+        # survive into a later unrelated H5 job completion.
+        self._pending_peak_session_reload = False
+
+        # Build a plain-value snapshot of loaded/inflight state for the coordinator.
         if self.camera_source is not None:
             source_path = getattr(self.camera_source, "path", None)
-            camera_loaded = (
+            camera_loaded_path = (
                 str(source_path)
                 if source_path is not None
                 else prior_session.camera_track.path
             )
         else:
-            camera_loaded = None
+            camera_loaded_path = None
         camera_slot = self._resource_job_manager.board().camera
-        camera_inflight = (
+        camera_inflight_path = (
             str(camera_slot.target_path)
             if camera_slot.target_path is not None and camera_slot.phase not in ("idle", "failed", "superseded")
             else None
         )
-        camera_action = reconcile_camera_action(
-            camera_desired,
-            loaded_path=camera_loaded,
-            inflight_path=camera_inflight,
+        loaded = LoadedResourceState(
+            camera_loaded_path=camera_loaded_path,
+            camera_inflight_path=camera_inflight_path,
+            h5_loaded_identity=self._loaded_h5_identity(),
+            h5_inflight_identity=self._inflight_h5_identity,
+            loaded_peak_paths=frozenset(
+                str(s.json_path)
+                for s in self._peak_series_list
+                if s.json_path is not None
+            ),
+            leg2_loaded_path=(
+                prior_session.leg2_ultrasonic_datasource.path
+                if self.leg2_ultrasonic_datasource is not None and prior_session.leg2_ultrasonic_datasource.path
+                else None
+            ),
         )
-
-        # H5 slot
-        h5_desired = desired_h5_identity(desired_session)
-        h5_loaded = self._loaded_h5_identity()
-        h5_action = reconcile_h5_action(
-            h5_desired,
-            loaded_identity=h5_loaded,
-            inflight_identity=self._inflight_h5_identity,
-        )
-
-        # Peak series — per-series reconciliation.
-        # desired_peak_identities() returns one SyncSlotIdentity per stored path.
-        peak_desired_list = desired_peak_identities(desired_session)
-        peak_desired_paths = {identity.path for identity in peak_desired_list}
-        loaded_peak_paths = {
-            str(s.json_path)
-            for s in self._peak_series_list
-            if s.json_path is not None
-        }
-
-        # Leg2 slot — keep only when datasource object is present and path matches.
-        # Use prior_session to get the path of the currently loaded datasource.
-        leg2_desired = desired_leg2_identity(desired_session)
-        leg2_loaded = (
-            prior_session.leg2_ultrasonic_datasource.path
-            if self.leg2_ultrasonic_datasource is not None and prior_session.leg2_ultrasonic_datasource.path
-            else None
-        )
-        leg2_action = reconcile_sync_slot_action(leg2_desired, loaded_path=leg2_loaded)
+        plan = plan_session_reconcile(desired_session, loaded)
 
         # Execute per-slot actions
-        if camera_action == "unload":
+        if plan.camera_action == "unload":
             self.unload_camera_video(mark_dirty=False)
-        elif camera_action == "load":
+        elif plan.camera_action == "load":
             camera_path = Path(desired_session.camera_track.path)
             if camera_path.exists():
                 self.load_camera_from_path(camera_path, mark_dirty=False)
@@ -5028,9 +1727,9 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
                 self._set_resource_reload_error("camera", f"File not found: {camera_path}")
         # camera "keep" — nothing to do
 
-        if h5_action == "unload":
+        if plan.h5_action == "unload":
             self.unload_h5_recording(mark_dirty=False)
-        elif h5_action == "load":
+        elif plan.h5_action == "load":
             h5_path = Path(desired_session.heatmap_track.path)
             if h5_path.exists():
                 self.load_h5_from_path(h5_path, mark_dirty=False)
@@ -5041,36 +1740,34 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         # Per-series peak reconciliation: unload series whose paths are no longer desired,
         # load series that are desired but not yet loaded, and drop unsaved generated
         # series that have no saved path (they cannot be represented in the session).
-        paths_to_unload = loaded_peak_paths - peak_desired_paths
-        paths_to_load = peak_desired_paths - loaded_peak_paths
         # Always filter: drop pathless (unsaved generated) rows and any stale path rows.
         self._peak_series_list = [
             s for s in self._peak_series_list
-            if s.json_path is not None and str(s.json_path) not in paths_to_unload
+            if s.json_path is not None and str(s.json_path) not in plan.peak_paths_to_unload
         ]
         if self._heatmap_peak_selector_id not in {s.series_id for s in self._peak_series_list}:
             self._heatmap_peak_selector_id = None
-        if paths_to_load:
-            if h5_action not in ("load",):
-                self._reload_peak_distance_datasource_from_session()
-            # If H5 is loading, _reload_peak_distance_datasource_from_session
-            # will be called after H5 finishes.
+        if plan.peak_paths_to_load:
+            if plan.h5_action != "load":
+                self._reload_peak_series_from_session()
+            else:
+                # Defer peak reload until the in-flight H5 job completes.
+                self._pending_peak_session_reload = True
 
-        if leg2_action == "unload":
+        if plan.leg2_action == "unload":
             if self.leg2_ultrasonic_datasource is not None:
                 self._clear_leg2_ultrasonic_datasource(mark_dirty=False)
-        elif leg2_action == "load":
+        elif plan.leg2_action == "load":
             self._reload_leg2_ultrasonic_datasource_from_session()
         # leg2 "keep" — nothing to do
 
     def load_session_from_path(self, session_path: Path) -> None:
         with self._session_dirty_guard():
-            desired_session = load_alignment_session(session_path)
+            desired_session = self._session_lifecycle.load_from_path(session_path)
             prior_session = self.session
 
             # Assign self.session BEFORE reconcile so load_h5_from_path reads correct indices.
             self.session = desired_session
-            self._current_session_path = session_path
             self._resource_reload_errors.clear()
             self._resource_load_warnings.clear()
 
@@ -5083,6 +1780,9 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             # Populate controls after reconcile (jobs may still be in-flight).
             self._populate_controls_from_session()
             if self.camera_source is not None:
+                # Force a clean seek to the session's starting position before the full sync.
+                # "random" is correct here: the prior sequential-decode position is no longer
+                # valid after loading a new session, so we must not assume continuity.
                 self._load_current_camera_frame(access_hint="random")
                 self._refresh_camera_view_corners()
                 self.camera_view.set_export_overlay(self.session.export_overlay)
@@ -5098,6 +1798,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             self._record_recent_session(session_path)
             self.statusBar().showMessage(f"Loaded session: {session_path}")
         self._clear_session_dirty()
+        self._refresh_session_title()
 
     def _snapshot_active_camera(self) -> _CameraResourceBackup:
         if self.camera_source is None:
@@ -5213,13 +1914,18 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.session.viewport.output_height = payload.first_frame_shape[0]
         self._rebuild_overlay_plot_renderer()
         self.settings.setValue("last_h5_path", str(payload.path))
-        if not previous_path or previous_path == str(payload.path):
+        if self._pending_peak_session_reload:
+            # Deferred by session-load reconcile: peak paths to load were waiting on this H5 job.
+            self._pending_peak_session_reload = False
+            self._reload_peak_series_from_session()
+        elif not previous_path or previous_path == str(payload.path):
             # Same H5 identity (initial load or keep): restore persisted peak series only
             # when there are no live series yet; preserves unsaved generated rows.
             if not self._peak_series_list:
-                self._reload_peak_distance_datasource_from_session()
-        # Different H5: preserve existing peak series as optional signal resources.
-        # They remain valid signal data and the user can unload them individually.
+                self._reload_peak_series_from_session()
+        # Different H5 without a pending session reload: preserve existing peak series as
+        # optional signal resources. They remain valid signal data and the user can unload
+        # them individually.
         self._h5_replacement_backup = None
         self._inflight_h5_identity = None
         self._update_heatmap_extent_labels()
@@ -5267,6 +1973,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.session.viewport.output_height = backup.viewport_output_height
         self._rebuild_overlay_plot_renderer()
         self._h5_replacement_backup = None
+        self._pending_peak_session_reload = False
         self._update_heatmap_extent_labels()
 
     def _handle_resource_job_state_changed(self) -> None:
@@ -5487,17 +2194,17 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             range_start_s if span_s <= 0 else range_start_s + span_s * slider_value / 10000.0
         )
         self._reanchor_playback_clock()
-        self._sync_previews(camera_access_hint="scrub")
+        self._sync_previews(camera_access_hint="scrub", refresh_signal_data=False)
 
     def _timeline_playhead_changed(self, time_s: float) -> None:
         self.session.timeline.current_time_s = time_s
         self._reanchor_playback_clock()
-        self._sync_previews(camera_access_hint="scrub")
+        self._sync_previews(camera_access_hint="scrub", refresh_signal_data=False)
 
     def _signal_playhead_scrubbed(self, time_s: float) -> None:
         self.session.timeline.current_time_s = time_s
         self._reanchor_playback_clock()
-        self._sync_previews(camera_access_hint="scrub")
+        self._sync_previews(camera_access_hint="scrub", refresh_signal_data=False)
 
     def _timeline_camera_offset_changed(self, offset_s: float) -> None:
         self.offset_spin.setValue(offset_s)
@@ -5576,7 +2283,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         next_time = min(self._playback_started_video_time_s + elapsed_s, range_end_s)
         self.session.timeline.current_time_s = next_time
         self._set_slider_from_current_time()
-        self._sync_previews(camera_access_hint="playback")
+        self._sync_previews(camera_access_hint="playback", refresh_signal_data=False)
         if math.isclose(next_time, range_end_s) or next_time >= range_end_s:
             self._set_playback_active(False)
 
@@ -5717,6 +2424,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
                 self._sync_previews(
                     camera_access_hint="auto",
                     invalidate_source_resolution=False,
+                    refresh_signal_data=False,
                 )
 
         if self._pending_source_resolution_request is not None and not self.play_timer.isActive():
@@ -5729,7 +2437,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             self.play_timer.start(self.play_timer_interval_ms)
             self.play_button.setText("Pause")
             if refresh_viewport:
-                self._sync_previews(camera_access_hint="playback")
+                self._sync_previews(camera_access_hint="playback", refresh_signal_data=False)
             return
 
         was_active = self.play_timer.isActive()
@@ -5737,7 +2445,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._playback_started_at_s = None
         self.play_button.setText("Play")
         if refresh_viewport and was_active:
-            self._sync_previews(camera_access_hint="auto")
+            self._sync_previews(camera_access_hint="auto", refresh_signal_data=False)
 
     def _set_slider_from_current_time(self) -> None:
         range_start_s, range_end_s = self.timeline_range_model.visible_range_s()
@@ -6094,24 +2802,36 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         camera_access_hint: str = "auto",
         invalidate_source_resolution: bool = True,
         timeline_visible_range_s: tuple[float, float] | None = None,
+        refresh_signal_data: bool = True,
     ) -> None:
-        if invalidate_source_resolution:
-            self._invalidate_source_resolution_viewport()
-        self._load_current_camera_frame(access_hint=camera_access_hint)
-        self._refresh_camera_view_corners()
+        plan = PreviewSyncPlan(
+            camera_access_hint=camera_access_hint,
+            invalidate_source_resolution=invalidate_source_resolution,
+            timeline_visible_range_s=timeline_visible_range_s,
+            refresh_signal_data=refresh_signal_data,
+        )
+        run_preview_sync(plan, self)
+
+    def _sync_timeline_feedback(
+        self,
+        *,
+        timeline_visible_range_s: tuple[float, float] | None,
+        refresh_signal_data: bool,
+    ) -> None:
         self._update_timeline_range_from_session()
         if timeline_visible_range_s is not None:
             self.timeline_range_model.set_visible_range(*timeline_visible_range_s)
         self._set_slider_from_current_time()
         self._set_timeline_view_state()
-        self._refresh_signal_plot()
+        self._refresh_signal_plot(refresh_data=refresh_signal_data)
         self.schedule_timeline_axis_geometry_sync()
         self.current_time_label.setText(
             f"t = {self.session.timeline.current_time_s:.3f} s | offset = {self.session.timeline.offset_s:.3f} s"
         )
 
-        truth_frame = None
-        frame_idx = None
+    def _sync_heatmap_truth_preview(self) -> tuple[int | None, np.ndarray | None]:
+        truth_frame: np.ndarray | None = None
+        frame_idx: int | None = None
         if self.heatmap_source is not None and (
             0.0
             <= self.session.timeline.current_time_s
@@ -6128,10 +2848,21 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             self._update_heatmap_peak_cue(frame_idx)
             if self._hover_last_pos is not None:
                 self._refresh_hover_tooltip()
+            peak_overlay = self._peak_overlay_for_frame(frame_idx)
+            self._detection_strip.set_detection_ratio(None if peak_overlay is None else peak_overlay[2])
         else:
             self._hover_dvm_cache = None
             self._update_heatmap_peak_cue(None)
+            self._detection_strip.set_detection_ratio(None)
         self.truth_view.set_frame(truth_frame)
+        return frame_idx, truth_frame
+
+    def _sync_export_overlay_preview(
+        self,
+        *,
+        frame_idx: int | None,
+        truth_frame: np.ndarray | None,
+    ) -> None:
         if (
             not self.session.export_overlay.visible
             or not self.session.export_overlay.preview_enabled
@@ -6144,9 +2875,10 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             and self.session.export_overlay.width > 0.0
             and self.session.export_overlay.height > 0.0
         ):
-            frame_idx, _ = self.heatmap_source.frame_at_seconds(
-                self.session.timeline.current_time_s
-            )
+            if frame_idx is None:
+                frame_idx, _ = self.heatmap_source.frame_at_seconds(
+                    self.session.timeline.current_time_s
+                )
             presentation_source_size = self._overlay_presentation_source_size()
             peak_overlay = self._peak_overlay_for_frame(frame_idx)
             preview_frame = self._overlay_plot_renderer.render_frame(
@@ -6158,11 +2890,18 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
                 source_size=presentation_source_size,
                 peak_distance_m=None if peak_overlay is None else peak_overlay[0],
                 zero_velocity_m_s=None if peak_overlay is None else peak_overlay[1],
+                detection_ratio=None if peak_overlay is None else peak_overlay[2],
             )
             self.camera_view.set_export_overlay_preview_frame(preview_frame)
         elif not self._freeze_export_overlay_preview:
             self.camera_view.set_export_overlay_preview_frame(None)
 
+    def _sync_viewport_preview(
+        self,
+        *,
+        truth_frame: np.ndarray | None,
+        invalidate_source_resolution: bool,
+    ) -> None:
         viewport_frame = None
         low_resolution_viewport_frame = None
         if (
@@ -6199,12 +2938,13 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.viewport_view.set_frame(viewport_frame)
 
     def _leg2_legend_name(self) -> str:
-        if self.session.leg2_ultrasonic_datasource.signal_kind == "filtered":
-            return "Leg2 filtered ultrasonic"
-        return "Leg2 raw ultrasonic"
+        return self._leg2_adapter().legend_name()
 
-    def _refresh_signal_plot(self) -> None:
-        # Build list of (display_name, color_hex, PeakDistanceSignalSeries) for visible series.
+    def _refresh_signal_plot(self, *, refresh_data: bool = True) -> None:
+        if not refresh_data:
+            self.signal_plot.set_current_time_s(self.session.timeline.current_time_s)
+            return
+        # Build list of (display_name, color_hex, DetectionSignalSeries) for visible series.
         peak_series_list = []
         for ps in self._peak_series_list:
             if ps.visible:
@@ -6276,17 +3016,15 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             counts = peak_state_detected_counts(peak_state)
             if counts is not None:
                 peak_detected, peak_total = counts
-        leg2_valid: int | None = None
-        leg2_samples: int | None = None
-        if self.leg2_ultrasonic_datasource is not None:
-            leg2_samples = int(self.leg2_ultrasonic_datasource.time_s.size)
-            leg2_valid = int(np.count_nonzero(self.leg2_ultrasonic_datasource.reliable_flag_mask))
+        leg2_adapter = self._leg2_adapter()
+        leg2_valid = leg2_adapter.valid_segment_count()
+        leg2_samples = leg2_adapter.sample_count()
 
         return AlignmentResourceRuntime(
             camera_loaded=self.camera_source is not None,
             radar_h5_loaded=self.heatmap_source is not None,
             radar_peak_loaded=self._has_peaks_in_memory(),
-            leg2_loaded=self.leg2_ultrasonic_datasource is not None,
+            leg2_loaded=leg2_adapter.is_loaded(),
             peak_detected_count=peak_detected,
             peak_measurement_count=peak_total,
             peaks_dirty=self._any_peaks_unsaved(),
@@ -6303,99 +3041,64 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         )
 
     def _mark_session_dirty(self) -> None:
-        if self._session_dirty_guard_depth > 0:
-            return
-        if not self._session_dirty:
-            self._session_dirty = True
+        if self._session_lifecycle.mark_dirty():
             self._refresh_session_title()
 
     def _clear_session_dirty(self) -> None:
-        if self._session_dirty:
-            self._session_dirty = False
+        if self._session_lifecycle.clear_dirty():
             self._refresh_session_title()
 
     @contextmanager
     def _session_dirty_guard(self) -> Iterator[None]:
-        self._session_dirty_guard_depth += 1
-        try:
+        with self._session_lifecycle.dirty_guard():
             yield
-        finally:
-            self._session_dirty_guard_depth -= 1
 
-    def workbench_is_pristine(self) -> bool:
-        if self._current_session_path is not None:
-            return False
-        if self.camera_source is not None or self.heatmap_source is not None:
-            return False
-        if (
-            self._has_peaks_in_memory()
-            or self.leg2_ultrasonic_datasource is not None
-        ):
-            return False
-        return session_equivalent_for_pristine(self.session, AlignmentSession())
+    def _loaded_resource_flags(self) -> tuple[bool, bool, bool, bool]:
+        return (
+            self.camera_source is not None,
+            self.heatmap_source is not None,
+            self._has_peaks_in_memory(),
+            self.leg2_ultrasonic_datasource is not None,
+        )
+
+    def _session_transition_guard(self, action: SessionPromptAction) -> SessionTransitionGuard:
+        has_camera, has_h5, has_peaks, has_leg2 = self._loaded_resource_flags()
+        return self._session_lifecycle.transition_guard(
+            action,
+            self.session,
+            peaks_unsaved=self._any_peaks_unsaved(),
+            has_camera=has_camera,
+            has_h5=has_h5,
+            has_peaks=has_peaks,
+            has_leg2=has_leg2,
+        )
+
+    def _handle_session_transition_guard(self, action: SessionPromptAction) -> bool:
+        """Run required prompts for a transition; return False if the action should abort."""
+        guard = self._session_transition_guard(action)
+        if guard.prompt == "save_discard_cancel":
+            choice = self._prompt_save_discard_cancel(action)
+            if choice == "cancel":
+                return False
+            if choice == "save" and not self._save_session_for_prompt():
+                return False
+            return True
+        if guard.prompt == "clean_close_confirm":
+            return self._confirm_close_session_clean()
+        return True
 
     def _prompt_save_discard_cancel(
         self,
-        action: Literal["open", "close", "quit"],
+        action: SessionPromptAction,
     ) -> Literal["save", "discard", "cancel"]:
-        titles = {
-            "open": "Open Another Session?",
-            "close": "Close Session?",
-            "quit": "Quit Heatmap Alignment?",
-        }
-        peaks_note = (
-            "Saving the alignment session does not write peak JSON."
+        prompt = self._session_lifecycle.save_discard_cancel_prompt(
+            action,
+            peaks_unsaved=self._any_peaks_unsaved(),
         )
-        if self._session_dirty and self._any_peaks_unsaved():
-            texts = {
-                "open": (
-                    "There are unsaved changes. Do you want to save them before "
-                    f"opening another session?\n\nUnsaved peak-distance data will also be lost. "
-                    f"{peaks_note}"
-                ),
-                "close": (
-                    "There are unsaved changes. Do you want to save them before "
-                    f"closing this session?\n\nUnsaved peak-distance data will also be lost. "
-                    f"{peaks_note}"
-                ),
-                "quit": (
-                    "There are unsaved changes. Do you want to save them before quitting?"
-                    f"\n\nUnsaved peak-distance data will also be lost. {peaks_note}"
-                ),
-            }
-        elif self._any_peaks_unsaved():
-            texts = {
-                "open": (
-                    "Unsaved peak-distance data will be lost if you open another session. "
-                    f"{peaks_note}\n\nProceed?"
-                ),
-                "close": (
-                    "Unsaved peak-distance data will be lost if you close this session. "
-                    f"{peaks_note}\n\nProceed?"
-                ),
-                "quit": (
-                    "Unsaved peak-distance data will be lost if you quit. "
-                    f"{peaks_note}\n\nProceed?"
-                ),
-            }
-        else:
-            texts = {
-                "open": (
-                    "There are unsaved changes. Do you want to save them before "
-                    "opening another session?"
-                ),
-                "close": (
-                    "There are unsaved changes. Do you want to save them before "
-                    "closing this session?"
-                ),
-                "quit": (
-                    "There are unsaved changes. Do you want to save them before quitting?"
-                ),
-            }
         message_box = QtWidgets.QMessageBox(self)
         message_box.setIcon(QtWidgets.QMessageBox.Icon.Warning)
-        message_box.setWindowTitle(titles[action])
-        message_box.setText(texts[action])
+        message_box.setWindowTitle(prompt.title)
+        message_box.setText(prompt.text)
         save_button = message_box.addButton(
             "Save",
             QtWidgets.QMessageBox.ButtonRole.AcceptRole,
@@ -6417,30 +3120,23 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         return "cancel"
 
     def _confirm_close_session_clean(self) -> bool:
+        prompt = self._session_lifecycle.clean_close_session_prompt()
         reply = QtWidgets.QMessageBox.question(
             self,
-            "Close Session?",
-            "Close this session and unload all resources?",
+            prompt.title,
+            prompt.text,
             QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
             QtWidgets.QMessageBox.StandardButton.No,
         )
         return reply == QtWidgets.QMessageBox.StandardButton.Yes
 
     def _refresh_session_title(self) -> None:
-        dirty_suffix = "*" if self._session_dirty else ""
-        if self._current_session_path is None:
-            self.setWindowTitle(
-                f"Heatmap Alignment Workbench — Untitled Session{dirty_suffix}"
-            )
-            return
-        self.setWindowTitle(
-            f"Heatmap Alignment Workbench — {self._current_session_path.name}{dirty_suffix}"
-        )
+        self.setWindowTitle(self._session_lifecycle.window_title())
 
     def _refresh_resources_ui(self) -> None:
         summaries = self.resource_summaries()
         if self._resources_window is not None:
-            self._resources_window.refresh(summaries, self._current_session_path)
+            self._resources_window.refresh(summaries, self._session_lifecycle.current_path)
             # Update generate/import buttons in Resources window footer.
             self._resources_window.generate_peak_series_button.setEnabled(
                 self.heatmap_source is not None
@@ -6450,18 +3146,17 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         has_camera_path = bool(self.session.camera_track.path)
         has_h5_path = bool(self.session.heatmap_track.path)
         has_peak_path = bool(self._peak_series_list) or bool(
-            any(e.get("path", "") for e in self.session.peak_series)
+            any(e.path for e in self.session.peak_series)
         )  # True when a saved series path exists (for reload/reveal actions)
-        has_leg2_path = bool(self.session.leg2_ultrasonic_datasource.path)
+        leg2_adapter = self._leg2_adapter()
+        has_leg2_path = leg2_adapter.has_path()
 
         self.unload_camera_action.setEnabled(self.camera_source is not None)
         self.unload_h5_action.setEnabled(self.heatmap_source is not None)
         self.unload_peak_action.setEnabled(
             self._has_peaks_in_memory() or has_peak_path
         )
-        self.unload_leg2_action.setEnabled(
-            self.leg2_ultrasonic_datasource is not None or has_leg2_path
-        )
+        self.unload_leg2_action.setEnabled(leg2_adapter.can_unload())
         self.reload_camera_action.setEnabled(has_camera_path)
         self.reload_h5_action.setEnabled(has_h5_path)
         self.reload_peak_action.setEnabled(has_peak_path)
@@ -6515,19 +3210,13 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             return
         if action == "save":
             if kind == "radar_peak":
-                target = (
-                    next((s for s in self._peak_series_list if s.series_id == series_id), None)
-                    if series_id else None
-                ) or self._active_peak_state() or next((s for s in self._peak_series_list if s.unsaved), None)
+                target = self._resolve_peak_series_target(series_id, prefer_unsaved=True)
                 if target is not None:
                     self._save_peak_series(target.series_id)
             return
         if action == "save_as":
             if kind == "radar_peak":
-                target = (
-                    next((s for s in self._peak_series_list if s.series_id == series_id), None)
-                    if series_id else None
-                ) or self._active_peak_state() or (self._peak_series_list[-1] if self._peak_series_list else None)
+                target = self._resolve_peak_series_target(series_id, fallback_last=True)
                 if target is not None:
                     self._save_peak_series_as(target.series_id)
             return
@@ -6550,10 +3239,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             elif kind == "radar_h5":
                 self.unload_h5_recording()
             elif kind == "radar_peak":
-                target = (
-                    next((s for s in self._peak_series_list if s.series_id == series_id), None)
-                    if series_id else None
-                ) or self._active_peak_state() or (self._peak_series_list[-1] if self._peak_series_list else None)
+                target = self._resolve_peak_series_target(series_id, fallback_last=True)
                 if target is not None:
                     self._unload_peak_series(target.series_id)
             elif kind == "leg2_mat":
@@ -6567,7 +3253,11 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             return
         if action == "reveal":
             if kind == "radar_peak" and series_id:
-                ps = next((s for s in self._peak_series_list if s.series_id == series_id), None)
+                ps = self._resolve_peak_series_target(
+                    series_id,
+                    fallback_active=False,
+                    fallback_last=False,
+                )
                 if ps and ps.json_path:
                     self._reveal_path(ps.json_path)
             else:
@@ -6586,7 +3276,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
                 if s.json_path is not None:
                     return str(s.json_path)
             return ""
-        return self.session.leg2_ultrasonic_datasource.path
+        return self._leg2_adapter().path_text()
 
     def _reload_resource(self, kind: ResourceKind) -> None:
         path_text = self._resource_path_for_kind(kind)
@@ -6611,7 +3301,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             ):
                 return
             # Reload all session-persisted peak series; drop generated unsaved rows.
-            self._reload_peak_distance_datasource_from_session()
+            self._reload_peak_series_from_session()
         elif kind == "leg2_mat":
             self.load_leg2_mat_from_path(path, show_dialogs=True)
 
@@ -6708,6 +3398,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         clear_resource_job(self._resource_job_manager.board(), "radar_h5")
         self._h5_replacement_backup = None
         self._inflight_h5_identity = None
+        self._pending_peak_session_reload = False
         self.truth_view.set_loading_overlay(False)
         if self.heatmap_source is not None:
             self.heatmap_source.close()
@@ -6715,6 +3406,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._overlay_plot_renderer = None
         self.session.heatmap_track = HeatmapTrack()
         self.truth_view.set_frame(None)
+        self._detection_strip.set_detection_ratio(None)
         self._hover_dvm_cache = None
         self._hover_last_pos = None
         QtWidgets.QToolTip.hideText()
@@ -6745,38 +3437,30 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             return
         self.unload_camera_video(mark_dirty=False)
         self.unload_h5_recording(mark_dirty=False)
-        self._clear_peak_distance_datasource(mark_dirty=False, confirm=False)
+        self._clear_peak_series(mark_dirty=False, confirm=False)
         self._clear_leg2_ultrasonic_datasource(mark_dirty=False)
         self._mark_session_dirty()
         self.statusBar().showMessage("Cleared all loaded resources.")
 
     def _close_session(self) -> None:
-        if self._session_dirty or self._any_peaks_unsaved():
-            choice = self._prompt_save_discard_cancel("close")
-            if choice == "cancel":
-                return
-            if choice == "save" and not self._save_session_for_prompt():
-                return
-        elif not self.workbench_is_pristine():
-            if not self._confirm_close_session_clean():
-                return
+        if not self._handle_session_transition_guard("close"):
+            return
         self._reset_session_after_close()
 
     def _reset_session_after_close(self) -> None:
         with self._session_dirty_guard():
             self._close_sources()
-            self.session = AlignmentSession()
-            self._current_session_path = None
+            reset = self._session_lifecycle.reset_after_close()
+            self.session = reset.session
             self._resource_reload_errors.clear()
             self._resource_load_warnings.clear()
-            self._generated_peak_result = None
-            self._peaks_dirty = False
             self._populate_controls_from_session()
             self._update_controls_enabled_state()
             self._sync_previews(camera_access_hint="auto")
             self._refresh_resources_ui()
             self.statusBar().showMessage("Closed session.")
         self._clear_session_dirty()
+        self._refresh_session_title()
 
     def _dialog_start_path(self, key: str) -> str:
         value = self.settings.value(key, "", type=str)
@@ -6858,8 +3542,18 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         try:
             export_rect = self._scaled_export_overlay_rect(original=True)
             export_fps = max(self.session.camera_track.fps, self.session.heatmap_track.fps, 1.0)
+            overlap_start_s = max(0.0, -self.session.timeline.offset_s)
+            overlap_end_s = min(
+                self.session.heatmap_track.duration_s,
+                self.session.camera_track.duration_s - self.session.timeline.offset_s,
+            )
+            if overlap_end_s <= overlap_start_s:
+                raise RuntimeError(
+                    "The H5 recording and video do not overlap in time. "
+                    "Adjust the alignment offset before exporting."
+                )
             output_frame_count = max(
-                1, int(math.ceil(self.session.heatmap_track.duration_s * export_fps))
+                1, int(math.ceil((overlap_end_s - overlap_start_s) * export_fps))
             )
             writer = cv2.VideoWriter(
                 str(output_path),
@@ -6885,7 +3579,9 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
                 for frame_idx in range(output_frame_count):
                     if progress.wasCanceled():
                         raise RuntimeError("Export cancelled.")
-                    h5_time_s = min(frame_idx / export_fps, self.session.heatmap_track.duration_s)
+                    h5_time_s = min(
+                        overlap_start_s + frame_idx / export_fps, overlap_end_s
+                    )
                     camera_time_s = h5_time_s + self.session.timeline.offset_s
                     if camera_time_s < 0.0:
                         camera_frame = first_camera_frame
@@ -6910,6 +3606,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
                             source_size=presentation_source_size,
                             peak_distance_m=None if peak_overlay is None else peak_overlay[0],
                             zero_velocity_m_s=None if peak_overlay is None else peak_overlay[1],
+                            detection_ratio=None if peak_overlay is None else peak_overlay[2],
                         )
                         left = int(round(export_rect.x()))
                         top = int(round(export_rect.y()))
@@ -7000,7 +3697,10 @@ def main() -> None:
         mat_path = args.mat
 
         def _load_session_on_start() -> None:
-            window.load_session_from_path(session_path)
+            if not window._open_session(
+                LoadSessionPlan(session_path=session_path, prompt_for_unsaved=False)
+            ):
+                return
             if peaks_path is not None:
                 window._import_peak_series_from_path(peaks_path, mark_dirty=False)
             if mat_path is not None:

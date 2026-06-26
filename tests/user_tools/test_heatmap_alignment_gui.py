@@ -36,7 +36,6 @@ from heatmap_alignment_gui import (  # noqa: E402
 )
 from heatmap_alignment_core import (  # noqa: E402
     TimelineH5DragSnapshot,
-    AlignmentResourceRuntime,
     AlignmentSession,
     CameraTrack,
     ExportOverlaySettings,
@@ -45,20 +44,25 @@ from heatmap_alignment_core import (  # noqa: E402
     Leg2StanceIntervals,
     Leg2UltrasonicDatasourceSettings,
     Leg2UltrasonicSignalSeries,
-    ResourceJobPresentation,
+    PeakDistanceSignalSeries,
+    PeakSeriesSessionEntry,
     SignalPlotViewSettings,
-    build_alignment_resource_summaries,
     save_alignment_session,
     session_equivalent_for_pristine,
     validate_alignment_session,
 )
+from heatmap_alignment_resource_summaries import (  # noqa: E402
+    AlignmentResourceRuntime,
+    ResourceJobPresentation,
+    build_alignment_resource_summaries,
+)
 from sparse_iq_peak_distance_core import (  # noqa: E402
     STATUS_DETECTED,
     FramePeakMeasurement,
-    LoadedPeakDistanceDatasource,
     PeakDistanceMetadata,
 )
 from sparse_iq_heatmap_common import HeatmapAxes  # noqa: E402
+from heatmap_alignment_session_coordinator import LoadSessionPlan  # noqa: E402
 from scipy.io import savemat
 
 
@@ -186,7 +190,7 @@ def test_missing_recent_session_is_removed_without_prompt(
     _use_fake_recent_sessions(window)
     missing_path = tmp_path / "missing.json"
     window.recent_sessions.add(missing_path)
-    window._session_dirty = True
+    window._session_lifecycle.dirty = True
 
     def fail_prompt(_action: str) -> str:
         raise AssertionError("missing recent session should not prompt")
@@ -198,7 +202,7 @@ def test_missing_recent_session_is_removed_without_prompt(
     assert window.recent_sessions.paths() == ()
     assert str(missing_path) in window.statusBar().currentMessage()
 
-    window._session_dirty = False
+    window._session_lifecycle.dirty = False
     window.close()
     qapplication.processEvents()
 
@@ -228,14 +232,14 @@ def test_recent_session_open_respects_cancel_for_unsaved_work(
     session_path = tmp_path / "session.json"
     save_alignment_session(AlignmentSession(), session_path)
     window.recent_sessions.add(session_path)
-    window._session_dirty = True
+    window._session_lifecycle.dirty = True
     monkeypatch.setattr(window, "_prompt_save_discard_cancel", lambda _action: "cancel")
 
     window._open_recent_session(session_path)
 
-    assert window._current_session_path is None
+    assert window._session_lifecycle.current_path is None
 
-    window._session_dirty = False
+    window._session_lifecycle.dirty = False
     window.close()
     qapplication.processEvents()
 
@@ -629,6 +633,37 @@ def test_startup_mat_overrides_session_leg2_path(tmp_path: Path, qapplication: Q
     assert window.leg2_ultrasonic_datasource.path == startup_mat
 
 
+def test_open_session_returns_false_for_missing_session_path(
+    tmp_path: Path, qapplication: QApplication
+) -> None:
+    window = HeatmapAlignmentWindow()
+    missing_path = tmp_path / "nonexistent.json"
+
+    result = window._open_session(LoadSessionPlan(session_path=missing_path, prompt_for_unsaved=False))
+
+    assert result is False
+    assert window._session_lifecycle.current_path is None
+
+    window.close()
+    qapplication.processEvents()
+
+
+def test_open_session_returns_false_for_invalid_session_json(
+    tmp_path: Path, qapplication: QApplication
+) -> None:
+    window = HeatmapAlignmentWindow()
+    bad_path = tmp_path / "bad.json"
+    bad_path.write_text("{", encoding="utf-8")
+
+    result = window._open_session(LoadSessionPlan(session_path=bad_path, prompt_for_unsaved=False))
+
+    assert result is False
+    assert window._session_lifecycle.current_path is None
+
+    window.close()
+    qapplication.processEvents()
+
+
 def _sample_leg2_signal_series() -> Leg2UltrasonicSignalSeries:
     return Leg2UltrasonicSignalSeries(
         primary_time_s=np.array([0.0, 1.0], dtype=np.float64),
@@ -985,7 +1020,7 @@ def test_resources_window_close_button_hides_without_changing_state(
     window = HeatmapAlignmentWindow()
     window.session.camera_track = CameraTrack(path="/tmp/example_camera.mp4")
     window.session.heatmap_track = HeatmapTrack(path="/tmp/example.h5")
-    window._current_session_path = Path("/tmp/session.json")
+    window._session_lifecycle.current_path = Path("/tmp/session.json")
 
     window._show_resources_window()
     resources = window._resources_window
@@ -1001,7 +1036,7 @@ def test_resources_window_close_button_hides_without_changing_state(
     assert window._resources_window is resources
     assert window.session.camera_track.path == "/tmp/example_camera.mp4"
     assert window.session.heatmap_track.path == "/tmp/example.h5"
-    assert window._current_session_path == Path("/tmp/session.json")
+    assert window._session_lifecycle.current_path == Path("/tmp/session.json")
     assert window.camera_source is None
     assert window.heatmap_source is None
 
@@ -1292,6 +1327,109 @@ def test_resource_job_manager_cancel_before_success_discards_payload(
     assert manager.board().radar_h5.phase == "idle"
 
 
+def test_resource_job_manager_progress_updates_job_board(
+    qapplication: QApplication,
+) -> None:
+    from heatmap_alignment_gui import ResourceJobManager
+    from heatmap_alignment_resource_jobs import begin_resource_job
+
+    manager = ResourceJobManager()
+    generation = begin_resource_job(
+        manager.board(),
+        "radar_h5",
+        target_path=Path("/tmp/trial.h5"),
+        replaces_active=False,
+    )
+
+    manager._handle_job_progress(
+        "radar_h5",
+        generation,
+        "waiting",
+        "Waiting to load trial.h5...",
+    )
+
+    assert manager.board().radar_h5.phase == "waiting"
+    assert manager.board().radar_h5.message == "Waiting to load trial.h5..."
+
+
+def test_resource_job_manager_progress_signal_updates_job_board(
+    qapplication: QApplication,
+) -> None:
+    from heatmap_alignment_gui import ResourceJobManager
+    from heatmap_alignment_resource_jobs import begin_resource_job
+
+    manager = ResourceJobManager()
+    generation = begin_resource_job(
+        manager.board(),
+        "radar_h5",
+        target_path=Path("/tmp/trial.h5"),
+        replaces_active=False,
+    )
+
+    manager.job_progress.emit(
+        "radar_h5",
+        generation,
+        "waiting",
+        "Waiting to load trial.h5...",
+    )
+    QtCore.QCoreApplication.processEvents()
+
+    assert manager.board().radar_h5.phase == "waiting"
+    assert manager.board().radar_h5.message == "Waiting to load trial.h5..."
+
+
+def test_resource_job_manager_ignores_late_progress_after_cancel(
+    qapplication: QApplication,
+) -> None:
+    from heatmap_alignment_gui import ResourceJobManager
+    from heatmap_alignment_resource_jobs import begin_resource_job
+
+    manager = ResourceJobManager()
+    generation = begin_resource_job(
+        manager.board(),
+        "radar_h5",
+        target_path=Path("/tmp/trial.h5"),
+        replaces_active=False,
+    )
+    assert manager.cancel_job("radar_h5") is True
+
+    manager._handle_job_progress(
+        "radar_h5",
+        generation,
+        "waiting",
+        "Waiting to load trial.h5...",
+    )
+
+    assert manager.board().radar_h5.phase == "idle"
+    assert manager.board().radar_h5.message == ""
+
+
+def test_resource_job_manager_ignores_late_progress_after_abandon(
+    qapplication: QApplication,
+) -> None:
+    from heatmap_alignment_gui import ResourceJobManager
+    from heatmap_alignment_resource_jobs import begin_resource_job
+
+    manager = ResourceJobManager()
+    generation = begin_resource_job(
+        manager.board(),
+        "radar_h5",
+        target_path=Path("/tmp/trial.h5"),
+        replaces_active=False,
+    )
+    manager.abandon_all_jobs()
+
+    manager._handle_job_progress(
+        "radar_h5",
+        generation,
+        "waiting",
+        "Waiting to load trial.h5...",
+    )
+
+    assert manager.board().radar_h5.phase == "idle"
+    assert manager.board().radar_h5.message == ""
+
+
 def test_resource_job_manager_abandon_rejects_late_dispatch(
     qapplication: QApplication,
 ) -> None:
@@ -1494,7 +1632,7 @@ def test_apply_h5_job_result_preserves_peak_series_for_different_replacement(
     window._peak_series_list = [dummy_series]
 
     monkeypatch.setattr(window, "_rebuild_overlay_plot_renderer", lambda: None)
-    monkeypatch.setattr(window, "_reload_peak_distance_datasource_from_session", lambda: None)
+    monkeypatch.setattr(window, "_reload_peak_series_from_session", lambda: None)
     monkeypatch.setattr(window, "_update_heatmap_extent_labels", lambda: None)
 
     class _FakeHeatmapSource:
@@ -1539,13 +1677,21 @@ def test_apply_h5_job_result_preserves_peak_series_for_different_replacement(
     assert window.session.heatmap_track.path == "/tmp/new.h5"
 
 
-def test_restore_h5_replacement_backup_preserves_peak_datasource(
+def test_restore_h5_replacement_backup_preserves_peak_series(
     qapplication: QApplication,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from heatmap_peak_distance_resource import PeakSeriesResource
+
     window = HeatmapAlignmentWindow()
-    peak_marker = object()
-    window.peak_distance_datasource = peak_marker
+    peak_series = PeakSeriesResource(
+        series_id="peak",
+        display_name="peak",
+        provenance="imported",
+        measurements=(),
+        color="#3b82f6",
+    )
+    window._peak_series_list = [peak_series]
 
     class _FakeHeatmapSource:
         def close(self) -> None:
@@ -1565,7 +1711,7 @@ def test_restore_h5_replacement_backup_preserves_peak_datasource(
     window._restore_h5_replacement_backup()
 
     assert window.heatmap_source is backup_source
-    assert window.peak_distance_datasource is peak_marker
+    assert window._peak_series_list == [peak_series]
 
 
 def test_abandon_resource_jobs_clears_replacement_backups(
@@ -1831,6 +1977,130 @@ def test_reconcile_camera_unload_when_session_omits_path(
     assert "camera" in unloaded
 
 
+def test_reconcile_camera_load_when_identity_changes(
+    tmp_path: Path,
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Changed camera path → reconcile as load; load_camera_from_path called with new path."""
+    new_camera = tmp_path / "new_video.mp4"
+    new_camera.write_bytes(b"")
+
+    session_path = _make_session_file(tmp_path, camera_path=str(new_camera))
+
+    window = HeatmapAlignmentWindow()
+    # Pretend old camera is loaded with a different path.
+    class _FakeCameraSource:
+        path = tmp_path / "old_video.mp4"
+
+        def close(self) -> None:
+            pass
+
+    window.camera_source = _FakeCameraSource()  # type: ignore[assignment]
+    window.session.camera_track = CameraTrack(path=str(tmp_path / "old_video.mp4"))
+
+    load_camera_calls: list[Path] = []
+    monkeypatch.setattr(
+        window,
+        "load_camera_from_path",
+        lambda p, **kwargs: load_camera_calls.append(p),
+    )
+    monkeypatch.setattr(window, "_sync_previews", lambda **kwargs: None)
+    monkeypatch.setattr(window, "_load_current_camera_frame", lambda access_hint="auto": None)
+    monkeypatch.setattr(window, "_refresh_camera_view_corners", lambda: None)
+
+    window.load_session_from_path(session_path)
+
+    assert len(load_camera_calls) == 1
+    assert load_camera_calls[0] == new_camera
+
+
+def test_reconcile_camera_load_when_no_camera_was_loaded(
+    tmp_path: Path,
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No camera loaded, session has a camera path → load_camera_from_path called."""
+    camera_file = tmp_path / "video.mp4"
+    camera_file.write_bytes(b"")
+
+    session_path = _make_session_file(tmp_path, camera_path=str(camera_file))
+
+    window = HeatmapAlignmentWindow()
+    # No camera loaded — camera_source stays None.
+
+    load_camera_calls: list[Path] = []
+    monkeypatch.setattr(
+        window,
+        "load_camera_from_path",
+        lambda p, **kwargs: load_camera_calls.append(p),
+    )
+    monkeypatch.setattr(window, "_sync_previews", lambda **kwargs: None)
+
+    window.load_session_from_path(session_path)
+
+    assert len(load_camera_calls) == 1
+    assert load_camera_calls[0] == camera_file
+
+
+def test_reconcile_camera_load_sets_error_when_file_missing(
+    tmp_path: Path,
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Session references a camera path that no longer exists → reload error set, no load call.
+
+    This path is reachable when a session was saved against files that have since been deleted.
+    We call _reconcile_session_load directly to bypass the load-time file-existence check.
+    """
+    missing_camera = tmp_path / "missing.mp4"
+    desired = AlignmentSession(camera_track=CameraTrack(path=str(missing_camera)))
+
+    window = HeatmapAlignmentWindow()
+
+    load_camera_calls: list[Path] = []
+    monkeypatch.setattr(
+        window,
+        "load_camera_from_path",
+        lambda p, **kwargs: load_camera_calls.append(p),
+    )
+
+    window._reconcile_session_load(desired, AlignmentSession())
+
+    assert load_camera_calls == []
+    assert "camera" in window._resource_reload_errors
+    assert "File not found" in window._resource_reload_errors["camera"]
+
+
+def test_reconcile_h5_load_sets_error_when_file_missing(
+    tmp_path: Path,
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Session references an H5 path that no longer exists → reload error set, no load call.
+
+    This path is reachable when a session was saved against files that have since been deleted.
+    We call _reconcile_session_load directly to bypass the load-time file-existence check.
+    """
+    missing_h5 = tmp_path / "missing.h5"
+    desired = AlignmentSession(heatmap_track=HeatmapTrack(path=str(missing_h5)))
+
+    window = HeatmapAlignmentWindow()
+
+    load_h5_calls: list[Path] = []
+    monkeypatch.setattr(
+        window,
+        "load_h5_from_path",
+        lambda p, **kwargs: load_h5_calls.append(p),
+    )
+
+    window._reconcile_session_load(desired, AlignmentSession())
+
+    assert load_h5_calls == []
+    assert "radar_h5" in window._resource_reload_errors
+    assert "File not found" in window._resource_reload_errors["radar_h5"]
+
+
 def test_reconcile_h5_unload_when_session_omits_path(
     tmp_path: Path,
     qapplication: QApplication,
@@ -1898,12 +2168,12 @@ def test_reconcile_leg2_and_peak_unload_when_session_omits_paths(
 
     monkeypatch.setattr(window, "_clear_leg2_ultrasonic_datasource", _track_clear_leg2)
     # Prevent real reload calls.
-    monkeypatch.setattr(window, "_reload_peak_distance_datasource_from_session", lambda: None)
+    monkeypatch.setattr(window, "_reload_peak_series_from_session", lambda: None)
     monkeypatch.setattr(window, "_reload_leg2_ultrasonic_datasource_from_session", lambda: None)
 
     window.load_session_from_path(session_path)
 
-    # Peak series are cleared directly (not via _clear_peak_distance_datasource).
+    # Peak series are cleared directly (not via _clear_peak_series).
     assert window._peak_series_list == []
     assert "leg2" in cleared
 
@@ -1964,12 +2234,169 @@ def test_reconcile_session_fields_applied_after_h5_keep(
     window._inflight_h5_identity = None
 
     monkeypatch.setattr(window, "load_h5_from_path", lambda p, **kwargs: None)
-    monkeypatch.setattr(window, "_reload_peak_distance_datasource_from_session", lambda: None)
+    monkeypatch.setattr(window, "_reload_peak_series_from_session", lambda: None)
     monkeypatch.setattr(window, "_sync_previews", lambda **kwargs: None)
 
     window.load_session_from_path(session_path)
 
     assert window.session.timeline.offset_s == pytest.approx(1.25)
+
+
+def test_reconcile_deferred_peak_reload_fires_after_h5_replacement(
+    tmp_path: Path,
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: session load with H5 identity change + new peaks → peaks load after H5 job.
+
+    When reconcile defers peak reload because H5 is loading (different identity),
+    _apply_h5_job_result must honour the deferred flag and call
+    _reload_peak_series_from_session even for the replacement (different-path) branch.
+    """
+    from heatmap_alignment_resource_jobs import LoadedH5ResourcePayload
+    from heatmap_alignment_core import PeakSeriesSessionEntry
+
+    old_h5 = tmp_path / "old.h5"
+    new_h5 = tmp_path / "new.h5"
+    old_h5.write_bytes(b"")
+    new_h5.write_bytes(b"")
+
+    # Session wants new H5 + one peak series.
+    peak_path = tmp_path / "peaks.json"
+    peak_path.write_bytes(b"")
+    desired = AlignmentSession(
+        heatmap_track=HeatmapTrack(path=str(new_h5)),
+        peak_series=[PeakSeriesSessionEntry(path=str(peak_path))],
+    )
+
+    window = HeatmapAlignmentWindow()
+
+    # Pretend old H5 is currently loaded.
+    class _FakeHeatmapSource:
+        path = old_h5
+        record = type("rec", (), {"session_idx": 0, "group_idx": 0, "entry_idx": 0})()
+        subsweep_idx = 0
+
+        def close(self) -> None:
+            pass
+
+    window.heatmap_source = _FakeHeatmapSource()  # type: ignore[assignment]
+    window.session.heatmap_track = HeatmapTrack(
+        path=str(old_h5), session_idx=0, group_idx=0, entry_idx=0, subsweep_idx=0
+    )
+
+    reload_calls: list[str] = []
+    monkeypatch.setattr(
+        window,
+        "load_h5_from_path",
+        lambda p, **kwargs: reload_calls.append(f"load_h5:{p.name}"),
+    )
+    monkeypatch.setattr(
+        window,
+        "_reload_peak_series_from_session",
+        lambda: reload_calls.append("peaks"),
+    )
+
+    # Trigger reconcile: H5 identity changed → h5_action="load", peaks deferred.
+    window._reconcile_session_load(desired, window.session)
+
+    assert window._pending_peak_session_reload is True
+    assert "peaks" not in reload_calls
+
+    # Simulate H5 job completion with new H5.
+    class _FakeRecord:
+        session_idx = 0
+        group_idx = 0
+        entry_idx = 0
+        duration_s = 1.0
+        fps = 1.0
+        results: list[object] = []
+
+        def close(self) -> None:
+            pass
+
+    payload = LoadedH5ResourcePayload(
+        path=new_h5,
+        record=_FakeRecord(),
+        subsweep_idx=0,
+        metadata=HeatmapTrack(path=str(new_h5)),
+        first_frame_shape=(10, 10),
+    )
+    monkeypatch.setattr(window, "_rebuild_overlay_plot_renderer", lambda: None)
+    monkeypatch.setattr(window, "_update_heatmap_extent_labels", lambda: None)
+
+    class _NewFakeHeatmapSource:
+        def close(self) -> None:
+            pass
+
+    window._h5_replacement_backup = _H5ResourceBackup(
+        heatmap_source=_FakeHeatmapSource(),
+        heatmap_track=HeatmapTrack(path=str(old_h5)),
+        viewport_output_width=10,
+        viewport_output_height=10,
+    )
+    monkeypatch.setattr(
+        "heatmap_alignment_gui.build_h5_truth_source_from_payload",
+        lambda _payload: _NewFakeHeatmapSource(),
+    )
+
+    window._apply_h5_job_result(payload)
+
+    assert window._pending_peak_session_reload is False
+    assert "peaks" in reload_calls
+
+
+def test_reconcile_deferred_peak_reload_cleared_on_h5_cancel(
+    tmp_path: Path,
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Deferred peak reload flag is cleared when an H5 replacement job is cancelled/rolled back."""
+    from heatmap_alignment_core import PeakSeriesSessionEntry
+
+    new_h5 = tmp_path / "new.h5"
+    new_h5.write_bytes(b"")
+    peak_path = tmp_path / "peaks.json"
+    peak_path.write_bytes(b"")
+
+    desired = AlignmentSession(
+        heatmap_track=HeatmapTrack(path=str(new_h5)),
+        peak_series=[PeakSeriesSessionEntry(path=str(peak_path))],
+    )
+
+    window = HeatmapAlignmentWindow()
+
+    class _FakeHeatmapSource:
+        path = tmp_path / "old.h5"
+        record = type("rec", (), {"session_idx": 0, "group_idx": 0, "entry_idx": 0})()
+        subsweep_idx = 0
+
+        def close(self) -> None:
+            pass
+
+    window.heatmap_source = _FakeHeatmapSource()  # type: ignore[assignment]
+    window.session.heatmap_track = HeatmapTrack(
+        path=str(tmp_path / "old.h5"), session_idx=0, group_idx=0, entry_idx=0, subsweep_idx=0
+    )
+
+    monkeypatch.setattr(window, "load_h5_from_path", lambda p, **kwargs: None)
+    monkeypatch.setattr(window, "_reload_peak_series_from_session", lambda: None)
+
+    window._reconcile_session_load(desired, window.session)
+    assert window._pending_peak_session_reload is True
+
+    # Simulate cancellation (backup restore clears the flag).
+    window._h5_replacement_backup = _H5ResourceBackup(
+        heatmap_source=_FakeHeatmapSource(),
+        heatmap_track=HeatmapTrack(path=str(tmp_path / "old.h5")),
+        viewport_output_width=10,
+        viewport_output_height=10,
+    )
+    monkeypatch.setattr(window, "_rebuild_overlay_plot_renderer", lambda: None)
+    monkeypatch.setattr(window, "_update_heatmap_extent_labels", lambda: None)
+    window._restore_h5_replacement_backup()
+
+    assert window._pending_peak_session_reload is False
 
 
 # ---------------------------------------------------------------------------
@@ -1989,12 +2416,12 @@ def test_save_session_without_loaded_camera_or_h5(
     window = HeatmapAlignmentWindow()
     window.session.camera_track.path = str(tmp_path / "missing_camera.mp4")
     window.session.heatmap_track.path = str(tmp_path / "missing.h5")
-    window._current_session_path = session_path
+    window._session_lifecycle.current_path = session_path
 
     window._write_session_to_path(session_path)
 
     assert session_path.is_file()
-    assert window._session_dirty is False
+    assert window._session_lifecycle.dirty is False
 
 
 def test_title_shows_asterisk_when_dirty_and_clears_after_save(
@@ -2010,11 +2437,11 @@ def test_title_shows_asterisk_when_dirty_and_clears_after_save(
 
     window.offset_spin.setValue(0.5)
     qapplication.processEvents()
-    assert window._session_dirty is True
+    assert window._session_lifecycle.dirty is True
     assert window.windowTitle().endswith("*")
 
     window._write_session_to_path(session_path)
-    assert window._session_dirty is False
+    assert window._session_lifecycle.dirty is False
     assert "*" not in window.windowTitle()
 
 
@@ -2035,7 +2462,7 @@ def test_cancel_on_quit_leaves_session_dirty(
     window.closeEvent(event)
 
     assert event.isAccepted() is False
-    assert window._session_dirty is True
+    assert window._session_lifecycle.dirty is True
 
 
 def test_dont_save_then_open_proceeds(
@@ -2065,8 +2492,8 @@ def test_dont_save_then_open_proceeds(
 
     window._load_session()
 
-    assert window._current_session_path == second_path
-    assert window._session_dirty is False
+    assert window._session_lifecycle.current_path == second_path
+    assert window._session_lifecycle.dirty is False
 
 
 def test_dont_save_then_cancel_open_dialog_stays_dirty(
@@ -2094,8 +2521,8 @@ def test_dont_save_then_cancel_open_dialog_stays_dirty(
 
     window._load_session()
 
-    assert window._current_session_path == session_path
-    assert window._session_dirty is True
+    assert window._session_lifecycle.current_path == session_path
+    assert window._session_lifecycle.dirty is True
 
 
 def test_save_from_prompt_calls_write_path(
@@ -2153,6 +2580,27 @@ def test_pristine_close_session_does_not_show_dialog(
 
     assert prompt_called is False
     assert confirm_called is False
+
+
+def test_clean_close_resets_window_title_to_untitled(
+    tmp_path: Path,
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_path = tmp_path / "session.json"
+    save_alignment_session(AlignmentSession(), session_path)
+
+    window = HeatmapAlignmentWindow()
+    window.load_session_from_path(session_path)
+    assert session_path.name in window.windowTitle()
+
+    monkeypatch.setattr(window, "_confirm_close_session_clean", lambda: True)
+
+    window._close_session()
+
+    assert window._session_lifecycle.current_path is None
+    assert window._session_lifecycle.dirty is False
+    assert window.windowTitle() == "Heatmap Alignment Workbench — Untitled Session"
 
 
 def test_clean_non_pristine_close_session_shows_yes_no_only(
@@ -2268,7 +2716,7 @@ def test_no_dirty_after_camera_job_completion_on_session_open(
 
     window._apply_camera_job_result(result)
 
-    assert window._session_dirty is False
+    assert window._session_lifecycle.dirty is False
     assert "*" not in window.windowTitle()
 
 
@@ -2284,12 +2732,12 @@ def test_clear_all_resources_marks_dirty(
     )
     monkeypatch.setattr(window, "unload_camera_video", lambda **kwargs: None)
     monkeypatch.setattr(window, "unload_h5_recording", lambda **kwargs: None)
-    monkeypatch.setattr(window, "_clear_peak_distance_datasource", lambda **kwargs: None)
+    monkeypatch.setattr(window, "_clear_peak_series", lambda **kwargs: None)
     monkeypatch.setattr(window, "_clear_leg2_ultrasonic_datasource", lambda **kwargs: None)
 
     window.clear_all_resources()
 
-    assert window._session_dirty is True
+    assert window._session_lifecycle.dirty is True
 
 
 
@@ -2317,7 +2765,7 @@ def test_save_from_prompt_aborted_when_validation_fails(
 
     window._close_session()
 
-    assert window._session_dirty is True
+    assert window._session_lifecycle.dirty is True
     assert reset_called is False
     with pytest.raises(ValueError):
         validate_alignment_session(window.session, allow_missing_sources=True)
@@ -2697,7 +3145,7 @@ def test_peak_series_preserve_after_h5_replacement(
         viewport_output_width=10, viewport_output_height=10,
     )
     monkeypatch.setattr(window, "_rebuild_overlay_plot_renderer", lambda: None)
-    monkeypatch.setattr(window, "_reload_peak_distance_datasource_from_session", lambda: None)
+    monkeypatch.setattr(window, "_reload_peak_series_from_session", lambda: None)
     monkeypatch.setattr(window, "_update_heatmap_extent_labels", lambda: None)
     monkeypatch.setattr("heatmap_alignment_gui.build_h5_truth_source_from_payload", lambda _: _FakeHeatmapSource())
 
@@ -2719,14 +3167,16 @@ def test_signal_playhead_scrubbed_handler_updates_session_and_calls_scrub_previe
     window = HeatmapAlignmentWindow()
 
     reanchored: list[None] = []
-    synced_hints: list[str] = []
+    synced_calls: list[tuple[str, bool]] = []
     dirty_calls: list[None] = []
 
     monkeypatch.setattr(window, "_reanchor_playback_clock", lambda: reanchored.append(None))
     monkeypatch.setattr(
         window,
         "_sync_previews",
-        lambda *, camera_access_hint="auto", **_kw: synced_hints.append(camera_access_hint),
+        lambda *, camera_access_hint="auto", refresh_signal_data=True, **_kw: synced_calls.append(
+            (camera_access_hint, refresh_signal_data)
+        ),
     )
     monkeypatch.setattr(window, "_mark_session_dirty", lambda: dirty_calls.append(None))
 
@@ -2734,8 +3184,118 @@ def test_signal_playhead_scrubbed_handler_updates_session_and_calls_scrub_previe
 
     assert window.session.timeline.current_time_s == pytest.approx(3.75)
     assert reanchored == [None]
-    assert synced_hints == ["scrub"]
+    assert synced_calls == [("scrub", False)]
     assert dirty_calls == []
+
+
+def test_refresh_signal_plot_can_update_playhead_without_rebuilding_data(
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = HeatmapAlignmentWindow()
+    plotted_calls: list[None] = []
+    current_times: list[float] = []
+
+    monkeypatch.setattr(
+        window.signal_plot,
+        "set_plotted_signals",
+        lambda **_kwargs: plotted_calls.append(None),
+    )
+    monkeypatch.setattr(
+        window.signal_plot,
+        "set_current_time_s",
+        lambda time_s: current_times.append(time_s),
+    )
+
+    window.session.timeline.current_time_s = 4.25
+    window._refresh_signal_plot(refresh_data=False)
+
+    assert plotted_calls == []
+    assert current_times == [pytest.approx(4.25)]
+
+
+def test_advance_playback_uses_fast_signal_playhead_refresh(
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = HeatmapAlignmentWindow()
+    synced_calls: list[tuple[str, bool]] = []
+    slider_updates: list[None] = []
+
+    monkeypatch.setattr("heatmap_alignment_gui.time.perf_counter", lambda: 1.0)
+    monkeypatch.setattr(window, "_max_duration_s", lambda: 10.0)
+    monkeypatch.setattr(window, "_timeline_bounds_s", lambda: (0.0, 10.0))
+    monkeypatch.setattr(window, "_set_slider_from_current_time", lambda: slider_updates.append(None))
+    monkeypatch.setattr(
+        window,
+        "_sync_previews",
+        lambda *, camera_access_hint="auto", refresh_signal_data=True, **_kw: synced_calls.append(
+            (camera_access_hint, refresh_signal_data)
+        ),
+    )
+    window._playback_started_at_s = 0.0
+    window._playback_started_video_time_s = 0.0
+
+    window._advance_playback()
+
+    assert window.session.timeline.current_time_s == pytest.approx(1.0)
+    assert slider_updates == [None]
+    assert synced_calls == [("playback", False)]
+
+
+def test_sync_previews_runs_named_stages_in_order(
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = HeatmapAlignmentWindow()
+    calls: list[str] = []
+    truth_frame = np.zeros((2, 2, 3), dtype=np.uint8)
+
+    monkeypatch.setattr(window, "_invalidate_source_resolution_viewport", lambda: calls.append("invalidate"))
+    monkeypatch.setattr(
+        window,
+        "_load_current_camera_frame",
+        lambda *, access_hint="auto": calls.append(f"camera:{access_hint}"),
+    )
+    monkeypatch.setattr(window, "_refresh_camera_view_corners", lambda: calls.append("corners"))
+
+    def _timeline_stage(*, timeline_visible_range_s, refresh_signal_data):
+        calls.append(f"timeline:{timeline_visible_range_s}:{refresh_signal_data}")
+
+    monkeypatch.setattr(window, "_sync_timeline_feedback", _timeline_stage)
+    monkeypatch.setattr(
+        window,
+        "_sync_heatmap_truth_preview",
+        lambda: calls.append("truth") or (7, truth_frame),
+    )
+    monkeypatch.setattr(
+        window,
+        "_sync_export_overlay_preview",
+        lambda *, frame_idx, truth_frame: calls.append(f"overlay:{frame_idx}:{truth_frame is not None}"),
+    )
+    monkeypatch.setattr(
+        window,
+        "_sync_viewport_preview",
+        lambda *, truth_frame, invalidate_source_resolution: calls.append(
+            f"viewport:{truth_frame is not None}:{invalidate_source_resolution}"
+        ),
+    )
+
+    window._sync_previews(
+        camera_access_hint="scrub",
+        timeline_visible_range_s=(1.0, 2.0),
+        refresh_signal_data=False,
+    )
+
+    assert calls == [
+        "invalidate",
+        "camera:scrub",
+        "corners",
+        "timeline:(1.0, 2.0):False",
+        "truth",
+        "overlay:7:True",
+        "viewport:True:True",
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -2835,6 +3395,33 @@ def test_invoke_resource_action_save_targets_series_id(qapplication: QApplicatio
     assert saved == ["s2"]
 
 
+def test_invoke_resource_action_save_as_targets_series_id(qapplication: QApplication) -> None:
+    from heatmap_peak_distance_resource import PeakSeriesResource
+
+    window = HeatmapAlignmentWindow()
+    s1 = PeakSeriesResource(
+        series_id="s1",
+        display_name="A",
+        provenance="generated",
+        measurements=(),
+        color="#3b82f6",
+    )
+    s2 = PeakSeriesResource(
+        series_id="s2",
+        display_name="B",
+        provenance="generated",
+        measurements=(),
+        color="#f59e0b",
+    )
+    window._peak_series_list = [s1, s2]
+    saved_as: list[str] = []
+    window._save_peak_series_as = lambda sid: saved_as.append(sid)  # type: ignore
+
+    window.invoke_resource_action("radar_peak", "save_as", series_id="s2")
+
+    assert saved_as == ["s2"]
+
+
 def test_invoke_resource_action_unload_targets_series_id(qapplication: QApplication) -> None:
     """Req 2: unload with series_id removes only the target."""
     from heatmap_peak_distance_resource import PeakSeriesResource
@@ -2847,6 +3434,106 @@ def test_invoke_resource_action_unload_targets_series_id(qapplication: QApplicat
     window.invoke_resource_action("radar_peak", "unload", series_id="remove")
     assert len(window._peak_series_list) == 1
     assert window._peak_series_list[0].series_id == "keep"
+
+
+def test_resolve_peak_series_target_prefers_explicit_id(qapplication: QApplication) -> None:
+    from heatmap_peak_distance_resource import PeakSeriesResource
+
+    window = HeatmapAlignmentWindow()
+    selected = PeakSeriesResource(
+        series_id="selected",
+        display_name="selected",
+        provenance="imported",
+        measurements=(),
+        color="#3b82f6",
+    )
+    explicit = PeakSeriesResource(
+        series_id="explicit",
+        display_name="explicit",
+        provenance="imported",
+        measurements=(),
+        color="#f59e0b",
+    )
+    window._peak_series_list = [selected, explicit]
+    window._heatmap_peak_selector_id = "selected"
+
+    assert window._resolve_peak_series_target("explicit") is explicit
+
+
+def test_resolve_peak_series_target_uses_active_then_unsaved(qapplication: QApplication) -> None:
+    from heatmap_peak_distance_resource import PeakSeriesResource
+
+    window = HeatmapAlignmentWindow()
+    saved = PeakSeriesResource(
+        series_id="saved",
+        display_name="saved",
+        provenance="imported",
+        measurements=(),
+        color="#3b82f6",
+        unsaved=False,
+    )
+    unsaved = PeakSeriesResource(
+        series_id="unsaved",
+        display_name="unsaved",
+        provenance="generated",
+        measurements=(),
+        color="#f59e0b",
+        unsaved=True,
+    )
+    window._peak_series_list = [saved, unsaved]
+    window._heatmap_peak_selector_id = "saved"
+
+    assert window._resolve_peak_series_target(prefer_unsaved=True) is saved
+
+    window._heatmap_peak_selector_id = ""
+    assert window._resolve_peak_series_target(prefer_unsaved=True) is unsaved
+
+
+def test_resolve_peak_series_target_can_fall_back_to_last(qapplication: QApplication) -> None:
+    from heatmap_peak_distance_resource import PeakSeriesResource
+
+    window = HeatmapAlignmentWindow()
+    first = PeakSeriesResource(
+        series_id="first",
+        display_name="first",
+        provenance="imported",
+        measurements=(),
+        color="#3b82f6",
+    )
+    last = PeakSeriesResource(
+        series_id="last",
+        display_name="last",
+        provenance="imported",
+        measurements=(),
+        color="#f59e0b",
+    )
+    window._peak_series_list = [first, last]
+
+    assert window._resolve_peak_series_target(fallback_last=True) is last
+
+
+def test_resolve_peak_series_target_can_require_explicit_id(qapplication: QApplication) -> None:
+    from heatmap_peak_distance_resource import PeakSeriesResource
+
+    window = HeatmapAlignmentWindow()
+    selected = PeakSeriesResource(
+        series_id="selected",
+        display_name="selected",
+        provenance="imported",
+        measurements=(),
+        color="#3b82f6",
+        json_path=Path("/tmp/selected.json"),
+    )
+    window._peak_series_list = [selected]
+    window._heatmap_peak_selector_id = "selected"
+
+    assert (
+        window._resolve_peak_series_target(
+            fallback_active=False,
+            fallback_last=False,
+        )
+        is None
+    )
 
 
 def test_refresh_signal_plot_passes_all_visible_series(qapplication: QApplication) -> None:
@@ -2874,6 +3561,44 @@ def test_refresh_signal_plot_passes_all_visible_series(qapplication: QApplicatio
     assert len(psl) == 2
     names = [n for n, _c, _s in psl]
     assert "v0 slice" in names and "sum v" in names and "hidden" not in names
+
+
+def test_signal_plot_y_auto_range_uses_all_visible_peak_series(
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = PeakDistanceSignalSeries(
+        detected_time_s=np.array([0.0], dtype=np.float64),
+        detected_distance_m=np.array([1.0], dtype=np.float64),
+        candidate_time_s=np.array([], dtype=np.float64),
+        candidate_distance_m=np.array([], dtype=np.float64),
+    )
+    second = PeakDistanceSignalSeries(
+        detected_time_s=np.array([0.0], dtype=np.float64),
+        detected_distance_m=np.array([10.0], dtype=np.float64),
+        candidate_time_s=np.array([], dtype=np.float64),
+        candidate_distance_m=np.array([], dtype=np.float64),
+    )
+    captured_counts: list[int] = []
+
+    def _capture_range(series_list, **_kwargs):
+        captured_counts.append(len(series_list))
+        return (0.0, 10.0)
+
+    monkeypatch.setattr(
+        "heatmap_alignment_timeline_widgets.visible_signal_y_range_for_series",
+        _capture_range,
+    )
+
+    plot = SignalPlotWidget()
+    plot.set_plotted_signals(
+        peak_series_list=[
+            ("first", "#3b82f6", first),
+            ("second", "#f59e0b", second),
+        ],
+    )
+
+    assert captured_counts == [2]
 
 
 def test_heatmap_peak_combo_exists(qapplication: QApplication) -> None:
@@ -2956,6 +3681,50 @@ def test_import_peak_series_from_path_appends(
     assert len(window._peak_series_list) == 2, "Must append, not replace"
     assert window._peak_series_list[0].series_id == "pre"
     assert window._peak_series_list[1].json_path == json_path
+
+
+def test_reload_peak_series_from_session_restores_persisted_fields(
+    qapplication: QApplication,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    json_path = tmp_path / "session_peaks.json"
+    json_path.write_text("{}", encoding="utf-8")
+    metadata = object()
+
+    class _FakeDatasource:
+        measurements = ()
+
+    _FakeDatasource.metadata = metadata
+
+    window = HeatmapAlignmentWindow()
+    window.session.peak_series = [
+        PeakSeriesSessionEntry(
+            path=str(json_path),
+            display_name="restored peaks",
+            color="#f59e0b",
+            visible=False,
+            heatmap_selected=True,
+        )
+    ]
+    monkeypatch.setattr(
+        "sparse_iq_peak_distance_core.load_peak_distance_json",
+        lambda path: _FakeDatasource(),
+    )
+    monkeypatch.setattr(window, "_refresh_signal_plot", lambda: None)
+    monkeypatch.setattr(window, "_refresh_resources_ui", lambda: None)
+    monkeypatch.setattr(window, "_update_heatmap_peak_selector", lambda: None)
+
+    window._reload_peak_series_from_session()
+
+    assert len(window._peak_series_list) == 1
+    restored = window._peak_series_list[0]
+    assert restored.display_name == "restored peaks"
+    assert restored.color == "#f59e0b"
+    assert restored.visible is False
+    assert restored.heatmap_selected is True
+    assert restored.json_path == json_path
+    assert window._heatmap_peak_selector_id == restored.series_id
 
 
 # ---------------------------------------------------------------------------

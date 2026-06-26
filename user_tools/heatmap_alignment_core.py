@@ -9,18 +9,11 @@ because it depends on the same runtime surface as the GUI, including OpenCV.
 
 import json
 import math
-import os
-import shutil
-import tempfile
 from collections import OrderedDict
 from dataclasses import asdict, dataclass, field
 from functools import lru_cache
-from hashlib import sha256
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
-
-if TYPE_CHECKING:
-    from heatmap_alignment_resource_jobs import ResourceJobPhase
+from typing import Any, Literal
 
 import cv2
 import numpy as np
@@ -29,11 +22,28 @@ from matplotlib.figure import Figure
 from scipy.io import loadmat
 from sparse_iq_peak_distance_core import (
     STATUS_DETECTED,
-    FramePeakMeasurement,
+    FrameDetectionMeasurement,
     LoadedPeakDistanceDatasource,
     load_peak_distance_json,
     validate_peak_distance_import,
 )
+from heatmap_alignment_video_proxy import (
+    ProxyVideoResult,
+    VideoProbe,
+    default_proxy_cache_root,
+    find_ffmpeg,
+    prepare_proxy_video,
+    probe_video,
+    proxy_cache_path,
+    resolve_ffmpeg_path,
+    scaled_video_dimensions,
+)
+
+_default_proxy_cache_root = default_proxy_cache_root
+_find_ffmpeg = find_ffmpeg
+_proxy_cache_path = proxy_cache_path
+_resolve_ffmpeg_path = resolve_ffmpeg_path
+_scaled_video_dimensions = scaled_video_dimensions
 
 
 SESSION_VERSION = 3
@@ -182,7 +192,7 @@ class LoadedLeg2UltrasonicDatasource:
 
 
 @dataclass(frozen=True)
-class PeakDistanceSignalSeries:
+class DetectionSignalSeries:
     detected_time_s: np.ndarray
     detected_distance_m: np.ndarray
     candidate_time_s: np.ndarray
@@ -224,25 +234,6 @@ class Leg2MatImportError(ValueError):
 
 
 @dataclass(frozen=True)
-class VideoProbe:
-    path: Path
-    fps: float
-    frame_count: int
-    duration_s: float
-    width: int
-    height: int
-
-
-@dataclass(frozen=True)
-class ProxyVideoResult:
-    source_path: Path
-    display_path: Path
-    source_probe: VideoProbe
-    proxy_path: Path | None
-    state: Literal["original", "proxy_reused", "proxy_built", "proxy_unavailable"]
-
-
-@dataclass(frozen=True)
 class OverlayPlotPresentation:
     source_size: tuple[int, int]
     render_size: tuple[int, int]
@@ -278,6 +269,52 @@ def _normalize_heatmap_track_keys(raw: dict) -> dict:
 
 
 @dataclass
+class PeakSeriesSessionEntry:
+    """Persisted peak-series metadata stored in alignment session JSON."""
+
+    path: str = ""
+    display_name: str = ""
+    color: str = "#3b82f6"
+    visible: bool = True
+    heatmap_selected: bool = False
+
+
+def _peak_series_entry_from_payload(raw: Any) -> PeakSeriesSessionEntry | None:
+    if isinstance(raw, PeakSeriesSessionEntry):
+        return raw
+    if not isinstance(raw, dict):
+        return None
+    data = _filter_dataclass_fields(PeakSeriesSessionEntry, raw)
+    entry = PeakSeriesSessionEntry(**data)
+    if not entry.display_name and entry.path:
+        entry.display_name = Path(entry.path).stem
+    return entry
+
+
+def _peak_series_entries_from_payload(raw_entries: Any) -> list[PeakSeriesSessionEntry]:
+    if not isinstance(raw_entries, list):
+        return []
+    entries = []
+    for raw_entry in raw_entries:
+        entry = _peak_series_entry_from_payload(raw_entry)
+        if entry is not None:
+            entries.append(entry)
+    return entries
+
+
+def _peak_series_entries_to_json(
+    entries: list[PeakSeriesSessionEntry | dict[str, Any]],
+) -> list[dict[str, Any]]:
+    payload: list[dict[str, Any]] = []
+    for raw_entry in entries:
+        entry = _peak_series_entry_from_payload(raw_entry)
+        if entry is None or not entry.path:
+            continue
+        payload.append(asdict(entry))
+    return payload
+
+
+@dataclass
 class AlignmentSession:
     """Serializable state for one alignment session."""
 
@@ -292,7 +329,7 @@ class AlignmentSession:
     viewport_visibility: ViewportVisibilitySettings = field(
         default_factory=ViewportVisibilitySettings
     )
-    peak_series: list = field(default_factory=list)
+    peak_series: list[PeakSeriesSessionEntry] = field(default_factory=list)
     leg2_ultrasonic_datasource: Leg2UltrasonicDatasourceSettings = field(
         default_factory=Leg2UltrasonicDatasourceSettings
     )
@@ -305,7 +342,7 @@ class AlignmentSession:
             view["manual_x_range"] = list(view["manual_x_range"])
         if view["manual_y_range"] is not None:
             view["manual_y_range"] = list(view["manual_y_range"])
-        payload["peak_series"] = [e for e in self.peak_series if e.get("path", "")]
+        payload["peak_series"] = _peak_series_entries_to_json(self.peak_series)
         return payload
 
     @classmethod
@@ -332,7 +369,15 @@ class AlignmentSession:
             old_path = old_peak.get("path", "") if isinstance(old_peak, dict) else ""
             if old_path:
                 from pathlib import Path
-                payload["peak_series"] = [{"path": old_path, "display_name": Path(old_path).stem, "color": "#3b82f6", "visible": True, "heatmap_selected": False}]
+                payload["peak_series"] = [
+                    PeakSeriesSessionEntry(
+                        path=old_path,
+                        display_name=Path(old_path).stem,
+                        color="#3b82f6",
+                        visible=True,
+                        heatmap_selected=False,
+                    )
+                ]
             else:
                 payload["peak_series"] = []
             payload["version"] = 3
@@ -361,7 +406,7 @@ class AlignmentSession:
             viewport_visibility=ViewportVisibilitySettings(
                 **payload.get("viewport_visibility", {})
             ),
-            peak_series=list(payload.get("peak_series", [])),
+            peak_series=_peak_series_entries_from_payload(payload.get("peak_series", [])),
             leg2_ultrasonic_datasource=Leg2UltrasonicDatasourceSettings(
                 **payload.get("leg2_ultrasonic_datasource", {})
             ),
@@ -819,16 +864,16 @@ def build_leg2_ultrasonic_signal_series(
     )
 
 
-def _plottable_candidate_distance_m(measurement: FramePeakMeasurement) -> float | None:
-    value = measurement.candidate_peak_distance_m
+def _plottable_candidate_distance_m(measurement: FrameDetectionMeasurement) -> float | None:
+    value = measurement.candidate_distance_m
     if not math.isfinite(value):
         return None
     return float(value)
 
 
 def build_peak_distance_signal_series(
-    measurements: tuple[FramePeakMeasurement, ...],
-) -> PeakDistanceSignalSeries:
+    measurements: tuple[FrameDetectionMeasurement, ...],
+) -> DetectionSignalSeries:
     detected_time_s: list[float] = []
     detected_distance_m: list[float] = []
     candidate_time_s: list[float] = []
@@ -871,7 +916,7 @@ def build_peak_distance_signal_series(
             candidate_time_s.append(measurement.time_s)
             candidate_distance_m.append(distance_m)
 
-    return PeakDistanceSignalSeries(
+    return DetectionSignalSeries(
         detected_time_s=np.asarray(detected_time_s, dtype=np.float64),
         detected_distance_m=np.asarray(detected_distance_m, dtype=np.float64),
         candidate_time_s=np.asarray(candidate_time_s, dtype=np.float64),
@@ -896,7 +941,22 @@ def _visible_distance_values_in_x_range(
 
 
 def visible_signal_y_range(
-    series: PeakDistanceSignalSeries,
+    series: DetectionSignalSeries,
+    *,
+    x_min_s: float,
+    x_max_s: float,
+    leg2_series: Leg2UltrasonicSignalSeries | None = None,
+) -> tuple[float, float] | None:
+    return visible_signal_y_range_for_series(
+        (series,),
+        x_min_s=x_min_s,
+        x_max_s=x_max_s,
+        leg2_series=leg2_series,
+    )
+
+
+def visible_signal_y_range_for_series(
+    series_list: tuple[DetectionSignalSeries, ...],
     *,
     x_min_s: float,
     x_max_s: float,
@@ -905,22 +965,27 @@ def visible_signal_y_range(
     if x_max_s < x_min_s:
         x_min_s, x_max_s = x_max_s, x_min_s
 
-    time_distance_pairs: tuple[tuple[np.ndarray, np.ndarray], ...] = (
-        (series.detected_time_s, series.detected_distance_m),
-        (series.candidate_time_s, series.candidate_distance_m),
-    )
-    if leg2_series is not None:
-        time_distance_pairs = (
-            *time_distance_pairs,
-            (leg2_series.primary_time_s, leg2_series.primary_distance_m),
-            (leg2_series.faded_time_s, leg2_series.faded_distance_m),
+    time_distance_pairs: list[tuple[np.ndarray, np.ndarray]] = []
+    for series in series_list:
+        time_distance_pairs.extend(
+            (
+                (series.detected_time_s, series.detected_distance_m),
+                (series.candidate_time_s, series.candidate_distance_m),
+            )
         )
+    if leg2_series is not None:
+        time_distance_pairs.extend(
+            (
+                (leg2_series.primary_time_s, leg2_series.primary_distance_m),
+                (leg2_series.faded_time_s, leg2_series.faded_distance_m),
+            )
+        )
+
     visible_values = _visible_distance_values_in_x_range(
-        time_distance_pairs,
+        tuple(time_distance_pairs),
         x_min_s=x_min_s,
         x_max_s=x_max_s,
     )
-
     if not visible_values:
         return None
     y_min = min(0.0, min(visible_values))
@@ -1021,145 +1086,6 @@ def _json_values_equivalent_for_pristine(left: object, right: object) -> bool:
         return math.isclose(float(left), float(right), rel_tol=0.0, abs_tol=1e-9)
 
     return left == right
-
-
-def probe_video(path: Path) -> VideoProbe:
-    capture = cv2.VideoCapture(str(path))
-    if not capture.isOpened():
-        raise ValueError(f"Could not open camera video: {path}")
-    try:
-        fps = float(capture.get(cv2.CAP_PROP_FPS) or 0.0)
-        frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-        width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
-        height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
-    finally:
-        capture.release()
-
-    duration_s = frame_count / fps if fps > 0 and frame_count > 0 else 0.0
-    return VideoProbe(
-        path=path,
-        fps=fps,
-        frame_count=frame_count,
-        duration_s=duration_s,
-        width=width,
-        height=height,
-    )
-
-
-def prepare_proxy_video(
-    source_path: Path,
-    *,
-    max_dimension: int = 1280,
-    cache_root: Path | None = None,
-) -> ProxyVideoResult:
-    """Prepare a preview proxy for large camera videos.
-
-    Small sources at or below ``max_dimension`` are returned unchanged. Larger
-    sources require ffmpeg; when ffmpeg is unavailable the call raises instead
-    of falling back to full-resolution interactive preview.
-    """
-    source_probe = probe_video(source_path)
-    if max(source_probe.width, source_probe.height) <= max_dimension:
-        return ProxyVideoResult(
-            source_path=source_path,
-            display_path=source_path,
-            source_probe=source_probe,
-            proxy_path=None,
-            state="original",
-        )
-
-    ffmpeg_path = _find_ffmpeg()
-    if ffmpeg_path is None:
-        raise RuntimeError("ffmpeg was not found; preview proxy generation is required.")
-
-    proxy_path = _proxy_cache_path(
-        source_path,
-        source_probe=source_probe,
-        max_dimension=max_dimension,
-        cache_root=cache_root,
-    )
-    if proxy_path.exists():
-        return ProxyVideoResult(
-            source_path=source_path,
-            display_path=proxy_path,
-            source_probe=source_probe,
-            proxy_path=proxy_path,
-            state="proxy_reused",
-        )
-
-    from heatmap_alignment_resource_jobs import build_preview_proxy_video
-
-    return build_preview_proxy_video(
-        source_path,
-        max_dimension=max_dimension,
-        cache_root=cache_root,
-    )
-
-
-def _scaled_video_dimensions(width: int, height: int, max_dimension: int) -> tuple[int, int]:
-    largest_dimension = max(width, height, 1)
-    scale = min(1.0, max_dimension / largest_dimension)
-    scaled_width = max(2, int(round(width * scale)))
-    scaled_height = max(2, int(round(height * scale)))
-    if scaled_width % 2 != 0:
-        scaled_width -= 1
-    if scaled_height % 2 != 0:
-        scaled_height -= 1
-    return max(2, scaled_width), max(2, scaled_height)
-
-
-def _proxy_cache_path(
-    source_path: Path,
-    *,
-    source_probe: VideoProbe,
-    max_dimension: int,
-    cache_root: Path | None,
-) -> Path:
-    source_stat = source_path.stat()
-    payload = "|".join(
-        [
-            str(source_path.resolve()),
-            str(source_stat.st_size),
-            str(source_stat.st_mtime_ns),
-            str(source_probe.width),
-            str(source_probe.height),
-            str(source_probe.frame_count),
-            str(source_probe.fps),
-            str(max_dimension),
-            "proxy-v1",
-        ]
-    )
-    digest = sha256(payload.encode("utf-8")).hexdigest()[:16]
-    stem = source_path.stem
-    root = cache_root or _default_proxy_cache_root()
-    return root / f"{stem}_{digest}_proxy_{max_dimension}.mp4"
-
-
-def _default_proxy_cache_root() -> Path:
-    local_app_data = os.getenv("LOCALAPPDATA")
-    if local_app_data:
-        return Path(local_app_data) / "Acconeer" / "HeatmapAlignmentWorkbench" / "proxy-cache"
-    return Path(tempfile.gettempdir()) / "Acconeer" / "HeatmapAlignmentWorkbench" / "proxy-cache"
-
-
-def _resolve_ffmpeg_path(path: Path | None) -> str | None:
-    if path is None:
-        return None
-    if path.is_dir():
-        path = path / "ffmpeg.exe"
-    return str(path) if path.exists() else None
-
-
-def _find_ffmpeg() -> str | None:
-    for candidate in (
-        os.getenv("FFMPEG_PATH"),
-        r"C:\Users\claub\Documents\Portable Programs\ffmpeg-master-latest-win64-gpl-shared\bin",
-    ):
-        if candidate:
-            resolved = _resolve_ffmpeg_path(Path(candidate))
-            if resolved is not None:
-                return resolved
-    return shutil.which("ffmpeg")
 
 
 class CameraVideoSource:
@@ -1451,6 +1377,62 @@ class HeatmapTruthSource:
         return frame_idx, self.frame_at_index(frame_idx)
 
 
+def _build_detection_ratio_lut() -> np.ndarray:
+    """Build a 256-entry uint8 RGB LUT: Blues_r below ratio=1.0, YlOrRd above.
+
+    Index 0 = ratio 0.0, index 128 = ratio 1.0 (threshold), index 255 = ratio ~2.0+.
+    The warm half samples YlOrRd only up to 0.60 (yellow→orange) to avoid the dark-red tail.
+    Returns shape (256, 3) uint8.
+    """
+    import matplotlib.pyplot as plt
+
+    n = 256
+    half = n // 2
+    cool = plt.get_cmap("Blues_r")(np.linspace(0.15, 0.85, half))[:, :3]
+    warm = plt.get_cmap("YlOrRd")(np.linspace(0.05, 0.45, n - half))[:, :3]
+    colors = np.vstack((cool, warm))
+    return (colors * 255).clip(0, 255).astype(np.uint8)
+
+
+# Module-level LUT — built once on first use.
+_DETECTION_RATIO_LUT: np.ndarray | None = None
+
+
+def _get_detection_ratio_lut() -> np.ndarray:
+    global _DETECTION_RATIO_LUT
+    if _DETECTION_RATIO_LUT is None:
+        _DETECTION_RATIO_LUT = _build_detection_ratio_lut()
+    return _DETECTION_RATIO_LUT
+
+
+def detection_ratio_to_rgb(
+    detection_ratio: np.ndarray,
+    *,
+    ratio_max: float = 2.0,
+) -> np.ndarray:
+    """Map a 1-D detection ratio array to RGB uint8 pixels.
+
+    Values at 0.0 → deep blue, at 1.0 → transition, at ratio_max+ → bright yellow.
+    Returns shape (n, 3) uint8.
+    """
+    lut = _get_detection_ratio_lut()
+    clipped = np.clip(detection_ratio / max(ratio_max, 1e-12), 0.0, 1.0)
+    indices = (clipped * 255).astype(np.intp)
+    return lut[indices]
+
+
+def detection_ratio_strip_rgb(
+    detection_ratio: np.ndarray,
+    width: int,
+) -> np.ndarray:
+    """Return a (1, width, 3) uint8 row mapping detection_ratio bins across width pixels."""
+    n_bins = len(detection_ratio)
+    bin_colors = detection_ratio_to_rgb(detection_ratio)  # (n_bins, 3)
+    col_indices = (np.arange(width) * n_bins / max(width, 1)).astype(np.intp)
+    col_indices = np.clip(col_indices, 0, n_bins - 1)
+    return bin_colors[col_indices][np.newaxis, :, :]  # (1, width, 3)
+
+
 class HeatmapPlotRenderer:
     """Reusable Matplotlib-backed heatmap plot renderer with axes."""
 
@@ -1465,6 +1447,8 @@ class HeatmapPlotRenderer:
     _DEFAULT_SOURCE_TOP_MARGIN_PX = 35.0
     _MIN_PLOT_BODY_SOURCE_WIDTH_PX = 32.0
     _MIN_PLOT_BODY_SOURCE_HEIGHT_PX = 32.0
+
+    _STRIP_HEIGHT_RATIO = 0.08  # fraction of total figure height for the detection strip
 
     def __init__(
         self,
@@ -1494,11 +1478,14 @@ class HeatmapPlotRenderer:
             float(axes.velocities_m_s[0] - 0.5 * axes.velocity_resolution),
             float(axes.velocities_m_s[-1] + 0.5 * axes.velocity_resolution),
         )
+        self._distances_m = axes.distances_m
 
         self._figure: Figure | None = None
         self._canvas: FigureCanvasAgg | None = None
         self._ax = None
+        self._strip_ax = None
         self._image = None
+        self._strip_mesh = None
         self._peak_artists: list[object] = []
         self._output_size = (0, 0)
         self._presentation: OverlayPlotPresentation | None = None
@@ -1598,6 +1585,7 @@ class HeatmapPlotRenderer:
         source_size: tuple[int, int] | None = None,
         peak_distance_m: float | None = None,
         zero_velocity_m_s: float | None = None,
+        detection_ratio: np.ndarray | None = None,
     ) -> np.ndarray:
         presentation = self.presentation_for(output_size=output_size, source_size=source_size)
         if output_size != self._output_size or presentation != self._presentation:
@@ -1625,6 +1613,7 @@ class HeatmapPlotRenderer:
             resolved_max = self.heatmap_source.color_min + 1e-12
         self._image.set_clim(self.heatmap_source.color_min, resolved_max)
         self._draw_peak_marker(peak_distance_m, zero_velocity_m_s)
+        self._draw_detection_strip(detection_ratio)
 
         self._canvas.draw()
         width, height = self._canvas.get_width_height()
@@ -1636,6 +1625,8 @@ class HeatmapPlotRenderer:
         output_size: tuple[int, int],
         presentation: OverlayPlotPresentation | None = None,
     ) -> None:
+        import matplotlib.gridspec as mgridspec
+
         if presentation is None:
             presentation = self.presentation_for(output_size=output_size)
         width, height = presentation.render_size
@@ -1644,7 +1635,24 @@ class HeatmapPlotRenderer:
         dpi = 100.0
         figure = Figure(figsize=(width / dpi, height / dpi), dpi=dpi)
         canvas = FigureCanvasAgg(figure)
-        ax = figure.add_subplot(111)
+
+        strip_ratio = self._STRIP_HEIGHT_RATIO
+        heatmap_ratio = 1.0 - strip_ratio
+        gs = mgridspec.GridSpec(
+            2, 1,
+            figure=figure,
+            height_ratios=[strip_ratio, heatmap_ratio],
+            hspace=0.0,
+        )
+        strip_ax = figure.add_subplot(gs[0])
+        ax = figure.add_subplot(gs[1], sharex=strip_ax)
+
+        strip_ax.set_yticks([])
+        strip_ax.set_xticks([])
+        for spine in strip_ax.spines.values():
+            spine.set_visible(False)
+        strip_ax.set_facecolor("#1a1a2e")
+
         initial = np.zeros((16, 16), dtype=np.float32)
         image = ax.imshow(
             initial,
@@ -1672,18 +1680,69 @@ class HeatmapPlotRenderer:
         )
         for spine in ax.spines.values():
             spine.set_linewidth(presentation.axis_line_width_pt)
+
         figure.subplots_adjust(
             left=presentation.left_margin,
             right=presentation.right_margin,
             bottom=presentation.bottom_margin,
             top=presentation.top_margin,
+            hspace=0.02,
         )
 
         self._figure = figure
         self._canvas = canvas
         self._ax = ax
+        self._strip_ax = strip_ax
         self._image = image
+        self._strip_mesh = None
         self._peak_artists = []
+
+    @staticmethod
+    def _detection_ratio_colormap():
+        """Return the shared threshold-split colormap as a matplotlib ListedColormap."""
+        import matplotlib.colors as mcolors
+
+        lut = _get_detection_ratio_lut()  # (256, 3) uint8
+        colors_f = lut.astype(np.float64) / 255.0
+        # Append alpha=1 column so ListedColormap receives RGBA.
+        rgba = np.hstack([colors_f, np.ones((len(colors_f), 1))])
+        return mcolors.ListedColormap(rgba, name="detection_ratio_split")
+
+    def _draw_detection_strip(self, detection_ratio: np.ndarray | None) -> None:
+        if self._strip_ax is None:
+            return
+        if self._strip_mesh is not None:
+            self._strip_mesh.remove()
+            self._strip_mesh = None
+
+        self._strip_ax.set_facecolor("#1a1a2e")
+        if detection_ratio is None or len(detection_ratio) == 0:
+            return
+
+        distances = self._distances_m
+        if len(distances) != len(detection_ratio):
+            return
+
+        dist_step = float(np.median(np.diff(distances))) if len(distances) > 1 else 1.0
+        x_edges = np.concatenate([
+            distances - 0.5 * dist_step,
+            [distances[-1] + 0.5 * dist_step],
+        ])
+        y_edges = np.array([0.0, 1.0])
+        ratio_row = detection_ratio[np.newaxis, :]
+
+        cmap = self._detection_ratio_colormap()
+        import matplotlib.colors as mcolors
+        norm = mcolors.TwoSlopeNorm(vcenter=1.0, vmin=min(0.0, float(ratio_row.min())), vmax=max(2.0, float(ratio_row.max())))
+        mesh = self._strip_ax.pcolormesh(
+            x_edges, y_edges, ratio_row,
+            cmap=cmap,
+            norm=norm,
+            shading="flat",
+        )
+        self._strip_mesh = mesh
+        self._strip_ax.set_xlim(self.extent[0], self.extent[1])
+        self._strip_ax.set_ylim(0.0, 1.0)
 
     def _clear_peak_artists(self) -> None:
         if self._ax is None:
@@ -1996,7 +2055,7 @@ def desired_h5_identity(session: AlignmentSession) -> H5SlotIdentity | None:
 
 def desired_peak_identities(session: AlignmentSession) -> list:
     """Return desired peak series identities from session.peak_series."""
-    return [SyncSlotIdentity(path=e["path"]) for e in session.peak_series if e.get("path", "")]
+    return [SyncSlotIdentity(path=entry.path) for entry in session.peak_series if entry.path]
 
 
 def desired_leg2_identity(session: AlignmentSession) -> SyncSlotIdentity | None:
@@ -2063,71 +2122,6 @@ def reconcile_sync_slot_action(
     return "load"
 
 
-ResourceKind = Literal["camera", "radar_h5", "radar_peak", "leg2_mat"]
-ResourceStatus = Literal["unloaded", "loaded", "missing", "invalid", "warning"]
-ResourceAction = Literal[
-    "load",
-    "replace",
-    "unload",
-    "reload",
-    "reveal",
-    "inspect",
-    "cancel",
-    "generate",
-    "save",
-    "save_as",
-]
-
-
-@dataclass(frozen=True)
-class ResourceSummary:
-    """Scan-friendly summary for one heatmap alignment resource slot."""
-
-    kind: ResourceKind
-    display_name: str
-    role: str
-    status: ResourceStatus
-    path: str
-    color_hex: str | None
-    color_muted: bool
-    details: str
-    messages: tuple[str, ...]
-    actions: tuple[ResourceAction, ...]
-    job_phase: ResourceJobPhase = "idle"
-    job_target_filename: str = ""
-    job_detail: str = ""
-    job_cancellable: bool = False
-    status_label: str = ""
-    series_id: str = ""  # Non-empty for peak series rows to enable row-scoped actions.
-
-
-@dataclass(frozen=True)
-class ResourceJobPresentation:
-    kind: ResourceKind
-    phase: ResourceJobPhase = "idle"
-    target_filename: str = ""
-    detail: str = ""
-    cancellable: bool = False
-
-
-@dataclass(frozen=True)
-class AlignmentResourceRuntime:
-    """Runtime load state used when building resource summaries."""
-
-    camera_loaded: bool = False
-    radar_h5_loaded: bool = False
-    radar_peak_loaded: bool = False
-    leg2_loaded: bool = False
-    peak_detected_count: int | None = None
-    peak_measurement_count: int | None = None
-    leg2_valid_segment_count: int | None = None
-    leg2_sample_count: int | None = None
-    peaks_dirty: bool = False
-    reload_errors: tuple[tuple[ResourceKind, str], ...] = ()
-    load_warnings: tuple[tuple[ResourceKind, str], ...] = ()
-    resource_jobs: tuple[ResourceJobPresentation, ...] = ()
-
-
 def elide_path_middle(path_text: str, max_chars: int) -> str:
     """Elide a path in the middle while preserving the filename when possible."""
 
@@ -2158,332 +2152,3 @@ def elide_path_middle(path_text: str, max_chars: int) -> str:
 
     prefix = path_text[:prefix_budget]
     return f"{prefix}{ellipsis}{suffix}"
-
-
-def _resource_job_presentation(
-    kind: ResourceKind,
-    runtime: AlignmentResourceRuntime,
-) -> ResourceJobPresentation | None:
-    for entry in runtime.resource_jobs:
-        if entry.kind == kind:
-            return entry
-    return None
-
-
-def _resource_messages(
-    kind: ResourceKind,
-    runtime: AlignmentResourceRuntime,
-) -> tuple[str, ...]:
-    reload_error_texts = [text for key, text in runtime.reload_errors if key == kind]
-    messages: list[str] = list(reload_error_texts)
-    messages.extend(text for key, text in runtime.load_warnings if key == kind)
-    job = _resource_job_presentation(kind, runtime)
-    if job is not None and job.phase == "failed" and job.detail:
-        if job.detail not in reload_error_texts:
-            messages = [job.detail, *messages]
-    return tuple(messages)
-
-
-def _resource_status(
-    *,
-    path_text: str,
-    loaded: bool,
-    messages: tuple[str, ...],
-    job: ResourceJobPresentation | None = None,
-) -> ResourceStatus:
-    if job is not None and job.phase not in ("idle", "superseded"):
-        if job.phase == "failed":
-            return "invalid"
-        if job.phase in ("pending", "loading", "building", "waiting", "cancelling"):
-            return "warning" if loaded else "unloaded"
-    if loaded:
-        if messages:
-            return "warning"
-        return "loaded"
-    if not path_text:
-        return "unloaded"
-    path = Path(path_text)
-    if not path.exists():
-        return "missing"
-    if messages:
-        return "invalid"
-    return "unloaded"
-
-
-def _resource_actions(
-    *,
-    status: ResourceStatus,
-    path_text: str,
-    can_unload: bool,
-    messages: tuple[str, ...],
-    job: ResourceJobPresentation | None = None,
-) -> tuple[ResourceAction, ...]:
-    actions: list[ResourceAction] = []
-    if job is not None and job.phase in ("pending", "loading", "building", "waiting", "cancelling"):
-        if job.cancellable:
-            actions.append("cancel")
-        if status in ("loaded", "warning"):
-            actions.extend(("replace", "unload"))
-        elif path_text:
-            actions.append("reload")
-        if path_text:
-            actions.append("reveal")
-        if messages:
-            actions.append("inspect")
-        deduped: list[ResourceAction] = []
-        for action in actions:
-            if action not in deduped:
-                deduped.append(action)
-        return tuple(deduped)
-
-    if status in ("unloaded", "missing", "invalid"):
-        actions.append("load")
-    elif status in ("loaded", "warning"):
-        actions.extend(("replace", "unload"))
-
-    if path_text:
-        if status in ("missing", "invalid", "unloaded") or status in ("loaded", "warning"):
-            actions.append("reload")
-        actions.append("reveal")
-
-    if messages:
-        actions.append("inspect")
-
-    if can_unload and "unload" not in actions and status in ("loaded", "warning"):
-        actions.append("unload")
-
-    deduped = []
-    for action in actions:
-        if action not in deduped:
-            deduped.append(action)
-    return tuple(deduped)
-
-
-def build_alignment_resource_summaries(
-    session: AlignmentSession,
-    runtime: AlignmentResourceRuntime,
-    peak_series: list | None = None,
-) -> tuple[ResourceSummary, ...]:
-    """Build fixed-slot resource summaries for the Resources window."""
-
-    summaries: list[ResourceSummary] = []
-
-    camera_path = session.camera_track.path
-    camera_job = _resource_job_presentation("camera", runtime)
-    camera_messages = _resource_messages("camera", runtime)
-    camera_status = _resource_status(
-        path_text=camera_path,
-        loaded=runtime.camera_loaded,
-        messages=camera_messages,
-        job=camera_job,
-    )
-    camera_details = "No camera video loaded."
-    if camera_job is not None and camera_job.phase not in ("idle", "superseded"):
-        target = camera_job.target_filename or Path(camera_path).name
-        if camera_job.phase == "building":
-            camera_details = f"Building preview proxy for {target}..."
-        elif camera_job.phase == "waiting":
-            camera_details = camera_job.detail or f"Waiting for {target}..."
-        elif camera_job.phase == "cancelling":
-            camera_details = f"Cancelling load for {target}..."
-        elif camera_job.phase == "failed":
-            camera_details = camera_job.detail or f"Failed to load {target}."
-        else:
-            camera_details = camera_job.detail or f"Loading {target}..."
-    elif runtime.camera_loaded:
-        camera_details = (
-            f"{session.camera_track.frame_count} frames, "
-            f"{session.camera_track.fps:.3f} fps, "
-            f"{session.camera_track.duration_s:.3f} s"
-        )
-    elif camera_path:
-        camera_details = "Remembered camera path is not currently loaded."
-    summaries.append(
-        ResourceSummary(
-            kind="camera",
-            display_name="Camera Video",
-            role="Primary",
-            status=camera_status,
-            path=camera_path,
-            color_hex=CAMERA_TIMELINE_TRACK_COLOR_HEX,
-            color_muted=not runtime.camera_loaded,
-            details=camera_details,
-            messages=camera_messages,
-            actions=_resource_actions(
-                status=camera_status,
-                path_text=camera_path,
-                can_unload=runtime.camera_loaded,
-                messages=camera_messages,
-                job=camera_job,
-            ),
-            job_phase=camera_job.phase if camera_job is not None else "idle",
-            job_target_filename=camera_job.target_filename if camera_job is not None else "",
-            job_detail=camera_job.detail if camera_job is not None else "",
-            job_cancellable=camera_job.cancellable if camera_job is not None else False,
-        )
-    )
-
-    h5_path = session.heatmap_track.path
-    h5_job = _resource_job_presentation("radar_h5", runtime)
-    h5_messages = _resource_messages("radar_h5", runtime)
-    h5_status = _resource_status(
-        path_text=h5_path,
-        loaded=runtime.radar_h5_loaded,
-        messages=h5_messages,
-        job=h5_job,
-    )
-    h5_details = "No radar raw H5 recording loaded."
-    if h5_job is not None and h5_job.phase not in ("idle", "superseded"):
-        target = h5_job.target_filename or Path(h5_path).name
-        if h5_job.phase == "cancelling":
-            h5_details = f"Cancelling load for {target}..."
-        elif h5_job.phase == "waiting":
-            h5_details = h5_job.detail or f"Waiting for {target}..."
-        elif h5_job.phase == "failed":
-            h5_details = h5_job.detail or f"Failed to load {target}."
-        else:
-            h5_details = h5_job.detail or f"Loading {target}..."
-    elif runtime.radar_h5_loaded:
-        frame_count = max(
-            1,
-            int(round(session.heatmap_track.duration_s * max(session.heatmap_track.fps, 0.0))),
-        )
-        if session.heatmap_track.fps > 0:
-            frame_count = int(round(session.heatmap_track.duration_s * session.heatmap_track.fps))
-        h5_details = (
-            f"{frame_count} frames, "
-            f"{session.heatmap_track.fps:.3f} fps, "
-            f"{session.heatmap_track.duration_s:.3f} s"
-        )
-    elif h5_path:
-        h5_details = "Remembered H5 path is not currently loaded."
-    summaries.append(
-        ResourceSummary(
-            kind="radar_h5",
-            display_name="Radar Raw (H5)",
-            role="Primary",
-            status=h5_status,
-            path=h5_path,
-            color_hex=H5_TIMELINE_TRACK_COLOR_HEX,
-            color_muted=not runtime.radar_h5_loaded,
-            details=h5_details,
-            messages=h5_messages,
-            actions=_resource_actions(
-                status=h5_status,
-                path_text=h5_path,
-                can_unload=runtime.radar_h5_loaded,
-                messages=h5_messages,
-                job=h5_job,
-            ),
-            job_phase=h5_job.phase if h5_job is not None else "idle",
-            job_target_filename=h5_job.target_filename if h5_job is not None else "",
-            job_detail=h5_job.detail if h5_job is not None else "",
-            job_cancellable=h5_job.cancellable if h5_job is not None else False,
-        )
-    )
-
-    peak_messages = _resource_messages("radar_peak", runtime)
-    if peak_series:
-        # Emit one ResourceSummary per peak series resource.
-        for ps in peak_series:
-            ps_actions: list[ResourceAction] = []
-            if ps.unsaved:
-                ps_actions.append("save")
-            ps_actions.extend(["save_as", "unload"])
-            if ps.json_path:
-                ps_actions.append("reload")
-                ps_actions.append("reveal")
-            ps_status_label = "Generated (unsaved)" if ps.unsaved else ""
-            detected = sum(1 for m in ps.measurements if getattr(m, "status", "") == "detected")
-            total = len(ps.measurements)
-            if ps.unsaved:
-                ps_details = f"{detected}/{total} detected frames (unsaved)"
-            elif ps.json_path:
-                ps_details = f"{detected}/{total} detected frames"
-            else:
-                ps_details = f"{detected}/{total} detected frames"
-            summaries.append(
-                ResourceSummary(
-                    kind="radar_peak",
-                    display_name=ps.display_name,
-                    role="Generated" if ps.provenance == "generated" else "Imported",
-                    status="loaded",
-                    path=str(ps.json_path) if ps.json_path else "",
-                    color_hex=ps.color,
-                    color_muted=False,
-                    details=ps_details,
-                    messages=tuple(ps.warnings) + (peak_messages or ()),
-                    actions=tuple(ps_actions),
-                    status_label=ps_status_label,
-                    series_id=ps.series_id,
-                )
-            )
-    else:
-        # Fallback: one aggregate row for tests and empty-list case.
-        peak_actions: list[ResourceAction] = []
-        if runtime.radar_h5_loaded:
-            peak_actions.append("generate")
-        if runtime.radar_peak_loaded:
-            if runtime.peaks_dirty:
-                peak_actions.append("save")
-            peak_actions.append("save_as")
-        peak_status_label = ""
-        peak_details = "No peak distances generated or loaded."
-        if runtime.radar_peak_loaded:
-            detected = runtime.peak_detected_count or 0
-            total = runtime.peak_measurement_count or 0
-            peak_details = f"{detected}/{total} detected frames"
-            if runtime.peaks_dirty:
-                peak_status_label = "Generated (unsaved)"
-                peak_details += " (unsaved)"
-        summaries.append(
-            ResourceSummary(
-                kind="radar_peak",
-                display_name="Radar Peak Distances",
-                role="Optional signal",
-                status="loaded" if runtime.radar_peak_loaded else "unloaded",
-                path="",
-                color_hex=None,
-                color_muted=not runtime.radar_peak_loaded,
-                details=peak_details,
-                messages=peak_messages,
-                actions=tuple(peak_actions),
-                status_label=peak_status_label,
-            )
-        )
-
-    leg2_path = session.leg2_ultrasonic_datasource.path
-    leg2_messages = _resource_messages("leg2_mat", runtime)
-    leg2_status = _resource_status(
-        path_text=leg2_path,
-        loaded=runtime.leg2_loaded,
-        messages=leg2_messages,
-    )
-    leg2_details = "No Leg2 MAT loaded."
-    if runtime.leg2_loaded and runtime.leg2_sample_count is not None:
-        valid = runtime.leg2_valid_segment_count or 0
-        total = runtime.leg2_sample_count
-        leg2_details = f"{total} samples, {valid}/{total} reliable segments"
-    elif leg2_path:
-        leg2_details = "Remembered Leg2 MAT path is not currently loaded."
-    summaries.append(
-        ResourceSummary(
-            kind="leg2_mat",
-            display_name="Leg2 MAT",
-            role="Optional signal",
-            status=leg2_status,
-            path=leg2_path,
-            color_hex=LEG2_TIMELINE_TRACK_COLOR_HEX,
-            color_muted=not runtime.leg2_loaded,
-            details=leg2_details,
-            messages=leg2_messages,
-            actions=_resource_actions(
-                status=leg2_status,
-                path_text=leg2_path,
-                can_unload=runtime.leg2_loaded or bool(leg2_path),
-                messages=leg2_messages,
-            ),
-        )
-    )
-
-    return tuple(summaries)

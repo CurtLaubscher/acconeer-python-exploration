@@ -16,7 +16,6 @@ if str(USER_TOOLS_PATH) not in sys.path:
 from scipy.io import savemat
 
 from heatmap_alignment_core import (  # noqa: E402
-    AlignmentResourceRuntime,
     AlignmentSession,
     CameraSlotIdentity,
     CameraTrack,
@@ -27,18 +26,16 @@ from heatmap_alignment_core import (  # noqa: E402
     HeatmapTrack,
     Leg2MatImportError,
     Leg2UltrasonicDatasourceSettings,
+    PeakSeriesSessionEntry,
     PreprocessSettings,
     RenderSettings,
-    ResourceJobPresentation,
     SignalPlotViewSettings,
     SyncSlotIdentity,
     TimelineState,
     ViewportGeometry,
     ViewportVisibilitySettings,
     _compute_leg2_stance_intervals,
-    _resource_messages,
     apply_viewport_visibility,
-    build_alignment_resource_summaries,
     build_leg2_ultrasonic_signal_series,
     desired_camera_identity,
     desired_h5_identity,
@@ -52,7 +49,6 @@ from heatmap_alignment_core import (  # noqa: E402
     import_peak_distance_json_for_heatmap,
     load_alignment_session,
     load_leg2_mat_ultrasonic,
-    prepare_proxy_video,
     reconcile_camera_action,
     reconcile_h5_action,
     reconcile_sync_slot_action,
@@ -65,7 +61,9 @@ from heatmap_alignment_core import (  # noqa: E402
     timeline_view_bounds_s,
     validate_alignment_session,
     visible_signal_y_range,
+    visible_signal_y_range_for_series,
 )
+from heatmap_alignment_video_proxy import prepare_proxy_video  # noqa: E402
 from sparse_iq_peak_distance_core import (  # noqa: E402
     DEFAULT_PEAK_THRESHOLD,
     PEAK_EXTRACTION_METHOD_SUM_VELOCITY,
@@ -163,7 +161,15 @@ def test_alignment_session_roundtrip_with_peak_series(tmp_path: Path) -> None:
     session = AlignmentSession(
         camera_track=CameraTrack(path=str(camera_path), fps=30.0, duration_s=2.0, frame_count=60),
         heatmap_track=HeatmapTrack(path=str(heatmap_path), duration_s=2.0, fps=10.0),
-        peak_series=[{"path": str(peak_json_path), "display_name": "peaks", "color": "#3b82f6", "visible": True, "heatmap_selected": False}],
+        peak_series=[
+            PeakSeriesSessionEntry(
+                path=str(peak_json_path),
+                display_name="peaks",
+                color="#3b82f6",
+                visible=True,
+                heatmap_selected=False,
+            )
+        ],
     )
 
     session_path = tmp_path / "alignment_with_peaks.json"
@@ -171,7 +177,8 @@ def test_alignment_session_roundtrip_with_peak_series(tmp_path: Path) -> None:
     loaded = load_alignment_session(session_path)
 
     assert len(loaded.peak_series) == 1
-    assert loaded.peak_series[0]["path"] == str(peak_json_path)
+    assert loaded.peak_series[0].path == str(peak_json_path)
+    assert loaded.peak_series[0].display_name == "peaks"
 
 
 def test_alignment_session_roundtrip_with_signal_plot_view_settings(tmp_path: Path) -> None:
@@ -330,6 +337,47 @@ def test_visible_signal_y_range_uses_active_x_window_and_includes_zero() -> None
     assert y_range is not None
     assert y_range[0] == pytest.approx(-0.05)
     assert y_range[1] == pytest.approx(1.05)
+
+
+def test_visible_signal_y_range_for_series_uses_all_series() -> None:
+    near_series = build_peak_distance_signal_series(
+        (
+            FramePeakMeasurement(
+                frame_index=0,
+                source_tick=0,
+                time_s=0.0,
+                absolute_time=None,
+                status=STATUS_DETECTED,
+                peak_distance_m=1.0,
+                candidate_peak_distance_m=1.0,
+                peak_strength=1.0,
+            ),
+        )
+    )
+    far_series = build_peak_distance_signal_series(
+        (
+            FramePeakMeasurement(
+                frame_index=1,
+                source_tick=1,
+                time_s=0.0,
+                absolute_time=None,
+                status=STATUS_DETECTED,
+                peak_distance_m=10.0,
+                candidate_peak_distance_m=10.0,
+                peak_strength=1.0,
+            ),
+        )
+    )
+
+    y_range = visible_signal_y_range_for_series(
+        (near_series, far_series),
+        x_min_s=-0.1,
+        x_max_s=0.5,
+    )
+
+    assert y_range is not None
+    assert y_range[0] == pytest.approx(-0.5)
+    assert y_range[1] == pytest.approx(10.5)
 
 
 def test_derive_h5_signal_plot_color_lightens_on_dark_background() -> None:
@@ -859,13 +907,13 @@ def test_camera_video_source_uses_grab_for_skipped_playback_frames(
 def test_prepare_proxy_video_skips_proxy_for_small_sources(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import heatmap_alignment_core as core
+    import heatmap_alignment_video_proxy as video_proxy
 
     source_path = Path("small.mp4")
     monkeypatch.setattr(
-        core,
+        video_proxy,
         "probe_video",
-        lambda path: core.VideoProbe(
+        lambda path: video_proxy.VideoProbe(
             path=path,
             fps=30.0,
             frame_count=90,
@@ -886,7 +934,7 @@ def test_prepare_proxy_video_reuses_cached_proxy(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    import heatmap_alignment_core as core
+    import heatmap_alignment_video_proxy as video_proxy
 
     source_path = tmp_path / "large.mp4"
     source_path.write_bytes(b"source")
@@ -894,9 +942,9 @@ def test_prepare_proxy_video_reuses_cached_proxy(
     proxy_path.write_bytes(b"proxy")
 
     monkeypatch.setattr(
-        core,
+        video_proxy,
         "probe_video",
-        lambda path: core.VideoProbe(
+        lambda path: video_proxy.VideoProbe(
             path=path,
             fps=60.0,
             frame_count=600,
@@ -905,10 +953,10 @@ def test_prepare_proxy_video_reuses_cached_proxy(
             height=2160,
         ),
     )
-    monkeypatch.setattr(core, "_find_ffmpeg", lambda: "ffmpeg")
+    monkeypatch.setattr(video_proxy, "find_ffmpeg", lambda: "ffmpeg")
     monkeypatch.setattr(
-        core,
-        "_proxy_cache_path",
+        video_proxy,
+        "proxy_cache_path",
         lambda source_path, source_probe, max_dimension, cache_root: proxy_path,
     )
 
@@ -1398,107 +1446,6 @@ def test_elide_path_middle_preserves_windows_separator_before_filename() -> None
     assert len(elided) <= 30
 
 
-def test_build_alignment_resource_summaries_cover_fixed_slots() -> None:
-    summaries = build_alignment_resource_summaries(
-        AlignmentSession(),
-        AlignmentResourceRuntime(),
-    )
-
-    assert [summary.kind for summary in summaries] == [
-        "camera",
-        "radar_h5",
-        "radar_peak",
-        "leg2_mat",
-    ]
-    assert all(summary.status == "unloaded" for summary in summaries)
-
-
-def test_build_alignment_resource_summaries_mark_missing_remembered_paths() -> None:
-    missing = Path("/tmp/does-not-exist-camera.mp4")
-    session = AlignmentSession(
-        camera_track=CameraTrack(path=str(missing)),
-        heatmap_track=HeatmapTrack(path=""),
-    )
-    summaries = build_alignment_resource_summaries(
-        session,
-        AlignmentResourceRuntime(
-            reload_errors=(("camera", f"File not found: {missing}"),),
-        ),
-    )
-
-    camera_summary = summaries[0]
-    assert camera_summary.status == "missing"
-    assert camera_summary.path == str(missing)
-    assert "reload" in camera_summary.actions
-
-
-def test_build_alignment_resource_summaries_mark_invalid_remembered_paths() -> None:
-    existing = Path(__file__).resolve()
-    session = AlignmentSession(
-        camera_track=CameraTrack(path=str(existing)),
-        heatmap_track=HeatmapTrack(path=""),
-    )
-    summaries = build_alignment_resource_summaries(
-        session,
-        AlignmentResourceRuntime(
-            reload_errors=(("camera", "Could not reload camera video."),),
-        ),
-    )
-
-    assert summaries[0].status == "invalid"
-    assert "inspect" in summaries[0].actions
-
-
-def test_build_alignment_resource_summaries_mark_loaded_state() -> None:
-    session = AlignmentSession(
-        camera_track=CameraTrack(path="/tmp/cam.mp4", duration_s=2.0, fps=30.0, frame_count=60),
-        heatmap_track=HeatmapTrack(path=""),
-    )
-    summaries = build_alignment_resource_summaries(
-        session,
-        AlignmentResourceRuntime(camera_loaded=True),
-    )
-
-    assert summaries[0].status == "loaded"
-    assert "unload" in summaries[0].actions
-
-
-def test_build_alignment_resource_summaries_mark_loaded_warning_state() -> None:
-    session = AlignmentSession(
-        camera_track=CameraTrack(path="/tmp/cam.mp4", duration_s=2.0, fps=30.0, frame_count=60),
-        heatmap_track=HeatmapTrack(path=""),
-    )
-    summaries = build_alignment_resource_summaries(
-        session,
-        AlignmentResourceRuntime(
-            camera_loaded=True,
-            load_warnings=(("camera", "Proxy preview unavailable."),),
-        ),
-    )
-
-    assert summaries[0].status == "warning"
-    assert "inspect" in summaries[0].actions
-    assert "Proxy preview unavailable." in summaries[0].messages
-
-
-def test_resource_messages_dedupes_job_detail_already_in_reload_errors() -> None:
-    failure_text = "Preview proxy generation failed.\n\nffmpeg error detail"
-    runtime = AlignmentResourceRuntime(
-        reload_errors=(("camera", failure_text),),
-        resource_jobs=(
-            ResourceJobPresentation(
-                kind="camera",
-                phase="failed",
-                detail=failure_text,
-            ),
-        ),
-    )
-
-    messages = _resource_messages("camera", runtime)
-
-    assert messages == (failure_text,)
-
-
 # ---------------------------------------------------------------------------
 # Session reconcile helpers (task 1.3)
 # ---------------------------------------------------------------------------
@@ -1659,23 +1606,6 @@ def test_reconcile_sync_slot_keep_when_desired_none_and_not_loaded() -> None:
     assert action == "keep"
 
 
-def test_resource_messages_prepends_job_detail_when_not_in_reload_errors() -> None:
-    runtime = AlignmentResourceRuntime(
-        reload_errors=(),
-        resource_jobs=(
-            ResourceJobPresentation(
-                kind="camera",
-                phase="failed",
-                detail="Proxy build failed.",
-            ),
-        ),
-    )
-
-    messages = _resource_messages("camera", runtime)
-
-    assert messages == ("Proxy build failed.",)
-
-
 # ---------------------------------------------------------------------------
 # v1 -> v2 migration tests
 # ---------------------------------------------------------------------------
@@ -1739,7 +1669,7 @@ def test_alignment_session_v1_migration_strips_peak_visibility(tmp_path: Path) -
 
     assert loaded.version == 3
     assert len(loaded.peak_series) == 1
-    assert loaded.peak_series[0]["path"] == str(peak_json_path)
+    assert loaded.peak_series[0].path == str(peak_json_path)
 
 
 def test_alignment_session_v1_migration_strips_leg2_visibility(tmp_path: Path) -> None:
@@ -1797,7 +1727,15 @@ def test_alignment_session_v3_save_uses_peak_series(tmp_path: Path) -> None:
     session = AlignmentSession(
         camera_track=CameraTrack(path=str(camera_path), fps=30.0, duration_s=2.0, frame_count=60),
         heatmap_track=HeatmapTrack(path=str(heatmap_path), duration_s=2.0, fps=10.0),
-        peak_series=[{"path": str(peak_json_path), "display_name": "peaks", "color": "#3b82f6", "visible": True, "heatmap_selected": False}],
+        peak_series=[
+            PeakSeriesSessionEntry(
+                path=str(peak_json_path),
+                display_name="peaks",
+                color="#3b82f6",
+                visible=True,
+                heatmap_selected=False,
+            )
+        ],
         leg2_ultrasonic_datasource=Leg2UltrasonicDatasourceSettings(path=str(mat_path)),
     )
 
@@ -1872,7 +1810,8 @@ def test_v2_to_v3_migration_with_peak_path():
     }
     session = AlignmentSession.from_json_dict(v2_payload)
     assert len(session.peak_series) == 1
-    assert session.peak_series[0]["path"] == "/some/peaks.json"
+    assert session.peak_series[0].path == "/some/peaks.json"
+    assert session.peak_series[0].display_name == "peaks"
 
 def test_v2_to_v3_migration_no_peak():
     from heatmap_alignment_core import AlignmentSession
@@ -1891,9 +1830,17 @@ def test_desired_peak_identities_empty():
     assert desired_peak_identities(session) == []
 
 def test_desired_peak_identities_with_path():
-    from heatmap_alignment_core import AlignmentSession, desired_peak_identities
+    from heatmap_alignment_core import AlignmentSession, PeakSeriesSessionEntry, desired_peak_identities
     session = AlignmentSession()
-    session.peak_series = [{"path": "/a.json", "display_name": "a", "color": "#fff", "visible": True, "heatmap_selected": False}]
+    session.peak_series = [
+        PeakSeriesSessionEntry(
+            path="/a.json",
+            display_name="a",
+            color="#fff",
+            visible=True,
+            heatmap_selected=False,
+        )
+    ]
     ids = desired_peak_identities(session)
     assert len(ids) == 1
     assert ids[0].path == "/a.json"
@@ -1909,8 +1856,20 @@ def test_session_serialization_omits_unsaved_generated_series() -> None:
     session = AlignmentSession()
     # One saved entry (has path) and one unsaved generated entry (no path).
     session.peak_series = [
-        {"path": "/tmp/saved.json", "display_name": "saved", "color": "#3b82f6", "visible": True, "heatmap_selected": False},
-        {"path": "", "display_name": "generated unsaved", "color": "#f59e0b", "visible": True, "heatmap_selected": False},
+        PeakSeriesSessionEntry(
+            path="/tmp/saved.json",
+            display_name="saved",
+            color="#3b82f6",
+            visible=True,
+            heatmap_selected=False,
+        ),
+        PeakSeriesSessionEntry(
+            path="",
+            display_name="generated unsaved",
+            color="#f59e0b",
+            visible=True,
+            heatmap_selected=False,
+        ),
     ]
     doc = session.to_json_dict()
     persisted_series = doc.get("peak_series", [])
@@ -1923,8 +1882,61 @@ def test_session_reload_does_not_restore_unsaved_generated_series() -> None:
     session = AlignmentSession()
     # Unsaved generated series have no path — to_json_dict omits them.
     session.peak_series = [
-        {"path": "", "display_name": "generated", "color": "#3b82f6", "visible": True, "heatmap_selected": False},
+        PeakSeriesSessionEntry(
+            path="",
+            display_name="generated",
+            color="#3b82f6",
+            visible=True,
+            heatmap_selected=False,
+        ),
     ]
     doc = session.to_json_dict()
     reloaded = AlignmentSession.from_json_dict(doc)
     assert reloaded.peak_series == []
+
+
+def test_session_peak_series_entry_defaults_name_from_path() -> None:
+    session = AlignmentSession.from_json_dict(
+        {
+            "version": 3,
+            "peak_series": [{"path": "/tmp/generated-peaks.json"}],
+        }
+    )
+
+    assert len(session.peak_series) == 1
+    assert session.peak_series[0].path == "/tmp/generated-peaks.json"
+    assert session.peak_series[0].display_name == "generated-peaks"
+    assert session.peak_series[0].visible is True
+
+
+def test_session_peak_series_ignores_unknown_entry_fields() -> None:
+    session = AlignmentSession.from_json_dict(
+        {
+            "version": 3,
+            "peak_series": [
+                {
+                    "path": "/tmp/peaks.json",
+                    "display_name": "peaks",
+                    "unknown": "ignored",
+                }
+            ],
+        }
+    )
+
+    assert len(session.peak_series) == 1
+    assert session.peak_series[0].path == "/tmp/peaks.json"
+    assert not hasattr(session.peak_series[0], "unknown")
+
+
+def test_session_peak_series_tolerates_malformed_payload() -> None:
+    non_list = AlignmentSession.from_json_dict({"version": 3, "peak_series": "bad"})
+    mixed_list = AlignmentSession.from_json_dict(
+        {
+            "version": 3,
+            "peak_series": [None, "bad", {"path": "/tmp/peaks.json"}],
+        }
+    )
+
+    assert non_list.peak_series == []
+    assert len(mixed_list.peak_series) == 1
+    assert mixed_list.peak_series[0].path == "/tmp/peaks.json"

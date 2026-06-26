@@ -104,10 +104,13 @@ Possible directions:
 - Add frame-by-frame navigation for the H5 track, camera track, or current aligned preview.
 - Jump to alignment events: actions such as next/previous peak detection, next prominent signal feature, or other derived markers, so users can review offsets without long manual scrubs.
 - Add keyboard transport shortcuts for navigating time (see **Keyboard shortcuts and bindings** below). Today only standard Save and Quit are wired; stepping frames, nudging time, jumping to range ends, and toggling playback should be first-class.
+- Add clip trimming (In/Out) for timeline tracks similar to NLEs (e.g. Premiere): allow users to trim the visible track start/end without editing the source file, support trim handles, ripple-edit options, and restore/undo. This helps quickly focus a region of interest and prepare exports without modifying original media.
+- Add snapping when dragging timeline bars: snap to other track start/end points, markers, playhead, and significant alignment events with a configurable snap tolerance and the ability to toggle snapping on/off. Snapping should optionally respect linked/locked group behavior.
 - Improve scrub and playback responsiveness. Timeline playhead drag, Signals playhead drag, slider scrub, and playback all funnel through `_sync_previews(...)`, which currently performs many operations synchronously on each current-time update: camera frame access, camera-corner refresh, timeline range/model updates, slider and timeline state updates, Signals plot refresh, timeline geometry sync scheduling, label updates, H5 truth-frame access and peak annotation, optional overlay-preview rendering, viewport rectification, viewport visibility transforms, and source-resolution viewport scheduling. If any stage is slow or variable, the user sees jitter during scrubbing and playback FPS can fall far below native/source FPS despite the 16 ms play timer.
 - Add lightweight timing instrumentation around `_sync_previews` stages before choosing a solution, so it is clear whether the bottleneck is camera access/seeking, H5 frame access, signal plot refresh, viewport rectification, overlay rendering, layout/paint churn, or something else.
 - Split immediate current-time UI feedback from expensive preview refresh work: playheads, slider, and time label should respond immediately, while camera/viewport/heatmap previews can be coalesced to the latest requested time.
 - During scrubbing, coalesce mouse events and render only the latest requested time instead of trying to process every drag event synchronously.
+- While dragging timeline bars, render the rendered heatmap continuously (or at a configured preview FPS) instead of waiting for mouse release. All corresponding resources (camera frames, overlay previews, peak markers) should update live while dragging so alignment feedback is immediate. Architect this with cancellable, worker-threaded preview jobs that coalesce updates and prioritize the latest requested time; provide a fast LQ interactive path and defer expensive HQ work until the drag settles.
 - During playback, target source/native FPS or a configured preview FPS, but skip or coalesce preview work if the previous refresh is still busy so playback does not fall into an inconsistent slow cadence.
 - Avoid rebuilding or refreshing signal plot data on current-time-only updates; moving the current-time indicator should be enough unless plotted data or x/y range state changed.
 - Consider a fast interactive preview path plus a higher-quality settled path, similar to the source-resolution viewport preview direction.
@@ -153,6 +156,7 @@ Possible directions:
 The current Close Session action asks for confirmation even when the workbench is already an untitled empty session. A future polish pass should detect this no-op state and either disable the action or close/reset silently without showing "Close the current session and return to an untitled empty workbench?".
 
 Possible directions:
+- **Save Session As default path:** the Save Session As file dialog should pre-populate the filename with the current session's filename and open in the current session's directory, so renaming or making a copy starts from the right place rather than an arbitrary default location.
 - **Autosave / crash recovery:** periodically or on meaningful edits, write a recovery copy of the alignment session JSON (and clearly distinguish it from explicit Save). On next launch, offer to restore unsaved work. Scope to session fields the tool already persists; unsaved generated peak JSON remains a separate concern (see Resources ideas).
 - **Copy settings from another session:** an explicit action to import selected fields from a saved session JSON without replacing the whole workspace — e.g. viewport corners and output size, viewport enhancement toggles/levels, export overlay geometry, color limits, or timeline offsets. Useful when the camera rig is fixed across trials. Require a clear picker for which fields to copy and whether to mark the current session dirty.
 
@@ -162,6 +166,8 @@ Opening a saved alignment session can freeze the GUI when the session references
 
 Observed bug candidate, needs reproduction: after the rendered heatmap coordinate-context work, loading at least one saved session froze the UI completely until the video appeared. In one observed sequence, some resources appeared not to load, possibly peak resources, and trying to load the same session again froze at that point. The freeze did not obviously look like a small label or tooltip cost. Current suspicion is an existing synchronous session-load segment rather than the coordinate header itself: possible culprits include camera/proxy readiness, synchronous peak JSON or Leg2 MAT validation, preview sync/frame access during restore, resource reconciliation after a partial/failed load, or a burst of UI refresh work before the background resource jobs have settled. Source-resolution/HQ viewport rendering is expected to run on its worker thread; if that path blocks the UI during session open, treat it as a bug. A future investigation should reproduce with a known session, add lightweight timing around session load/resource reconciliation/preview sync stages, and separate assertion-level GUI behavior from known Windows Qt teardown noise.
 
+Observed bug (UI overlay masking renders): after opening a session and then scrubbing, the heatmap (and possibly other resources) appears to still be rendering but is visually hidden "behind" a persistent loading text or overlay. The content is rendering but the loading indicator remains on top, blocking interactive visual feedback. This feels like a z-order or modal-loading-state bug and needs reproduction and a fix so previews are visible while work continues in the background.
+
 Possible directions:
 - Show the main window quickly with a clear loading/busy state before heavy resource work begins.
 - Load session JSON first, then load or reload each resource incrementally with per-resource progress and cancellable work where practical.
@@ -169,6 +175,9 @@ Possible directions:
 - Defer expensive preview sync, source-resolution viewport work, and signal/timeline refresh until required resources are ready.
 - Batch status-bar or Resources-window updates so the user can see which file is currently loading during a multi-file session open.
 - Reuse or extend the same background job model considered for general resource loading rather than adding another one-off synchronous startup path.
+- Show timeline tracks and resource rows immediately in a placeholder but interactive state when a session opens: create the camera, H5, peak, and other track rows with a loading spinner/indicator and allow basic timeline interactions (selecting, dragging offsets, pinning) even while the underlying resource loads in the background. Apply user edits provisionally (marking them "pending") and reconcile them atomically when the resource becomes ready so users can start aligning without waiting for full file readiness.
+- Add explicit UI affordances and transient indicators for tracks that are still loading (e.g. dimmed thumbnail, spinner, "loading" badge) so users understand which interactions are provisional versus committed.
+- Bug: after a resource finishes loading (camera, H5, peak JSON, etc.), the timeline's current time or playhead sometimes jumps to zero. This unexpected reset disrupts user context when they are scrubbing or mid-review. Possible directions: preserve `timeline.current_time_s` across resource loads unless the session explicitly requests a change; ensure resource-load callbacks do not reset the global playhead; and add a test that loading/reloading resources preserves the current-time state.
 
 ### Peak-distance datasource and Calculate Peaks
 
@@ -200,6 +209,9 @@ Possible rendering directions:
 - Add a small time-series plot of peak distance over H5 time for reviewing continuity and dropouts.
 - Keep peak-distance visualization colors consistent with the source track color. The H5 timeline bar is currently green, so the H5-derived peak marker and any H5 peak-distance time-series should use the same green rather than an unrelated yellow.
 - Fix the current rendered-heatmap peak marker scaling: the marker can appear as a large yellow vertical strip in the rendered heatmap preview, which is visually noisy and likely caused by marker/line scaling relative to the preview size. Prefer a bounded marker style that remains legible without dominating the heatmap.
+- Bug: the rendered-heatmap peak arrow/indicator is currently aligned to the left edge of the pixel (x) associated with the detected peak. It should be center-aligned to the pixel so the visual marker accurately reflects the peak position and does not appear offset.
+- Bug: hover/sample positions in the rendered heatmap appear off by approximately half a pixel. For example, to read the value of the first pixel you must hover to the left of the x=0.5 pixel threshold. This suggests an off-by-half-pixel mapping between mouse coordinates and rendered heatmap pixel indices; reproduce and align mouse-to-pixel coordinate mapping so hover sampling and markers correspond precisely to pixel centers.
+- Bug: the rendered heatmap may be vertically flipped compared to the expected orientation (needs confirmation and reproduction). If confirmed, ensure consistent y-axis mapping between H5 data coordinates and the rendered image pipeline so heatmap rows map to the correct spatial distances.
 - Improve rendered-heatmap peak indication so it remains visible without being confused with viridis heatmap colors. Avoid yellow and other palette-adjacent marker colors; consider an indicator above or below the heatmap, a margin marker, or another non-overlay cue if a direct overlay remains visually ambiguous.
 - When adding a time-series plot, align its x-axis with the shared timeline. The plot can span the full available width while automatically updating its x-limits from the timeline view/zoom state so signal features line up with the timeline playhead and duration bars.
 - Add compact markers or a thin strip on the H5 timeline bar to show detection/no-detection regions.
@@ -222,6 +234,7 @@ Possible directions:
 - Allow `Log Y` if it only changes y presentation and the implementation restores or preserves the timeline-matched x-limits after pyqtgraph updates.
 - Allow `Subtract Mean` if it only changes y-values; if pyqtgraph changes x-limits as a side effect, restore the timeline-matched x-range afterward.
 - Prefer explicit labels for adapted actions so users can tell when an operation is y-only or timeline-preserving.
+- Bug: hidden signal traces in the legend get auto un-hidden when resizing the window. The likely cause is that the Signals plot is being recreated or fully reinitialized on resize instead of preserving per-trace visibility state; this also contributes to unnecessary work and sluggishness. Possible directions: preserve legend visibility flags in the plot model across re-renders, avoid full plot rebuilds for layout/resize events, and throttle/optimize expensive redraws.
 
 ### Dataset slice and signal selection within loaded files
 
@@ -275,6 +288,7 @@ Possible directions:
 - Consider removing or reducing top-level load buttons once the menu organization is clear enough.
 - Keep common first-run actions discoverable if buttons are removed.
 - Use the same organization for future data sources so new imports do not keep expanding the main control row.
+- Add a custom Session Open dialog that previews session JSON contents without loading their resources: show which camera/H5/peak files a session references, mark missing or invalid paths, show brief metadata (durations, frame counts), and surface small thumbnails or textual summaries where available. This lets users scan many sessions in a directory and spot which ones are valid or which need relinking before opening, avoiding expensive per-session loads.
 - **Shipped (`dirty-session-prompts`, archived 2026-06-01):** single session dirty flag, `*` in the window title, Save / Don't Save / Cancel when dirty on open (before file dialog), close, and quit; clean quit silent; pristine close silent; clean non-pristine close uses Yes/No only; dirty marking at user-initiated entry points only (not async job completion after open); Save without requiring camera+H5 in memory; mark dirty after Clear All Resources. Deferred: unsaved tri-state on Clear All, playhead/`current_time_s` as dirty, timeline zoom persistence (below).
 - Make status-bar messages transient for one-shot actions such as loading or saving sessions/resources. Persistent state should live in the window title, Resources window, or resource rows; action confirmations should clear after a short timeout so stale "Saved session" or "Loaded session" text is not mistaken for current-state labeling.
 - Persist timeline **visible range / zoom** (today held only in `timeline_range_model`, not in session JSON) so save/reload restores the same timeline viewport.
@@ -303,13 +317,17 @@ There is a UI bug where the viewport enhancement controls/configuration can over
 Related layout direction:
 - Move viewport enhancement controls out of the viewport preview area.
 - Move heatmap color minimum/maximum controls into a clearer rendered-heatmap control area.
-- Consider placing viewport-related controls and rendered-heatmap controls on the right side beside the viewport and rendered heatmap previews.
+- Consider placing viewport-related controls and rendered heatmap controls on the right side beside the viewport and rendered heatmap previews.
 - Keep the viewport preview and rendered heatmap preview visually unobstructed during normal use.
+- Bug: the viewport sometimes displays a "Loading H5" state or otherwise depends on H5 readiness before showing camera-based viewport content. The viewport should not be gated on H5 presence or H5 load state — camera preview and viewport interactions should remain available even if an H5 resource is missing or still loading. When H5 overlays are not ready, show a lightweight overlay-specific loading indicator rather than blocking viewport content or interactivity.
+- When "Show Overlay Preview" is toggled off, also hide the overlay bounding box and disable bounding-box interaction (dragging, corner handles, and selection). Only show and enable the bounding box when the overlay preview is visible so users cannot accidentally move or edit it while the overlay is hidden.
 
 Follow-up after the Render panel is removed:
 - Keep disabled xcorr/preprocess controls such as blur, downscale, lag window, and sample count out of the main workflow until xcorr or another diagnostic feature is intentionally reintroduced.
 - If xcorr returns, give it a clearly named diagnostic or advanced alignment-assistance surface rather than placing disabled or experimental controls in the primary alignment workflow.
 - Color Min should be constrained to be strictly less than Color Max. Today the spinboxes are independent; entering a Color Min ≥ Color Max produces a degenerate color range. Add a validator or cross-constraint so the user cannot commit a value that inverts or collapses the range (e.g. clamp or warn when Color Min would meet or exceed Color Max). This requires additional change logic and is deferred.
+- Bug: when loading a session, the Color Min / Color Max UI controls update but the rendered heatmap continues to use color range values from the previous session until a manual refresh or other action forces re-render. This suggests the render pipeline or cached rendered-heatmap preview is not being invalidated when session color limits change during session load. Possible directions: ensure session load applies color-range changes to the rendering model immediately, invalidate and schedule a re-render of the rendered heatmap preview (clear any cached heatmap render), and centralize color-limit state so UI control updates and renderer config remain in sync. Also add a lightweight visual feedback (e.g. transient "applying color limits" badge) while the render invalidation completes. Note: LQ/HQ proxy concepts are specific to video previews; this bug concerns the rendered heatmap preview.
+
 
 ## Useful But Lower Priority
 
@@ -338,6 +356,7 @@ Possible directions:
 - Decode likely-nearby frames around the current time in the background.
 - Render higher-quality paused previews after interaction settles.
 - Use a configurable RAM budget to decide how much decoded preview/full-res data to keep.
+- Detect and guard against slow or blocking filesystem I/O (for example when files live on a network drive under transfer). Prefer asynchronous file access or worker-thread-based file probes, add sensible timeouts and retry/fallback behavior, and surface a clear "slow filesystem" warning. Consider an adaptive fallback that reduces probing frequency and coalesces I/O when an unusually slow backend is detected so the UI stays responsive even while file operations are degraded.
 
 This is attractive architecturally, but not critical for the current small manual trial count.
 
@@ -364,6 +383,8 @@ Possible directions:
 - Show approximate memory/disk impact for loaded resources, proxies, and caches when practical.
 - Make resource quality/loading mode visible in a resource panel so the user can tell whether they are seeing full-resolution data, a proxy, or a downsampled preview.
 - Keep export and saved alignment data tied to original sources unless the user explicitly chooses a derived/exported resource.
+- For camera video, support hybrid rendering so some HQ decoded frames can be surfaced as they become available while an LQ/proxy render continues to provide interactive feedback. Show a clear indicator (thumbnail badge or overlay text) when HQ frames are partial or still populating, and allow the user to opt-in to incremental HQ frame promotion so they can judge alignment earlier without waiting for a full high-quality pass to finish.
+- Show low-quality (LQ) frames as soon as the specific requested frame/time has been rendered, even if the overall LQ pass for the clip is not yet complete. In other words, serve per-frame LQ readiness so scrubbing or jumping to a time that has already been decoded displays immediately instead of waiting for a complete LQ generation. Mark such frames with a transient badge or tooltip to indicate the LQ is partial but displayable; reconcile with eventual HQ promotions atomically.
 
 ### Session launch shortcuts
 

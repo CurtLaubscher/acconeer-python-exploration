@@ -30,9 +30,11 @@ from heatmap_alignment_resource_jobs import (  # noqa: E402
 from heatmap_alignment_core import (  # noqa: E402
     HeatmapTrack,
     HeatmapTruthSource,
+)
+from heatmap_alignment_video_proxy import (  # noqa: E402
     VideoProbe,
-    _proxy_cache_path,
     prepare_proxy_video,
+    proxy_cache_path,
 )
 
 
@@ -232,7 +234,7 @@ def test_build_preview_proxy_promotes_only_after_success(
         width=3840,
         height=2160,
     )
-    proxy_path = _proxy_cache_path(
+    proxy_path = proxy_cache_path(
         source_path,
         source_probe=probe,
         max_dimension=1280,
@@ -240,10 +242,10 @@ def test_build_preview_proxy_promotes_only_after_success(
     )
 
     monkeypatch.setattr(jobs, "probe_video", lambda path: probe)
-    monkeypatch.setattr(jobs, "_find_ffmpeg", lambda: "ffmpeg")
+    monkeypatch.setattr(jobs, "find_ffmpeg", lambda: "ffmpeg")
     monkeypatch.setattr(
         jobs,
-        "_proxy_cache_path",
+        "proxy_cache_path",
         lambda source_path, source_probe, max_dimension, cache_root: proxy_path,
     )
 
@@ -282,7 +284,7 @@ def test_build_preview_proxy_does_not_leave_final_cache_on_failure(
         width=3840,
         height=2160,
     )
-    proxy_path = _proxy_cache_path(
+    proxy_path = proxy_cache_path(
         source_path,
         source_probe=probe,
         max_dimension=1280,
@@ -290,10 +292,10 @@ def test_build_preview_proxy_does_not_leave_final_cache_on_failure(
     )
 
     monkeypatch.setattr(jobs, "probe_video", lambda path: probe)
-    monkeypatch.setattr(jobs, "_find_ffmpeg", lambda: "ffmpeg")
+    monkeypatch.setattr(jobs, "find_ffmpeg", lambda: "ffmpeg")
     monkeypatch.setattr(
         jobs,
-        "_proxy_cache_path",
+        "proxy_cache_path",
         lambda source_path, source_probe, max_dimension, cache_root: proxy_path,
     )
 
@@ -445,7 +447,7 @@ def test_prepare_proxy_video_requires_ffmpeg_for_large_sources(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    import heatmap_alignment_core as core
+    import heatmap_alignment_video_proxy as video_proxy
 
     source_path = tmp_path / "large.mp4"
     source_path.write_bytes(b"source")
@@ -458,8 +460,8 @@ def test_prepare_proxy_video_requires_ffmpeg_for_large_sources(
         height=2160,
     )
 
-    monkeypatch.setattr(core, "probe_video", lambda path: probe)
-    monkeypatch.setattr(core, "_find_ffmpeg", lambda: None)
+    monkeypatch.setattr(video_proxy, "probe_video", lambda path: probe)
+    monkeypatch.setattr(video_proxy, "find_ffmpeg", lambda: None)
 
     with pytest.raises(RuntimeError, match="ffmpeg was not found"):
         prepare_proxy_video(source_path, max_dimension=1280)
@@ -482,7 +484,7 @@ def test_build_preview_proxy_passes_explicit_mp4_format(
         width=3840,
         height=2160,
     )
-    proxy_path = _proxy_cache_path(
+    proxy_path = proxy_cache_path(
         source_path,
         source_probe=probe,
         max_dimension=1280,
@@ -490,10 +492,10 @@ def test_build_preview_proxy_passes_explicit_mp4_format(
     )
 
     monkeypatch.setattr(jobs, "probe_video", lambda path: probe)
-    monkeypatch.setattr(jobs, "_find_ffmpeg", lambda: "ffmpeg")
+    monkeypatch.setattr(jobs, "find_ffmpeg", lambda: "ffmpeg")
     monkeypatch.setattr(
         jobs,
-        "_proxy_cache_path",
+        "proxy_cache_path",
         lambda source_path, source_probe, max_dimension, cache_root: proxy_path,
     )
 

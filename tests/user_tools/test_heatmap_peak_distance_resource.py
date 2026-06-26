@@ -15,14 +15,18 @@ USER_TOOLS_PATH = REPO_ROOT / "user_tools"
 if str(USER_TOOLS_PATH) not in sys.path:
     sys.path.insert(0, str(USER_TOOLS_PATH))
 
-from heatmap_alignment_core import (  # noqa: E402
+from heatmap_alignment_core import AlignmentSession  # noqa: E402
+from heatmap_alignment_resource_summaries import (  # noqa: E402
     AlignmentResourceRuntime,
-    AlignmentSession,
     build_alignment_resource_summaries,
 )
 from heatmap_peak_distance_resource import (  # noqa: E402
+    PeakSeriesResource,
+    PeakSeriesResourceAdapter,
     active_peak_measurements,
     active_peak_zero_velocity_m_s,
+    build_generated_peak_series,
+    build_imported_peak_series,
     generate_peak_distances_from_heatmap_record,
     peak_state_detected_counts,
     save_peak_state_to_path,
@@ -162,6 +166,77 @@ class TestActivePeakZeroVelocityMs:
         )
         modified = PeakDistanceExportResult(metadata=meta, measurements=result.measurements)
         assert active_peak_zero_velocity_m_s(modified) == pytest.approx(0.15)
+
+
+class TestPeakSeriesFactories:
+    def test_build_imported_peak_series_sets_saved_imported_fields(self) -> None:
+        datasource = _make_loaded_datasource(Path("/tmp/peaks.json"))
+
+        series = build_imported_peak_series(
+            datasource,
+            Path("/tmp/peaks.json"),
+            display_name="Imported",
+            existing_series=[],
+            color="#f59e0b",
+            visible=False,
+            heatmap_selected=True,
+            warnings=("warning",),
+        )
+
+        assert series.provenance == "imported"
+        assert series.display_name == "Imported"
+        assert series.measurements == datasource.measurements
+        assert series.metadata == datasource.metadata
+        assert series.color == "#f59e0b"
+        assert series.json_path == Path("/tmp/peaks.json")
+        assert series.visible is False
+        assert series.heatmap_selected is True
+        assert series.unsaved is False
+        assert series.warnings == ("warning",)
+        assert series.series_id
+
+    def test_build_imported_peak_series_assigns_next_color(self) -> None:
+        existing = [
+            build_imported_peak_series(
+                _make_loaded_datasource(),
+                Path("/tmp/first.json"),
+                display_name="First",
+                existing_series=[],
+            )
+        ]
+
+        series = build_imported_peak_series(
+            _make_loaded_datasource(),
+            Path("/tmp/second.json"),
+            display_name="Second",
+            existing_series=existing,
+        )
+
+        assert series.color != existing[0].color
+
+    def test_build_generated_peak_series_sets_unsaved_generated_fields(self) -> None:
+        result = _make_export_result()
+
+        series = build_generated_peak_series(
+            result,
+            display_name="Generated",
+            algorithm_id=PEAK_EXTRACTION_METHOD_SUM_VELOCITY,
+            threshold=650.0,
+            existing_series=[],
+        )
+
+        assert series.provenance == "generated"
+        assert series.display_name == "Generated"
+        assert series.measurements == result.measurements
+        assert series.metadata == result.metadata
+        assert series.algorithm_id == PEAK_EXTRACTION_METHOD_SUM_VELOCITY
+        assert series.algorithm_params == {"threshold": 650.0}
+        assert series.json_path is None
+        assert series.visible is True
+        assert series.heatmap_selected is False
+        assert series.warnings == ()
+        assert series.unsaved is True
+        assert series.series_id
 
 
 class TestSavePeakStateToPath:
@@ -434,12 +509,126 @@ class TestPeakSeriesResource:
         assert s.json_path is None
         assert s.algorithm_id is None
 
+
+class TestPeakSeriesResourceAdapter:
+    def test_active_returns_selected_series(self) -> None:
+        selected = PeakSeriesResource(
+            series_id="selected",
+            display_name="selected",
+            provenance="imported",
+            measurements=(),
+            color="#3b82f6",
+        )
+        other = PeakSeriesResource(
+            series_id="other",
+            display_name="other",
+            provenance="imported",
+            measurements=(),
+            color="#f59e0b",
+        )
+
+        adapter = PeakSeriesResourceAdapter([other, selected], selected_series_id="selected")
+
+        assert adapter.active() is selected
+
+    def test_resolve_target_uses_explicit_then_active_then_unsaved(self) -> None:
+        active = PeakSeriesResource(
+            series_id="active",
+            display_name="active",
+            provenance="imported",
+            measurements=(),
+            color="#3b82f6",
+        )
+        unsaved = PeakSeriesResource(
+            series_id="unsaved",
+            display_name="unsaved",
+            provenance="generated",
+            measurements=(),
+            color="#f59e0b",
+            unsaved=True,
+        )
+        explicit = PeakSeriesResource(
+            series_id="explicit",
+            display_name="explicit",
+            provenance="imported",
+            measurements=(),
+            color="#ec4899",
+        )
+        adapter = PeakSeriesResourceAdapter(
+            [active, unsaved, explicit],
+            selected_series_id="active",
+        )
+
+        assert adapter.resolve_target("explicit", prefer_unsaved=True) is explicit
+        assert adapter.resolve_target(prefer_unsaved=True) is active
+        assert (
+            PeakSeriesResourceAdapter([active, unsaved]).resolve_target(prefer_unsaved=True)
+            is unsaved
+        )
+
+    def test_resolve_target_can_fall_back_to_last_or_require_explicit(self) -> None:
+        first = PeakSeriesResource(
+            series_id="first",
+            display_name="first",
+            provenance="imported",
+            measurements=(),
+            color="#3b82f6",
+        )
+        last = PeakSeriesResource(
+            series_id="last",
+            display_name="last",
+            provenance="imported",
+            measurements=(),
+            color="#f59e0b",
+        )
+        adapter = PeakSeriesResourceAdapter([first, last], selected_series_id="first")
+
+        assert adapter.resolve_target(fallback_last=True) is first
+        assert (
+            adapter.resolve_target(fallback_active=False, fallback_last=False)
+            is None
+        )
+        assert (
+            PeakSeriesResourceAdapter([first, last]).resolve_target(fallback_last=True)
+            is last
+        )
+
+    def test_saved_session_entries_include_saved_rows_only(self) -> None:
+        saved = PeakSeriesResource(
+            series_id="saved",
+            display_name="saved",
+            provenance="imported",
+            measurements=(),
+            color="#3b82f6",
+            json_path=Path("/tmp/saved.json"),
+            visible=False,
+        )
+        unsaved = PeakSeriesResource(
+            series_id="unsaved",
+            display_name="unsaved",
+            provenance="generated",
+            measurements=(),
+            color="#f59e0b",
+            unsaved=True,
+        )
+        adapter = PeakSeriesResourceAdapter([saved, unsaved], selected_series_id="saved")
+
+        entries = adapter.saved_session_entries()
+
+        assert len(entries) == 1
+        assert Path(entries[0].path) == Path("/tmp/saved.json")
+        assert entries[0].display_name == "saved"
+        assert entries[0].visible is False
+        assert entries[0].heatmap_selected is True
+
+
+class TestPeakSeriesHelpers:
     def test_assign_color_empty_list(self):
-        from heatmap_peak_distance_resource import PeakSeriesResource, PEAK_SERIES_PALETTE, assign_peak_series_color
+        from heatmap_peak_distance_resource import PEAK_SERIES_PALETTE, assign_peak_series_color
         assert assign_peak_series_color([]) == PEAK_SERIES_PALETTE[0]
 
     def test_assign_color_skips_used(self):
-        from heatmap_peak_distance_resource import PeakSeriesResource, PEAK_SERIES_PALETTE, assign_peak_series_color
+        from heatmap_peak_distance_resource import PEAK_SERIES_PALETTE, assign_peak_series_color
         s1 = PeakSeriesResource(series_id="1", display_name="a", provenance="generated", measurements=(), color=PEAK_SERIES_PALETTE[0])
         assert assign_peak_series_color([s1]) == PEAK_SERIES_PALETTE[1]
 
