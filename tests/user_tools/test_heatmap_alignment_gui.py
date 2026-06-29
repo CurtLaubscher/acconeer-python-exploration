@@ -3298,6 +3298,43 @@ def test_sync_previews_runs_named_stages_in_order(
     ]
 
 
+def test_source_resolution_result_preserves_timeline_range(
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = HeatmapAlignmentWindow()
+    window.timeline_range_model.set_track_state(
+        camera_duration_s=10.0,
+        heatmap_duration_s=10.0,
+        camera_offset_s=0.0,
+        leg2_duration_s=0.0,
+        leg2_offset_s=0.0,
+    )
+    window.timeline_range_model.set_visible_range(2.0, 4.0)
+    window._source_resolution_request_token = 7
+
+    monkeypatch.setattr(window, "_load_current_camera_frame", lambda *, access_hint: None)
+    monkeypatch.setattr(window, "_sync_heatmap_truth_preview", lambda: (None, None))
+    monkeypatch.setattr(
+        window,
+        "_sync_export_overlay_preview",
+        lambda *, frame_idx, truth_frame: None,
+    )
+    monkeypatch.setattr(
+        window,
+        "_sync_viewport_preview",
+        lambda *, truth_frame, invalidate_source_resolution: None,
+    )
+    monkeypatch.setattr(window, "_refresh_signal_plot", lambda *, refresh_data=True: None)
+    monkeypatch.setattr(window, "schedule_timeline_axis_geometry_sync", lambda: None)
+
+    window._handle_source_resolution_viewport_result(
+        {"token": 7, "frame": np.zeros((2, 2, 3), dtype=np.uint8)}
+    )
+
+    assert window.timeline_range_model.visible_range_s() == pytest.approx((2.0, 4.0))
+
+
 # ---------------------------------------------------------------------------
 # Requirements 1-8: must-fix behavior tests
 # ---------------------------------------------------------------------------
