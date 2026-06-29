@@ -2447,7 +2447,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
                 frame.copy() if isinstance(frame, np.ndarray) else None
             )
             if self._source_resolution_viewport_frame is not None:
-                self._sync_previews(
+                self._sync_previews_preserving_timeline_range(
                     camera_access_hint="auto",
                     invalidate_source_resolution=False,
                     refresh_signal_data=False,
