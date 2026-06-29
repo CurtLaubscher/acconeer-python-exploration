@@ -191,9 +191,7 @@ def test_alignment_session_roundtrip_with_signal_plot_view_settings(tmp_path: Pa
         camera_track=CameraTrack(path=str(camera_path), fps=30.0, duration_s=2.0, frame_count=60),
         heatmap_track=HeatmapTrack(path=str(heatmap_path), duration_s=2.0, fps=10.0),
         signal_plot_view=SignalPlotViewSettings(
-            x_range_mode="manual",
             y_range_mode="manual",
-            manual_x_range=(0.5, 4.5),
             manual_y_range=(0.1, 2.5),
         ),
     )
@@ -202,9 +200,9 @@ def test_alignment_session_roundtrip_with_signal_plot_view_settings(tmp_path: Pa
     save_alignment_session(session, session_path)
     loaded = load_alignment_session(session_path)
 
-    assert loaded.signal_plot_view.x_range_mode == "manual"
+    assert loaded.signal_plot_view.x_range_mode == "auto"
     assert loaded.signal_plot_view.y_range_mode == "manual"
-    assert loaded.signal_plot_view.manual_x_range == pytest.approx((0.5, 4.5))
+    assert loaded.signal_plot_view.manual_x_range is None
     assert loaded.signal_plot_view.manual_y_range == pytest.approx((0.1, 2.5))
 
 

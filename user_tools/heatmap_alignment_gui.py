@@ -108,6 +108,9 @@ from heatmap_alignment_resource_jobs import (
 from sparse_iq_peak_distance_core import (
     ALGORITHM_LABEL_SUM_VELOCITY,
     ALGORITHM_LABEL_ZERO_VELOCITY_SLICE,
+    DEFAULT_DIST_NORM_REFERENCE_DISTANCE_M,
+    DEFAULT_DIST_NORM_THRESHOLD_MAX,
+    DEFAULT_DIST_NORM_THRESHOLD_MIN,
     DEFAULT_PEAK_THRESHOLD,
     PEAK_EXTRACTION_METHOD_SUM_VELOCITY,
     PEAK_EXTRACTION_METHOD_ZERO_VELOCITY_SLICE,
@@ -166,6 +169,9 @@ from heatmap_alignment_dialogs import (  # noqa: F401
     ResourceColorSwatchDelegate,
     ResourcesWindow,
 )
+
+GeneratePeakSeriesDialog = GenerateDetectionSeriesDialog
+generate_peak_distances_from_heatmap_record = generate_detection_series_from_heatmap_record
 
 
 class RecentSessionStore:
@@ -394,6 +400,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._create_menu_bar()
         self._build_ui()
         self.signal_plot.attach_timeline_range_model(self.timeline_range_model)
+        self.timeline_view.set_signals_plot(self.signal_plot)
         self._connect_signals()
         self._update_controls_enabled_state()
         self._refresh_session_title()
@@ -1169,22 +1176,29 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         """Open the Generate Peak Series dialog and add a new series."""
         if self.heatmap_source is None:
             return
-        dialog = GenerateDetectionSeriesDialog(self)
+        dialog = GeneratePeakSeriesDialog(self)
         if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
             return
 
         QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.CursorShape.WaitCursor)
         self.statusBar().showMessage("Generating peak series...")
+        threshold_max = getattr(dialog, "threshold_max", DEFAULT_DIST_NORM_THRESHOLD_MAX)
+        threshold_min = getattr(dialog, "threshold_min", DEFAULT_DIST_NORM_THRESHOLD_MIN)
+        reference_distance_m = getattr(
+            dialog,
+            "reference_distance_m",
+            DEFAULT_DIST_NORM_REFERENCE_DISTANCE_M,
+        )
         try:
-            result = generate_detection_series_from_heatmap_record(
+            result = generate_peak_distances_from_heatmap_record(
                 self.heatmap_source.record,
                 h5_path=self.heatmap_source.path,
                 subsweep_idx=self.heatmap_source.subsweep_idx,
                 threshold=dialog.threshold,
                 peak_extraction_method=dialog.algorithm_id,
-                threshold_max=dialog.threshold_max,
-                threshold_min=dialog.threshold_min,
-                reference_distance_m=dialog.reference_distance_m,
+                threshold_max=threshold_max,
+                threshold_min=threshold_min,
+                reference_distance_m=reference_distance_m,
             )
         except Exception as exc:
             QtWidgets.QApplication.restoreOverrideCursor()
@@ -1201,9 +1215,9 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             algorithm_id=dialog.algorithm_id,
             threshold=dialog.threshold,
             existing_series=self._peak_series_list,
-            threshold_max=dialog.threshold_max,
-            threshold_min=dialog.threshold_min,
-            reference_distance_m=dialog.reference_distance_m,
+            threshold_max=threshold_max,
+            threshold_min=threshold_min,
+            reference_distance_m=reference_distance_m,
         )
         self._peak_series_list.append(series)
         self._heatmap_peak_selector_id = series.series_id
@@ -2111,9 +2125,9 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
     def _signal_plot_view_settings_copy(self) -> SignalPlotViewSettings:
         view = self.session.signal_plot_view
         return SignalPlotViewSettings(
-            x_range_mode=view.x_range_mode,
+            x_range_mode="auto",
             y_range_mode=view.y_range_mode,
-            manual_x_range=view.manual_x_range,
+            manual_x_range=None,
             manual_y_range=view.manual_y_range,
         )
 
@@ -2124,9 +2138,9 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
     def _signal_plot_view_settings_copy_from_plot(self) -> SignalPlotViewSettings:
         view = self.signal_plot.view_settings()
         return SignalPlotViewSettings(
-            x_range_mode=view.x_range_mode,
+            x_range_mode="auto",
             y_range_mode=view.y_range_mode,
-            manual_x_range=view.manual_x_range,
+            manual_x_range=None,
             manual_y_range=view.manual_y_range,
         )
 
@@ -2194,17 +2208,26 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             range_start_s if span_s <= 0 else range_start_s + span_s * slider_value / 10000.0
         )
         self._reanchor_playback_clock()
-        self._sync_previews(camera_access_hint="scrub", refresh_signal_data=False)
+        self._sync_previews_preserving_timeline_range(
+            camera_access_hint="scrub",
+            refresh_signal_data=False,
+        )
 
     def _timeline_playhead_changed(self, time_s: float) -> None:
         self.session.timeline.current_time_s = time_s
         self._reanchor_playback_clock()
-        self._sync_previews(camera_access_hint="scrub", refresh_signal_data=False)
+        self._sync_previews_preserving_timeline_range(
+            camera_access_hint="scrub",
+            refresh_signal_data=False,
+        )
 
     def _signal_playhead_scrubbed(self, time_s: float) -> None:
         self.session.timeline.current_time_s = time_s
         self._reanchor_playback_clock()
-        self._sync_previews(camera_access_hint="scrub", refresh_signal_data=False)
+        self._sync_previews_preserving_timeline_range(
+            camera_access_hint="scrub",
+            refresh_signal_data=False,
+        )
 
     def _timeline_camera_offset_changed(self, offset_s: float) -> None:
         self.offset_spin.setValue(offset_s)
@@ -2283,7 +2306,10 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         next_time = min(self._playback_started_video_time_s + elapsed_s, range_end_s)
         self.session.timeline.current_time_s = next_time
         self._set_slider_from_current_time()
-        self._sync_previews(camera_access_hint="playback", refresh_signal_data=False)
+        self._sync_previews_preserving_timeline_range(
+            camera_access_hint="playback",
+            refresh_signal_data=False,
+        )
         if math.isclose(next_time, range_end_s) or next_time >= range_end_s:
             self._set_playback_active(False)
 
@@ -2437,7 +2463,10 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             self.play_timer.start(self.play_timer_interval_ms)
             self.play_button.setText("Pause")
             if refresh_viewport:
-                self._sync_previews(camera_access_hint="playback", refresh_signal_data=False)
+                self._sync_previews_preserving_timeline_range(
+                    camera_access_hint="playback",
+                    refresh_signal_data=False,
+                )
             return
 
         was_active = self.play_timer.isActive()
@@ -2445,7 +2474,10 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._playback_started_at_s = None
         self.play_button.setText("Play")
         if refresh_viewport and was_active:
-            self._sync_previews(camera_access_hint="auto", refresh_signal_data=False)
+            self._sync_previews_preserving_timeline_range(
+                camera_access_hint="auto",
+                refresh_signal_data=False,
+            )
 
     def _set_slider_from_current_time(self) -> None:
         range_start_s, range_end_s = self.timeline_range_model.visible_range_s()
@@ -2811,6 +2843,20 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             refresh_signal_data=refresh_signal_data,
         )
         run_preview_sync(plan, self)
+
+    def _sync_previews_preserving_timeline_range(
+        self,
+        *,
+        camera_access_hint: str = "auto",
+        invalidate_source_resolution: bool = True,
+        refresh_signal_data: bool = True,
+    ) -> None:
+        self._sync_previews(
+            camera_access_hint=camera_access_hint,
+            invalidate_source_resolution=invalidate_source_resolution,
+            timeline_visible_range_s=self.timeline_range_model.visible_range_s(),
+            refresh_signal_data=refresh_signal_data,
+        )
 
     def _sync_timeline_feedback(
         self,

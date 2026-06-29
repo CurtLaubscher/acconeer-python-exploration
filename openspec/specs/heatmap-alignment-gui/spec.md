@@ -567,36 +567,35 @@ The system SHALL show current-time indicators in the Timeline and Signals areas 
 - **WHEN** both the Timeline and Signals current-time indicators are visible
 - **THEN** the system presents them as the same class of draggable playhead control, using matching interaction affordance and modest transparency so underlying content remains visible
 
-### Requirement: Signal plot range modes
-The system SHALL support independent x-axis and y-axis range modes for the Signals plot.
+### Requirement: Shared timeline and Signals x-range
+The timeline widget and the Signals plot SHALL always share the same visible x-range via `TimelineRangeModel`. The user MAY zoom or pan the shared x-range using scroll wheel, middle-mouse drag, or right-click drag on either widget. The view SHALL NOT auto-fit after a track-bar drag is released.
 
-#### Scenario: X Timeline mode follows timeline
-- **WHEN** the Signals plot x-axis is in Timeline mode
+#### Scenario: Timeline and Signals always synchronized
+- **WHEN** the user zooms or pans on either the timeline or the Signals plot
+- **THEN** both views update to show the same x-range immediately
+
+#### Scenario: Track bar drag preserves zoom
+- **WHEN** the user drags a track bar (camera or Leg2) and releases
+- **THEN** the visible time range is unchanged from before the drag began
+
+### Requirement: Signal plot range mode
+The Signals plot x-axis SHALL always follow the shared `TimelineRangeModel`. There is no separate Manual x-axis mode. The x-axis right-click submenu SHALL show only range min/max inputs and a "Zoom to Fit" action.
+
+#### Scenario: X axis follows timeline range
+- **WHEN** the shared timeline range changes
 - **THEN** the plot x-limits match the current timeline view bounds
 
-#### Scenario: X Timeline mode aligns time mapping
-- **WHEN** the Signals plot x-axis is in Timeline mode and the Timeline is visible
+#### Scenario: X axis aligns time mapping
+- **WHEN** the Timeline and Signals plot are visible
 - **THEN** the Signals plot data area and Timeline time-bar area map the same time values to the same horizontal screen positions
 
-#### Scenario: Disable x navigation in Timeline mode
-- **WHEN** the Signals plot x-axis is in Timeline mode
-- **THEN** direct x-axis zoom and pan interaction in the Signals plot is disabled
+#### Scenario: Range mode context menu
+- **WHEN** the user opens the Signals plot context menu
+- **THEN** the X Axis submenu shows range min/max inputs and "Zoom to Fit"; no Auto/Manual toggle is present
 
-#### Scenario: Label Timeline mode compactly
-- **WHEN** the user opens the Signals plot x-axis range mode menu
-- **THEN** the timeline-following x-axis mode is labeled "Timeline"
-
-#### Scenario: Disable x transformations in Timeline mode
-- **WHEN** the Signals plot x-axis is in Timeline mode
-- **THEN** plot actions or transformations that change the x-axis meaning away from linear physical time, or change the timeline-matched x-axis range, are disabled or prevented from affecting the x-axis
-
-#### Scenario: Disable view-all in Timeline mode
-- **WHEN** the Signals plot x-axis is in Timeline mode
-- **THEN** generic plot actions that would change the x-axis range, including the stock "View All" action, are disabled or prevented from changing the x-axis range
-
-#### Scenario: Manual x navigation
-- **WHEN** the user switches the Signals plot x-axis to manual mode
-- **THEN** direct x-axis zoom and pan interaction in the Signals plot is enabled without changing the timeline view bounds
+#### Scenario: Disable x transformations
+- **WHEN** the user opens the Signals plot right-click menu
+- **THEN** Log X, FFT, Y vs. Y', dy/dx, Phase Map, Invert X, Mouse Mode, and the generic View All action are not present
 
 #### Scenario: Independent y range mode
 - **WHEN** the Signals plot x-axis and y-axis have different range modes
@@ -614,24 +613,31 @@ The system SHALL support independent x-axis and y-axis range modes for the Signa
 - **WHEN** the user switches the Signals plot y-axis to manual mode
 - **THEN** direct y-axis zoom and pan interaction in the Signals plot is enabled without changing the x-axis range mode
 
-#### Scenario: Range mode context menu
-- **WHEN** the user opens the Signals plot context menu
-- **THEN** the system provides two-option auto/manual controls for the x-axis and y-axis range modes
-
 ### Requirement: Signal plot view persistence
 The system SHALL persist Signals plot view settings in alignment session files.
 
 #### Scenario: Save signal plot view settings
 - **WHEN** the user saves an alignment session
-- **THEN** the session file includes the Signals plot x-axis range mode, y-axis range mode, and any active manual x/y ranges
+- **THEN** the session file includes the Signals plot y-axis range mode and any active manual y range, but does not include the x-axis range mode or manual x range
 
 #### Scenario: Restore signal plot view settings
 - **WHEN** the user loads an alignment session containing Signals plot view settings
-- **THEN** the system restores the saved x-axis range mode, y-axis range mode, and manual x/y ranges
+- **THEN** the system restores the saved y-axis range mode and manual y range, and ignores any saved x-axis range mode or manual x range
 
 #### Scenario: Load older session without signal plot view settings
 - **WHEN** the user loads an alignment session that does not contain Signals plot view settings
 - **THEN** the system uses default Signals plot settings equivalent to x Timeline mode and y auto mode
+
+### Requirement: Signal plot x-axis session fields ignored
+The system SHALL NOT save the Signals plot x-axis range mode or manual x-range to the session file. When loading a session that contains these fields from a previous version, the system SHALL silently ignore them.
+
+#### Scenario: Old session with x range mode loads cleanly
+- **WHEN** the user loads a session file that contains `x_range_mode` or `manual_x_range` fields for the Signals plot
+- **THEN** the session loads without error and those fields are ignored
+
+#### Scenario: Saving session omits x range fields
+- **WHEN** the user saves a session
+- **THEN** the session file does not contain Signals plot x-axis range mode or manual x-range fields
 
 ### Requirement: Remove visible xcorr controls
 The system SHALL remove disabled xcorr controls from the main heatmap alignment GUI while preserving manual alignment authority.

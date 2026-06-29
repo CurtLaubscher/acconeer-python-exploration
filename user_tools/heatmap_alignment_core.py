@@ -199,6 +199,9 @@ class DetectionSignalSeries:
     candidate_distance_m: np.ndarray
 
 
+PeakDistanceSignalSeries = DetectionSignalSeries
+
+
 @dataclass(frozen=True)
 class Leg2StanceIntervals:
     """Stance phase intervals from robustFC mask.
@@ -338,8 +341,8 @@ class AlignmentSession:
     def to_json_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         view = payload["signal_plot_view"]
-        if view["manual_x_range"] is not None:
-            view["manual_x_range"] = list(view["manual_x_range"])
+        view.pop("x_range_mode", None)
+        view.pop("manual_x_range", None)
         if view["manual_y_range"] is not None:
             view["manual_y_range"] = list(view["manual_y_range"])
         payload["peak_series"] = _peak_series_entries_to_json(self.peak_series)
@@ -424,19 +427,15 @@ def _signal_plot_view_settings_from_payload(
     if not payload:
         return SignalPlotViewSettings()
 
-    x_range_mode = payload.get("x_range_mode", "auto")
     y_range_mode = payload.get("y_range_mode", "auto")
-    if x_range_mode not in ("auto", "manual"):
-        raise ValueError(f"Unsupported signal plot x_range_mode {x_range_mode!r}.")
     if y_range_mode not in ("auto", "manual"):
         raise ValueError(f"Unsupported signal plot y_range_mode {y_range_mode!r}.")
 
-    manual_x_range = _optional_range_pair(payload.get("manual_x_range"))
     manual_y_range = _optional_range_pair(payload.get("manual_y_range"))
     return SignalPlotViewSettings(
-        x_range_mode=x_range_mode,
+        x_range_mode="auto",
         y_range_mode=y_range_mode,
-        manual_x_range=manual_x_range,
+        manual_x_range=None,
         manual_y_range=manual_y_range,
     )
 

@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import shiboken6
 from PySide6 import QtWidgets
 from PySide6.QtWidgets import QApplication
 
@@ -21,6 +22,23 @@ from heatmap_alignment_gui import HeatmapAlignmentWindow  # noqa: E402
 def qapplication() -> QApplication:
     app = QApplication.instance()
     return app if app is not None else QApplication()
+
+
+@pytest.fixture(autouse=True)
+def _close_qt_widgets_after_test(
+    qapplication: QApplication,
+    _no_modal_gui_dialogs: None,
+):
+    yield
+    for widget in list(QtWidgets.QApplication.topLevelWidgets()):
+        if not shiboken6.isValid(widget):
+            continue
+        try:
+            widget.hide()
+            widget.deleteLater()
+        except (AttributeError, RuntimeError):
+            pass
+    qapplication.processEvents()
 
 
 @pytest.fixture(autouse=True)
