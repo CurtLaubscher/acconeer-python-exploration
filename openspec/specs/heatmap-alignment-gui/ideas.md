@@ -116,6 +116,7 @@ Possible directions:
 - While dragging timeline bars, render the rendered heatmap continuously (or at a configured preview FPS) instead of waiting for mouse release. All corresponding resources (camera frames, overlay previews, peak markers) should update live while dragging so alignment feedback is immediate. Architect this with cancellable, worker-threaded preview jobs that coalesce updates and prioritize the latest requested time; provide a fast LQ interactive path and defer expensive HQ work until the drag settles.
 - During playback, target source/native FPS or a configured preview FPS, but skip or coalesce preview work if the previous refresh is still busy so playback does not fall into an inconsistent slow cadence.
 - Avoid rebuilding or refreshing signal plot data on current-time-only updates; moving the current-time indicator should be enough unless plotted data or x/y range state changed.
+- Investigate and optimize major Signals plot performance issues with large H5-derived series, especially when many points are visible after generating peaks. One concrete repro is loading `L:\Member Folders\Curt Laubscher\Data\260626 Radar stairs parallel sensor\sync2.json`, waiting for resources to load, generating peaks with the `dist normalized` algorithm and default params, then panning/zooming the linked x-axis; the `sum v` algorithm with the default `650` threshold is also slow, though less severe. Possible directions: downsample plotted series by visible x-range, use level-of-detail curves, decimate no-detection/candidate segments, avoid rebuilding unchanged curves, and add plot-stage timing before choosing an implementation.
 - Consider a fast interactive preview path plus a higher-quality settled path, similar to the source-resolution viewport preview direction.
 - Bug: changing the Leg2 ultrasonic signal kind between raw and filtered currently makes the viewport drop to low quality and then return to high quality. Viewport quality invalidation should only be triggered by changes that affect the camera/viewport/heatmap preview; choosing which ultrasonic signal to plot in Signals should not invalidate or refresh viewport quality.
 - Bug: resizing splitter handles can sometimes make the viewport preview refresh, drop to low quality, or otherwise behave like viewport-relevant state changed. Layout-only resizing should not invalidate viewport quality or trigger unnecessary source-resolution viewport work unless the displayed preview size genuinely requires a repaint.
@@ -134,6 +135,7 @@ Possible directions:
 The workbench should grow a small default transport set, then later mature into a configurable bindings surface suitable for a general sync tool.
 
 Near-term transport examples (exact keys can change, but aim for NLE-adjacent defaults):
+- `Ctrl+O`: open an alignment session
 - Space: play/pause
 - Left/Right arrow: step by one frame or a small time increment on the shared timeline
 - Home/End: jump to the visible or full timeline range start/end
@@ -203,6 +205,7 @@ Initial algorithm direction:
 Future in-app direction:
 - Add a "Calculate Peaks" action in the heatmap app/workbench after the standalone script proves useful.
 - Reuse the same non-GUI peak calculation core from the script.
+- Guard in-app peak generation while the H5 resource is still loading or stale. A suspected bug needs investigation: triggering peak generation before the H5 background load finishes may appear to do something, possibly using stale data or partial/unready resource state. The action should likely be disabled, queued explicitly, or fail with a clear message until the current H5 resource is ready and matches the requested generation inputs.
 - Consider threshold preview only if repeated CLI runs are too slow or awkward.
 - Add a visibility toggle for the imported/generated peak datasource.
 - If batch peak generation becomes slow in real datasets, consider adding parallel execution to the standalone script after measuring memory use and HDF5 behavior. Keep the first batch implementation serial but structured around independent per-file jobs so a future `--jobs` option does not require redesigning input/output planning.
