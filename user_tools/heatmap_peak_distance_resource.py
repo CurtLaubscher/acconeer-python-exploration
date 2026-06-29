@@ -241,6 +241,25 @@ def generate_detection_series_from_heatmap_record(
     )
 
 
+def generate_peak_distances_from_heatmap_record(
+    heatmap_record,
+    *,
+    h5_path: Path,
+    subsweep_idx: int,
+    threshold: float = DEFAULT_PEAK_THRESHOLD,
+    peak_extraction_method: str = PEAK_EXTRACTION_METHOD_SUM_VELOCITY,
+) -> DetectionExportResult:
+    frame_indices = list(range(len(heatmap_record.results)))
+    return analyze_heatmap_record(
+        heatmap_record,
+        h5_path=h5_path,
+        subsweep_idx=subsweep_idx,
+        frame_indices=frame_indices,
+        threshold=threshold,
+        peak_extraction_method=peak_extraction_method,
+    )
+
+
 def active_peak_measurements(state: PeakDistanceResourceState | None):
     if state is None:
         return None

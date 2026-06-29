@@ -108,6 +108,9 @@ from heatmap_alignment_resource_jobs import (
 from sparse_iq_peak_distance_core import (
     ALGORITHM_LABEL_SUM_VELOCITY,
     ALGORITHM_LABEL_ZERO_VELOCITY_SLICE,
+    DEFAULT_DIST_NORM_REFERENCE_DISTANCE_M,
+    DEFAULT_DIST_NORM_THRESHOLD_MAX,
+    DEFAULT_DIST_NORM_THRESHOLD_MIN,
     DEFAULT_PEAK_THRESHOLD,
     PEAK_EXTRACTION_METHOD_SUM_VELOCITY,
     PEAK_EXTRACTION_METHOD_ZERO_VELOCITY_SLICE,
@@ -166,6 +169,9 @@ from heatmap_alignment_dialogs import (  # noqa: F401
     ResourceColorSwatchDelegate,
     ResourcesWindow,
 )
+
+GeneratePeakSeriesDialog = GenerateDetectionSeriesDialog
+generate_peak_distances_from_heatmap_record = generate_detection_series_from_heatmap_record
 
 
 class RecentSessionStore:
@@ -1170,22 +1176,29 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         """Open the Generate Peak Series dialog and add a new series."""
         if self.heatmap_source is None:
             return
-        dialog = GenerateDetectionSeriesDialog(self)
+        dialog = GeneratePeakSeriesDialog(self)
         if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
             return
 
         QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.CursorShape.WaitCursor)
         self.statusBar().showMessage("Generating peak series...")
+        threshold_max = getattr(dialog, "threshold_max", DEFAULT_DIST_NORM_THRESHOLD_MAX)
+        threshold_min = getattr(dialog, "threshold_min", DEFAULT_DIST_NORM_THRESHOLD_MIN)
+        reference_distance_m = getattr(
+            dialog,
+            "reference_distance_m",
+            DEFAULT_DIST_NORM_REFERENCE_DISTANCE_M,
+        )
         try:
-            result = generate_detection_series_from_heatmap_record(
+            result = generate_peak_distances_from_heatmap_record(
                 self.heatmap_source.record,
                 h5_path=self.heatmap_source.path,
                 subsweep_idx=self.heatmap_source.subsweep_idx,
                 threshold=dialog.threshold,
                 peak_extraction_method=dialog.algorithm_id,
-                threshold_max=dialog.threshold_max,
-                threshold_min=dialog.threshold_min,
-                reference_distance_m=dialog.reference_distance_m,
+                threshold_max=threshold_max,
+                threshold_min=threshold_min,
+                reference_distance_m=reference_distance_m,
             )
         except Exception as exc:
             QtWidgets.QApplication.restoreOverrideCursor()
@@ -1202,9 +1215,9 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             algorithm_id=dialog.algorithm_id,
             threshold=dialog.threshold,
             existing_series=self._peak_series_list,
-            threshold_max=dialog.threshold_max,
-            threshold_min=dialog.threshold_min,
-            reference_distance_m=dialog.reference_distance_m,
+            threshold_max=threshold_max,
+            threshold_min=threshold_min,
+            reference_distance_m=reference_distance_m,
         )
         self._peak_series_list.append(series)
         self._heatmap_peak_selector_id = series.series_id

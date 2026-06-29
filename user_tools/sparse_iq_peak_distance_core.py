@@ -97,6 +97,52 @@ class FrameDetectionMeasurement:
     peak_strength: float
     detection_ratio: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.float64))
 
+    @property
+    def peak_distance_m(self) -> float | None:
+        return self.target_distance_m
+
+    @property
+    def candidate_peak_distance_m(self) -> float:
+        return self.candidate_distance_m
+
+
+class FramePeakMeasurement(FrameDetectionMeasurement):
+    """Compatibility name for tests and callers using the peak-distance API."""
+
+    def __init__(
+        self,
+        frame_index: int,
+        source_tick: int,
+        time_s: float,
+        absolute_time: str | None,
+        status: str,
+        peak_distance_m: float | None,
+        candidate_peak_distance_m: float,
+        peak_strength: float,
+        detection_ratio: np.ndarray | None = None,
+    ) -> None:
+        super().__init__(
+            frame_index=frame_index,
+            source_tick=source_tick,
+            time_s=time_s,
+            absolute_time=absolute_time,
+            status=status,
+            target_distance_m=peak_distance_m,
+            candidate_distance_m=candidate_peak_distance_m,
+            peak_strength=peak_strength,
+            detection_ratio=(
+                np.empty(0, dtype=np.float64) if detection_ratio is None else detection_ratio
+            ),
+        )
+
+    @property
+    def peak_distance_m(self) -> float | None:
+        return self.target_distance_m
+
+    @property
+    def candidate_peak_distance_m(self) -> float:
+        return self.candidate_distance_m
+
 
 @dataclass(frozen=True)
 class DetectionMetadata:
@@ -120,6 +166,10 @@ class DetectionMetadata:
 class DetectionExportResult:
     metadata: DetectionMetadata
     measurements: tuple[FrameDetectionMeasurement, ...]
+
+
+PeakDistanceMetadata = DetectionMetadata
+PeakDistanceExportResult = DetectionExportResult
 
 
 @dataclass(frozen=True)

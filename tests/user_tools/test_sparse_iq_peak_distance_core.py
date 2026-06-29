@@ -56,7 +56,7 @@ def test_strongest_peak_slices_zero_velocity_row_not_distance_column() -> None:
     dvm[2, 5] = 900.0
     distances_m = np.array([0.05, 0.10, 0.15, 0.20, 0.25, 1.50])
 
-    _, candidate_peak_distance_m, peak_distance_m, _ = strongest_peak_in_zero_velocity_slice(
+    _, candidate_peak_distance_m, peak_distance_m, _, _ = strongest_peak_in_zero_velocity_slice(
         dvm,
         distances_m,
         zero_velocity_bin=2,
@@ -74,7 +74,7 @@ def test_strongest_peak_sum_over_velocity_uses_all_velocity_bins() -> None:
     dvm[1, 2] = 50.0
     distances_m = np.array([0.05, 0.10, 1.50])
 
-    _, candidate_peak_distance_m, peak_distance_m, peak_strength = (
+    _, candidate_peak_distance_m, peak_distance_m, peak_ratio, _ = (
         strongest_peak_after_sum_over_velocity(
             dvm,
             distances_m,
@@ -84,7 +84,7 @@ def test_strongest_peak_sum_over_velocity_uses_all_velocity_bins() -> None:
 
     assert candidate_peak_distance_m == pytest.approx(0.05)
     assert peak_distance_m == pytest.approx(0.05)
-    assert peak_strength == pytest.approx(900.0)
+    assert peak_ratio == pytest.approx(900.0 / 1e-12)
 
 
 def test_strongest_peak_exports_distance_when_above_threshold() -> None:
@@ -92,7 +92,7 @@ def test_strongest_peak_exports_distance_when_above_threshold() -> None:
     dvm[1, 3] = 750.0
     distances_m = np.array([0.4, 0.8, 1.2, 1.6, 2.0])
 
-    status, candidate_peak_distance_m, peak_distance_m, peak_strength = (
+    status, candidate_peak_distance_m, peak_distance_m, peak_ratio, _ = (
         strongest_peak_after_sum_over_velocity(
             dvm,
             distances_m,
@@ -103,14 +103,14 @@ def test_strongest_peak_exports_distance_when_above_threshold() -> None:
     assert status == STATUS_DETECTED
     assert candidate_peak_distance_m == pytest.approx(1.6)
     assert peak_distance_m == pytest.approx(1.6)
-    assert peak_strength == pytest.approx(750.0)
+    assert peak_ratio == pytest.approx(1.5)
 
 
 def test_strongest_peak_preserves_candidate_when_below_threshold() -> None:
     dvm = np.ones((2, 3), dtype=np.float64) * 100.0
     distances_m = np.array([0.5, 1.0, 1.5])
 
-    status, candidate_peak_distance_m, peak_distance_m, peak_strength = (
+    status, candidate_peak_distance_m, peak_distance_m, peak_ratio, _ = (
         strongest_peak_after_sum_over_velocity(
             dvm,
             distances_m,
@@ -121,7 +121,7 @@ def test_strongest_peak_preserves_candidate_when_below_threshold() -> None:
     assert status == STATUS_NO_DETECTION
     assert candidate_peak_distance_m == pytest.approx(0.5)
     assert peak_distance_m is None
-    assert peak_strength == pytest.approx(200.0)
+    assert peak_ratio == pytest.approx(200.0 / DEFAULT_PEAK_THRESHOLD)
 
 
 def test_elapsed_time_seconds_uses_first_tick_as_zero() -> None:
@@ -214,7 +214,7 @@ def test_reduced_csv_has_only_measurement_columns(tmp_path: Path) -> None:
     assert list(frame.columns) == list(REDUCED_PEAK_DISTANCE_CSV_COLUMNS)
     assert "source_path" not in frame.columns
     assert "threshold" not in frame.columns
-    assert pd.isna(frame.iloc[1]["peak_distance_m"])
+    assert pd.isna(frame.iloc[1]["target_distance_m"])
 
 
 def test_write_peak_distance_json_fails_for_invalid_output_path(tmp_path: Path) -> None:

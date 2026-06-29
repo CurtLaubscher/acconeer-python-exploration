@@ -922,7 +922,7 @@ def test_loaded_peak_overlay_is_available_by_default(qapplication: QApplication)
     window._peak_series_list = [series]
     window._heatmap_peak_selector_id = series.series_id
 
-    assert window._peak_overlay_for_frame(4) == pytest.approx((1.25, 0.0))
+    assert window._peak_overlay_for_frame(4) == pytest.approx((1.25, 0.0, None))
 
 
 def test_resources_window_lists_fixed_resource_slots(qapplication: QApplication) -> None:

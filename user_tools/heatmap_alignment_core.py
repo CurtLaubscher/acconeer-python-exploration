@@ -199,6 +199,9 @@ class DetectionSignalSeries:
     candidate_distance_m: np.ndarray
 
 
+PeakDistanceSignalSeries = DetectionSignalSeries
+
+
 @dataclass(frozen=True)
 class Leg2StanceIntervals:
     """Stance phase intervals from robustFC mask.
