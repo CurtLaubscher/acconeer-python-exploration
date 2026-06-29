@@ -15,6 +15,7 @@ class PreviewSyncPlan:
     camera_access_hint: str = "auto"
     invalidate_source_resolution: bool = True
     timeline_visible_range_s: tuple[float, float] | None = None
+    recompute_timeline_range: bool = False
     refresh_signal_data: bool = True
 
 
@@ -31,6 +32,7 @@ class PreviewSyncHost(Protocol):
         self,
         *,
         timeline_visible_range_s: tuple[float, float] | None,
+        recompute_timeline_range: bool,
         refresh_signal_data: bool,
     ) -> None: ...
 
@@ -59,6 +61,7 @@ def run_preview_sync(plan: PreviewSyncPlan, host: PreviewSyncHost) -> None:
     host._refresh_camera_view_corners()
     host._sync_timeline_feedback(
         timeline_visible_range_s=plan.timeline_visible_range_s,
+        recompute_timeline_range=plan.recompute_timeline_range,
         refresh_signal_data=plan.refresh_signal_data,
     )
     frame_idx, truth_frame = host._sync_heatmap_truth_preview()

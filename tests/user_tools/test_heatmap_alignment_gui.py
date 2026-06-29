@@ -278,6 +278,12 @@ def test_timeline_range_model_exposes_independent_leg2_offset() -> None:
     assert model.leg2_offset_s == pytest.approx(2.0)
 
 
+def test_timeline_range_model_uses_blank_default_range() -> None:
+    model = TimelineRangeModel()
+
+    assert model.visible_range_s() == pytest.approx((0.0, 60.0))
+
+
 def test_format_track_offset_label_uses_track_start_relative_to_h5() -> None:
     assert format_track_offset_label(-1.25) == "-1.250 s"
     assert format_track_offset_label(0.5) == "+0.500 s"
@@ -3259,8 +3265,10 @@ def test_sync_previews_runs_named_stages_in_order(
     )
     monkeypatch.setattr(window, "_refresh_camera_view_corners", lambda: calls.append("corners"))
 
-    def _timeline_stage(*, timeline_visible_range_s, refresh_signal_data):
-        calls.append(f"timeline:{timeline_visible_range_s}:{refresh_signal_data}")
+    def _timeline_stage(*, timeline_visible_range_s, recompute_timeline_range, refresh_signal_data):
+        calls.append(
+            f"timeline:{timeline_visible_range_s}:{recompute_timeline_range}:{refresh_signal_data}"
+        )
 
     monkeypatch.setattr(window, "_sync_timeline_feedback", _timeline_stage)
     monkeypatch.setattr(
@@ -3291,18 +3299,14 @@ def test_sync_previews_runs_named_stages_in_order(
         "invalidate",
         "camera:scrub",
         "corners",
-        "timeline:(1.0, 2.0):False",
+        "timeline:(1.0, 2.0):False:False",
         "truth",
         "overlay:7:True",
         "viewport:True:True",
     ]
 
 
-def test_source_resolution_result_preserves_timeline_range(
-    qapplication: QApplication,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    window = HeatmapAlignmentWindow()
+def _set_test_timeline_range(window: HeatmapAlignmentWindow) -> None:
     window.timeline_range_model.set_track_state(
         camera_duration_s=10.0,
         heatmap_duration_s=10.0,
@@ -3311,8 +3315,9 @@ def test_source_resolution_result_preserves_timeline_range(
         leg2_offset_s=0.0,
     )
     window.timeline_range_model.set_visible_range(2.0, 4.0)
-    window._source_resolution_request_token = 7
 
+
+def _stub_preview_refresh(window: HeatmapAlignmentWindow, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(window, "_load_current_camera_frame", lambda *, access_hint: None)
     monkeypatch.setattr(window, "_sync_heatmap_truth_preview", lambda: (None, None))
     monkeypatch.setattr(
@@ -3328,11 +3333,148 @@ def test_source_resolution_result_preserves_timeline_range(
     monkeypatch.setattr(window, "_refresh_signal_plot", lambda *, refresh_data=True: None)
     monkeypatch.setattr(window, "schedule_timeline_axis_geometry_sync", lambda: None)
 
+
+def test_plain_sync_previews_preserves_timeline_range(
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = HeatmapAlignmentWindow()
+    _set_test_timeline_range(window)
+    _stub_preview_refresh(window, monkeypatch)
+
+    window._sync_previews(camera_access_hint="auto")
+
+    assert window.timeline_range_model.visible_range_s() == pytest.approx((2.0, 4.0))
+
+
+def test_source_resolution_result_preserves_timeline_range(
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = HeatmapAlignmentWindow()
+    _set_test_timeline_range(window)
+    window._source_resolution_request_token = 7
+    _stub_preview_refresh(window, monkeypatch)
+
     window._handle_source_resolution_viewport_result(
         {"token": 7, "frame": np.zeros((2, 2, 3), dtype=np.uint8)}
     )
 
     assert window.timeline_range_model.visible_range_s() == pytest.approx((2.0, 4.0))
+
+
+def test_h5_job_completion_preserves_timeline_range(
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = HeatmapAlignmentWindow()
+    _set_test_timeline_range(window)
+    _stub_preview_refresh(window, monkeypatch)
+
+    def _take_pending_result(kind: str, _generation: int) -> object | None:
+        return object() if kind == "radar_h5" else None
+
+    monkeypatch.setattr(window._resource_job_manager, "take_pending_result", _take_pending_result)
+    monkeypatch.setattr(window, "_apply_h5_job_result", lambda _payload: None)
+
+    window._handle_resource_job_state_changed()
+
+    assert window.timeline_range_model.visible_range_s() == pytest.approx((2.0, 4.0))
+
+
+def test_camera_job_completion_preserves_timeline_range(
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = HeatmapAlignmentWindow()
+    _set_test_timeline_range(window)
+    _stub_preview_refresh(window, monkeypatch)
+
+    def _take_pending_result(kind: str, _generation: int) -> object | None:
+        return object() if kind == "camera" else None
+
+    monkeypatch.setattr(window._resource_job_manager, "take_pending_result", _take_pending_result)
+    monkeypatch.setattr(window, "_apply_camera_job_result", lambda _result: None)
+
+    window._handle_resource_job_state_changed()
+
+    assert window.timeline_range_model.visible_range_s() == pytest.approx((2.0, 4.0))
+
+
+def test_resource_unload_and_clear_all_preserve_timeline_range(
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = HeatmapAlignmentWindow()
+    _set_test_timeline_range(window)
+    _stub_preview_refresh(window, monkeypatch)
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox,
+        "question",
+        lambda *args, **kwargs: QtWidgets.QMessageBox.StandardButton.Yes,
+    )
+
+    window.unload_camera_video()
+    assert window.timeline_range_model.visible_range_s() == pytest.approx((2.0, 4.0))
+
+    window.unload_h5_recording()
+    assert window.timeline_range_model.visible_range_s() == pytest.approx((2.0, 4.0))
+
+    window._clear_leg2_ultrasonic_datasource()
+    assert window.timeline_range_model.visible_range_s() == pytest.approx((2.0, 4.0))
+
+    window.clear_all_resources()
+    assert window.timeline_range_model.visible_range_s() == pytest.approx((2.0, 4.0))
+
+
+def test_display_only_refresh_preserves_timeline_range(
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = HeatmapAlignmentWindow()
+    _set_test_timeline_range(window)
+    _stub_preview_refresh(window, monkeypatch)
+
+    window._render_settings_changed()
+    assert window.timeline_range_model.visible_range_s() == pytest.approx((2.0, 4.0))
+
+    window._viewport_visibility_changed()
+    assert window.timeline_range_model.visible_range_s() == pytest.approx((2.0, 4.0))
+
+    window._on_heatmap_peak_combo_changed(0)
+    assert window.timeline_range_model.visible_range_s() == pytest.approx((2.0, 4.0))
+
+
+def test_explicit_timeline_range_reset_paths(
+    tmp_path: Path,
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = HeatmapAlignmentWindow()
+    _stub_preview_refresh(window, monkeypatch)
+
+    window.timeline_range_model.set_visible_range(2.0, 4.0)
+    window.timeline_range_model.recompute_visible_range()
+    assert window.timeline_range_model.visible_range_s() == pytest.approx((0.0, 60.0))
+
+    session_path = tmp_path / "alignment.json"
+    session = AlignmentSession(
+        camera_track=CameraTrack(path="", duration_s=12.0),
+        heatmap_track=HeatmapTrack(path="", duration_s=20.0),
+    )
+    save_alignment_session(session, session_path)
+    window.timeline_range_model.set_visible_range(2.0, 4.0)
+
+    window.load_session_from_path(session_path)
+
+    range_start_s, range_end_s = window.timeline_range_model.visible_range_s()
+    assert range_start_s < 0.0
+    assert range_end_s > 20.0
+
+    window.timeline_range_model.set_visible_range(2.0, 4.0)
+    window._reset_session_after_close()
+
+    assert window.timeline_range_model.visible_range_s() == pytest.approx((0.0, 60.0))
 
 
 # ---------------------------------------------------------------------------

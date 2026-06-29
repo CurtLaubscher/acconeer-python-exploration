@@ -1801,8 +1801,10 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
                 self._refresh_camera_view_corners()
                 self.camera_view.set_export_overlay(self.session.export_overlay)
             self._update_controls_enabled_state()
-            if self.camera_source is not None or self.heatmap_source is not None:
-                self._sync_previews(camera_access_hint="auto")
+            self._sync_previews(
+                camera_access_hint="auto",
+                recompute_timeline_range=True,
+            )
             self.settings.setValue("last_session_path", str(session_path))
             if self.session.camera_track.path:
                 self.settings.setValue("last_camera_path", self.session.camera_track.path)
@@ -2493,7 +2495,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.current_time_slider.setValue(int(np.clip(value, 0, 10000)))
         self.current_time_slider.blockSignals(False)
 
-    def _update_timeline_range_from_session(self) -> None:
+    def _update_timeline_range_from_session(self, *, recompute: bool) -> None:
         leg2_duration_s = (
             self.leg2_ultrasonic_datasource.duration_s
             if self.leg2_ultrasonic_datasource is not None
@@ -2506,7 +2508,8 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             leg2_duration_s=leg2_duration_s,
             leg2_offset_s=self.session.leg2_ultrasonic_datasource.offset_s,
         )
-        self.timeline_range_model.recompute_visible_range()
+        if recompute:
+            self.timeline_range_model.recompute_visible_range()
 
     def _set_timeline_view_state(self) -> None:
         self.timeline_view.set_timeline_state(
@@ -2834,12 +2837,14 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         camera_access_hint: str = "auto",
         invalidate_source_resolution: bool = True,
         timeline_visible_range_s: tuple[float, float] | None = None,
+        recompute_timeline_range: bool = False,
         refresh_signal_data: bool = True,
     ) -> None:
         plan = PreviewSyncPlan(
             camera_access_hint=camera_access_hint,
             invalidate_source_resolution=invalidate_source_resolution,
             timeline_visible_range_s=timeline_visible_range_s,
+            recompute_timeline_range=recompute_timeline_range,
             refresh_signal_data=refresh_signal_data,
         )
         run_preview_sync(plan, self)
@@ -2862,9 +2867,10 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self,
         *,
         timeline_visible_range_s: tuple[float, float] | None,
+        recompute_timeline_range: bool,
         refresh_signal_data: bool,
     ) -> None:
-        self._update_timeline_range_from_session()
+        self._update_timeline_range_from_session(recompute=recompute_timeline_range)
         if timeline_visible_range_s is not None:
             self.timeline_range_model.set_visible_range(*timeline_visible_range_s)
         self._set_slider_from_current_time()
@@ -3502,7 +3508,10 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             self._resource_load_warnings.clear()
             self._populate_controls_from_session()
             self._update_controls_enabled_state()
-            self._sync_previews(camera_access_hint="auto")
+            self._sync_previews(
+                camera_access_hint="auto",
+                recompute_timeline_range=True,
+            )
             self._refresh_resources_ui()
             self.statusBar().showMessage("Closed session.")
         self._clear_session_dirty()
