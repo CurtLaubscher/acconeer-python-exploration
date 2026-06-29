@@ -310,8 +310,11 @@ class SignalPlotWidget(pg.PlotWidget):
         self.setMouseTracking(True)
         view_box = self.getPlotItem().getViewBox()
         view_box.disableAutoRange()
+        view_box.setMouseMode(pg.ViewBox.PanMode)
+        view_box.setMouseEnabled(x=True, y=True)
+        self._patch_viewbox_disable_left_drag(view_box)
         view_box.sigRangeChanged.connect(self._view_box_range_changed)
-        self._configure_range_mode_menu(view_box)
+        self._configure_signals_menu(view_box)
         left_axis = self.getAxis("left")
         if left_axis is not None:
             left_axis.setWidth(56)
@@ -337,13 +340,13 @@ class SignalPlotWidget(pg.PlotWidget):
 
     def set_view_settings(self, settings: SignalPlotViewSettings) -> None:
         self._view_settings = SignalPlotViewSettings(
-            x_range_mode=settings.x_range_mode,
+            x_range_mode="auto",
             y_range_mode=settings.y_range_mode,
-            manual_x_range=settings.manual_x_range,
+            manual_x_range=None,
             manual_y_range=settings.manual_y_range,
         )
-        self._sync_range_mode_menu_checks()
-        self._apply_view_settings()
+        self._sync_y_range_mode_menu()
+        self._apply_y_settings()
 
     def attach_timeline_range_model(self, range_model: TimelineRangeModel) -> None:
         self._timeline_range_model = range_model
@@ -421,8 +424,8 @@ class SignalPlotWidget(pg.PlotWidget):
         return time_s
 
     def sync_x_if_following(self) -> None:
-        """Apply the shared visible timeline range when x-axis follows the timeline."""
-        if self._view_settings.x_range_mode != "auto" or self._timeline_range_model is None:
+        """Apply the shared visible timeline range to the x-axis."""
+        if self._timeline_range_model is None:
             return
         range_start_s, range_end_s = self._timeline_range_model.visible_range_s()
         self._applying_view = True
@@ -433,8 +436,7 @@ class SignalPlotWidget(pg.PlotWidget):
         finally:
             self._applying_view = False
 
-    def _on_timeline_visible_range_changed(self, range_start_s: float, range_end_s: float) -> None:
-        del range_start_s, range_end_s
+    def _on_timeline_visible_range_changed(self, _start: float, _end: float) -> None:
         self.sync_x_if_following()
 
     def set_plotted_signals(
@@ -495,7 +497,8 @@ class SignalPlotWidget(pg.PlotWidget):
 
         self._render_stance_patches()
         self._sync_signal_plot_legend()
-        self._apply_view_settings()
+        self.sync_x_if_following()
+        self._apply_y_settings()
         self._update_stance_patches_on_y_range()
         self.axis_geometry_sync_requested.emit()
 
@@ -590,105 +593,139 @@ class SignalPlotWidget(pg.PlotWidget):
             )
             patch_item.setRect(rect)
 
-    def _configure_range_mode_menu(self, view_box: pg.ViewBox) -> None:
+    def _patch_viewbox_disable_left_drag(self, view_box: pg.ViewBox) -> None:
+        original_drag = view_box.mouseDragEvent
+
+        def _filtered_drag(ev, axis=None):
+            if ev.button() == QtCore.Qt.MouseButton.LeftButton:
+                ev.ignore()
+                return
+            original_drag(ev, axis=axis)
+
+        view_box.mouseDragEvent = _filtered_drag
+
+    def _configure_signals_menu(self, view_box: pg.ViewBox) -> None:
+        """Remove obsolete menu items and add Zoom to Fit actions."""
         menu = view_box.menu
         if menu is None:
             return
 
-        x_axis_menu = menu.ctrl[0]
-        y_axis_menu = menu.ctrl[1]
-        x_axis_menu.autoRadio.setText("Timeline")
-        x_axis_menu.autoRadio.setToolTip("Match the Timeline x-range.")
-        for axis_menu in (x_axis_menu, y_axis_menu):
-            axis_menu.autoPercentSpin.setVisible(False)
-            axis_menu.autoPanCheck.setVisible(False)
-            axis_menu.visibleOnlyCheck.setVisible(False)
+        # Remove View All, Mouse Mode
+        menu.viewAll.setVisible(False)
+        for action in menu.mouseModes:
+            action.setVisible(False)
+        mouse_mode_action = next(
+            (a for a in menu.actions() if a.text() == "Mouse Mode"), None
+        )
+        if mouse_mode_action is not None:
+            mouse_mode_action.setVisible(False)
 
+        # X Axis: hide Auto/Manual radios, hide Invert, wire range inputs to model
+        x_ctrl = menu.ctrl[0]
+        x_ctrl.autoRadio.setVisible(False)
+        x_ctrl.manualRadio.setVisible(False)
+        x_ctrl.invertCheck.setVisible(False)
+        x_ctrl.autoPercentSpin.setVisible(False)
+        x_ctrl.autoPanCheck.setVisible(False)
+        x_ctrl.visibleOnlyCheck.setVisible(False)
+
+        # Disconnect pyqtgraph's default x range text handler, reconnect to model push
         try:
-            x_axis_menu.autoRadio.clicked.disconnect(menu.xAutoClicked)
-        except TypeError:
+            x_ctrl.minText.editingFinished.disconnect(menu.xRangeTextChanged)
+        except (TypeError, RuntimeError):
             pass
         try:
-            x_axis_menu.manualRadio.clicked.disconnect(menu.xManualClicked)
-        except TypeError:
+            x_ctrl.maxText.editingFinished.disconnect(menu.xRangeTextChanged)
+        except (TypeError, RuntimeError):
+            pass
+        x_ctrl.minText.editingFinished.connect(self._x_range_text_committed)
+        x_ctrl.maxText.editingFinished.connect(self._x_range_text_committed)
+
+        # Y Axis: keep Auto/Manual but simplify
+        y_ctrl = menu.ctrl[1]
+        y_ctrl.autoPercentSpin.setVisible(False)
+        y_ctrl.autoPanCheck.setVisible(False)
+        y_ctrl.visibleOnlyCheck.setVisible(False)
+        try:
+            y_ctrl.autoRadio.clicked.disconnect(menu.yAutoClicked)
+        except (TypeError, RuntimeError):
             pass
         try:
-            y_axis_menu.autoRadio.clicked.disconnect(menu.yAutoClicked)
-        except TypeError:
+            y_ctrl.manualRadio.clicked.disconnect(menu.yManualClicked)
+        except (TypeError, RuntimeError):
             pass
-        try:
-            y_axis_menu.manualRadio.clicked.disconnect(menu.yManualClicked)
-        except TypeError:
-            pass
+        y_ctrl.autoRadio.clicked.connect(lambda: self._set_y_range_mode("auto"))
+        y_ctrl.manualRadio.clicked.connect(lambda: self._set_y_range_mode("manual"))
 
-        x_axis_menu.autoRadio.clicked.connect(lambda: self._set_x_range_mode("auto"))
-        x_axis_menu.manualRadio.clicked.connect(lambda: self._set_x_range_mode("manual"))
-        y_axis_menu.autoRadio.clicked.connect(lambda: self._set_y_range_mode("auto"))
-        y_axis_menu.manualRadio.clicked.connect(lambda: self._set_y_range_mode("manual"))
+        # Add "Zoom to Fit" to X Axis submenu
+        x_axis_action = next((a for a in menu.actions() if "X" in a.text()), None)
+        if x_axis_action is not None and x_axis_action.menu() is not None:
+            zoom_fit_x = QtGui.QAction("Zoom to Fit", x_axis_action.menu())
+            zoom_fit_x.triggered.connect(self._zoom_to_fit_x)
+            x_axis_action.menu().addAction(zoom_fit_x)
 
-        original_update_state = menu.updateState
+        # Add "Zoom to Fit" to Y Axis submenu
+        y_axis_action = next((a for a in menu.actions() if "Y" in a.text()), None)
+        if y_axis_action is not None and y_axis_action.menu() is not None:
+            zoom_fit_y = QtGui.QAction("Zoom to Fit", y_axis_action.menu())
+            zoom_fit_y.triggered.connect(self._zoom_to_fit_y)
+            y_axis_action.menu().addAction(zoom_fit_y)
 
-        def update_state() -> None:
-            original_update_state()
-            self._sync_range_mode_menu_checks()
-
-        menu.updateState = update_state
-        self._sync_range_mode_menu_checks()
-
-    def _sync_range_mode_menu_checks(self) -> None:
-        menu = self.getPlotItem().getViewBox().menu
-        if menu is None:
-            return
-        x_axis_menu = menu.ctrl[0]
-        y_axis_menu = menu.ctrl[1]
-        x_axis_menu.autoRadio.setChecked(self._view_settings.x_range_mode == "auto")
-        x_axis_menu.manualRadio.setChecked(self._view_settings.x_range_mode == "manual")
-        y_axis_menu.autoRadio.setChecked(self._view_settings.y_range_mode == "auto")
-        y_axis_menu.manualRadio.setChecked(self._view_settings.y_range_mode == "manual")
-        self._sync_x_timeline_mode_menu_constraints()
-
-    def _sync_x_timeline_mode_menu_constraints(self) -> None:
-        plot_item = self.getPlotItem()
-        view_box = plot_item.getViewBox()
-        menu = view_box.menu
-        if menu is None:
-            return
-
-        x_timeline = self._view_settings.x_range_mode == "auto"
-        x_axis_menu = menu.ctrl[0]
-        if x_timeline:
-            x_axis_menu.invertCheck.setChecked(False)
-            view_box.invertX(False)
-            for transform_check in self._x_timeline_blocked_transform_checks():
-                transform_check.setChecked(False)
-            plot_item.setLogMode(x=False)
-
-        x_axis_menu.invertCheck.setEnabled(not x_timeline)
-        for transform_check in self._x_timeline_blocked_transform_checks():
-            transform_check.setEnabled(not x_timeline)
-        menu.viewAll.setEnabled(not x_timeline)
-
-    def _x_timeline_blocked_transform_checks(self) -> tuple[QtWidgets.QCheckBox, ...]:
+        # Hide x-distorting transforms from PlotItem ctrlMenu
         plot_ctrl = self.getPlotItem().ctrl
-        return (
+        for check in (
             plot_ctrl.logXCheck,
             plot_ctrl.derivativeCheck,
             plot_ctrl.phasemapCheck,
             plot_ctrl.fftCheck,
-        )
+        ):
+            check.setVisible(False)
+            check.setChecked(False)
 
-    def _set_x_range_mode(self, mode: Literal["auto", "manual"]) -> None:
-        if self._view_settings.x_range_mode == mode:
+        # Patch updateState to keep our simplified x range display in sync
+        original_update_state = menu.updateState
+
+        def _update_state() -> None:
+            original_update_state()
+            self._sync_y_range_mode_menu()
+
+        menu.updateState = _update_state
+        self._sync_y_range_mode_menu()
+
+    def _x_range_text_committed(self) -> None:
+        if self._timeline_range_model is None:
             return
-        if mode == "manual":
-            x_range, _ = self.getViewBox().viewRange()
-            self._view_settings.manual_x_range = (float(x_range[0]), float(x_range[1]))
-        self._view_settings.x_range_mode = mode
-        self._sync_range_mode_menu_checks()
-        self._apply_view_settings()
-        if mode == "auto":
-            self.sync_x_if_following()
-        self.view_settings_changed.emit()
+        menu = self.getPlotItem().getViewBox().menu
+        if menu is None:
+            return
+        x_ctrl = menu.ctrl[0]
+        try:
+            x_min = float(x_ctrl.minText.text())
+            x_max = float(x_ctrl.maxText.text())
+        except ValueError:
+            return
+        if x_min >= x_max:
+            return
+        self._timeline_range_model.set_visible_range(x_min, x_max)
+
+    def _zoom_to_fit_x(self) -> None:
+        if self._timeline_range_model is not None:
+            self._timeline_range_model.recompute_visible_range()
+
+    def _zoom_to_fit_y(self) -> None:
+        self._applying_view = True
+        try:
+            self._apply_y_auto_range()
+        finally:
+            self._applying_view = False
+
+    def _sync_y_range_mode_menu(self) -> None:
+        menu = self.getPlotItem().getViewBox().menu
+        if menu is None:
+            return
+        y_ctrl = menu.ctrl[1]
+        y_ctrl.autoRadio.setChecked(self._view_settings.y_range_mode == "auto")
+        y_ctrl.manualRadio.setChecked(self._view_settings.y_range_mode == "manual")
 
     def _set_y_range_mode(self, mode: Literal["auto", "manual"]) -> None:
         if self._view_settings.y_range_mode == mode:
@@ -697,24 +734,13 @@ class SignalPlotWidget(pg.PlotWidget):
             _, y_range = self.getViewBox().viewRange()
             self._view_settings.manual_y_range = (float(y_range[0]), float(y_range[1]))
         self._view_settings.y_range_mode = mode
-        self._sync_range_mode_menu_checks()
-        self._apply_view_settings()
+        self._sync_y_range_mode_menu()
+        self._apply_y_settings()
         self.view_settings_changed.emit()
 
-    def _apply_view_settings(self) -> None:
-        view_box = self.getPlotItem().getViewBox()
-        x_manual = self._view_settings.x_range_mode == "manual"
-        y_manual = self._view_settings.y_range_mode == "manual"
-        view_box.setMouseEnabled(x=x_manual, y=y_manual)
-
+    def _apply_y_settings(self) -> None:
         self._applying_view = True
         try:
-            if self._view_settings.x_range_mode == "manual" and self._view_settings.manual_x_range is not None:
-                x_min_s, x_max_s = self._view_settings.manual_x_range
-                self.setXRange(x_min_s, x_max_s, padding=0.0)
-            elif self._view_settings.x_range_mode == "auto":
-                self.sync_x_if_following()
-
             if self._view_settings.y_range_mode == "auto":
                 self._apply_y_auto_range()
             elif self._view_settings.manual_y_range is not None:
@@ -759,11 +785,8 @@ class SignalPlotWidget(pg.PlotWidget):
             return
         x_range, y_range = self.getViewBox().viewRange()
         changed = False
-        if self._view_settings.x_range_mode == "manual":
-            manual_x_range = (float(x_range[0]), float(x_range[1]))
-            if manual_x_range != self._view_settings.manual_x_range:
-                self._view_settings.manual_x_range = manual_x_range
-                changed = True
+        if self._timeline_range_model is not None:
+            self._timeline_range_model.set_visible_range(float(x_range[0]), float(x_range[1]))
         if self._view_settings.y_range_mode == "manual":
             manual_y_range = (float(y_range[0]), float(y_range[1]))
             if manual_y_range != self._view_settings.manual_y_range:
@@ -791,6 +814,9 @@ class AlignmentTimelineWidget(QtWidgets.QWidget):
     h5_alignment_drag_changed = QtCore.Signal(float, float, float, float, float)
     h5_alignment_drag_finished = QtCore.Signal()
 
+    _OFFSCREEN_INDICATOR_SIZE_PX = 8
+    _CONTEXT_MENU_MOVEMENT_THRESHOLD_PX = 4.0
+
     def __init__(
         self,
         range_model: TimelineRangeModel,
@@ -806,6 +832,8 @@ class AlignmentTimelineWidget(QtWidgets.QWidget):
         self._dragging_leg2 = False
         self._dragging_h5 = False
         self._dragging_playhead = False
+        self._middle_dragging = False
+        self._right_dragging = False
         self._camera_drag_anchor_s = 0.0
         self._leg2_drag_anchor_s = 0.0
         self._h5_drag_anchor_s = 0.0
@@ -817,6 +845,12 @@ class AlignmentTimelineWidget(QtWidgets.QWidget):
         self._playhead_hit_half_width_px = 8.0
         self._time_axis_left_px: float | None = None
         self._time_axis_right_px: float | None = None
+        self._signals_plot: SignalPlotWidget | None = None
+        self._right_press_pos: QtCore.QPointF | None = None
+        self._offscreen_indicator_rect: QtCore.QRectF | None = None
+
+    def set_signals_plot(self, signals_plot: SignalPlotWidget) -> None:
+        self._signals_plot = signals_plot
 
     def set_time_axis_rect(self, left_px: float, right_px: float) -> None:
         if self._time_axis_left_px is not None:
@@ -930,12 +964,32 @@ class AlignmentTimelineWidget(QtWidgets.QWidget):
                 QtCore.QPointF(playhead_x, axis_y - 6),
                 QtCore.QPointF(playhead_x, plot_rect.bottom()),
             )
+
+            playhead_color_indicator = QtGui.QColor(TIMELINE_PLAYHEAD_COLOR_HEX)
+            playhead_color_indicator.setAlpha(PLAYHEAD_ALPHA)
+            self._draw_offscreen_playhead_indicator(painter, plot_rect, playhead_color_indicator)
         finally:
             painter.end()
 
     def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:
+        if event.button() == QtCore.Qt.MouseButton.MiddleButton:
+            self._middle_dragging = True
+            self._forward_mouse_to_signals_viewbox(event)
+            event.accept()
+            return
+
+        if event.button() == QtCore.Qt.MouseButton.RightButton:
+            self._right_dragging = False
+            self._right_press_pos = event.position()
+            event.accept()
+            return
+
         if event.button() != QtCore.Qt.MouseButton.LeftButton:
             return
+
+        if self._handle_offscreen_indicator_click(event.position()):
+            return
+
         press_time_s = self._time_at_x(event.position().x(), clamp=True)
         if self._playhead_hit_test(event.position()):
             self._dragging_playhead = True
@@ -978,6 +1032,38 @@ class AlignmentTimelineWidget(QtWidgets.QWidget):
         self.playhead_changed.emit(press_time_s)
 
     def mouseMoveEvent(self, event: QtGui.QMouseEvent) -> None:
+        if self._middle_dragging:
+            self._forward_mouse_to_signals_viewbox(event, QtCore.Qt.MouseButton.MiddleButton)
+            event.accept()
+            return
+
+        if self._right_press_pos is not None:
+            delta = event.position() - self._right_press_pos
+            if not self._right_dragging and (
+                abs(delta.x()) > self._CONTEXT_MENU_MOVEMENT_THRESHOLD_PX
+                or abs(delta.y()) > self._CONTEXT_MENU_MOVEMENT_THRESHOLD_PX
+            ):
+                self._right_dragging = True
+                # Send a synthetic right press to the signals plot at the original press position
+                if self._signals_plot is not None:
+                    local_pos = self._signals_local_pos(self._right_press_pos.x())
+                    viewport = self._signals_plot.viewport()
+                    vp_pos = viewport.mapFrom(self._signals_plot, local_pos.toPoint())
+                    global_pos = viewport.mapToGlobal(vp_pos)
+                    press_event = QtGui.QMouseEvent(
+                        QtCore.QEvent.Type.MouseButtonPress,
+                        QtCore.QPointF(vp_pos),
+                        QtCore.QPointF(global_pos),
+                        QtCore.Qt.MouseButton.RightButton,
+                        QtCore.Qt.MouseButton.RightButton,
+                        event.modifiers(),
+                    )
+                    QtWidgets.QApplication.sendEvent(viewport, press_event)
+            if self._right_dragging:
+                self._forward_mouse_to_signals_viewbox(event, QtCore.Qt.MouseButton.RightButton)
+                event.accept()
+                return
+
         if self._dragging_camera:
             position_time_s = self._time_at_x(event.position().x(), clamp=False)
             camera_track_start_s = position_time_s - self._camera_drag_anchor_s
@@ -1035,7 +1121,25 @@ class AlignmentTimelineWidget(QtWidgets.QWidget):
             self._update_hover_cursor()
 
     def mouseReleaseEvent(self, event: QtGui.QMouseEvent) -> None:
-        del event
+        if event.button() == QtCore.Qt.MouseButton.MiddleButton and self._middle_dragging:
+            self._middle_dragging = False
+            self._forward_mouse_to_signals_viewbox(event)
+            event.accept()
+            return
+
+        if event.button() == QtCore.Qt.MouseButton.RightButton:
+            if self._right_dragging:
+                self._right_dragging = False
+                self._right_press_pos = None
+                self._forward_mouse_to_signals_viewbox(event, QtCore.Qt.MouseButton.RightButton)
+                event.accept()
+                return
+            # Right click with minimal movement → show context menu
+            self._right_press_pos = None
+            self._show_timeline_context_menu(event.globalPosition().toPoint())
+            event.accept()
+            return
+
         was_dragging_offset_track = self._dragging_camera or self._dragging_leg2
         was_dragging_h5 = self._dragging_h5
         self._dragging_camera = False
@@ -1044,11 +1148,17 @@ class AlignmentTimelineWidget(QtWidgets.QWidget):
         self._h5_drag_snapshot = None
         self._dragging_playhead = False
         if was_dragging_offset_track:
-            self._range_model.end_visible_range_freeze(recompute=True)
+            self._range_model.end_visible_range_freeze(recompute=False)
         if was_dragging_h5:
             self.h5_alignment_drag_finished.emit()
         self.update()
         self._update_hover_cursor()
+
+    def _show_timeline_context_menu(self, global_pos: QtCore.QPoint) -> None:
+        menu = QtWidgets.QMenu(self)
+        zoom_fit = menu.addAction("Zoom to Fit")
+        zoom_fit.triggered.connect(self._range_model.recompute_visible_range)
+        menu.exec(global_pos)
 
     def leaveEvent(self, event: QtCore.QEvent) -> None:
         if (
@@ -1056,6 +1166,8 @@ class AlignmentTimelineWidget(QtWidgets.QWidget):
             and not self._dragging_leg2
             and not self._dragging_h5
             and not self._dragging_playhead
+            and not self._middle_dragging
+            and not self._right_dragging
         ):
             self.unsetCursor()
             self._hover_on_camera_bar = False
@@ -1190,3 +1302,139 @@ class AlignmentTimelineWidget(QtWidgets.QWidget):
         resolved_x = min(plot_rect.right(), max(plot_rect.left(), x)) if clamp else x
         frac = (resolved_x - plot_rect.left()) / plot_rect.width()
         return range_start_s + frac * (range_end_s - range_start_s)
+
+    # ------------------------------------------------------------------
+    # Event forwarding helpers
+    # ------------------------------------------------------------------
+
+    def _timeline_x_to_signals_x(self, cursor_x: float) -> float:
+        """Convert a pixel x on this timeline to the equivalent pixel x on the Signals ViewBox."""
+        if self._signals_plot is None:
+            return 0.0
+        plot_rect = self._plot_rect()
+        if plot_rect.width() <= 1:
+            return 0.0
+        range_start_s, range_end_s = self._range_model.visible_range_s()
+        span_s = max(1e-6, range_end_s - range_start_s)
+        time_s = range_start_s + (cursor_x - plot_rect.left()) / plot_rect.width() * span_s
+        view_box = self._signals_plot.getPlotItem().getViewBox()
+        vb_scene_rect = view_box.mapToScene(view_box.boundingRect()).boundingRect()
+        vb_widget_rect = self._signals_plot.mapFromScene(vb_scene_rect).boundingRect()
+        frac = (time_s - range_start_s) / span_s
+        return vb_widget_rect.left() + frac * vb_widget_rect.width()
+
+    def _signals_local_pos(self, timeline_x: float) -> QtCore.QPointF:
+        """Return position in signals_plot widget coords corresponding to timeline_x."""
+        if self._signals_plot is None:
+            return QtCore.QPointF(0, 0)
+        signals_x = self._timeline_x_to_signals_x(timeline_x)
+        view_box = self._signals_plot.getPlotItem().getViewBox()
+        vb_scene_rect = view_box.mapToScene(view_box.boundingRect()).boundingRect()
+        vb_widget_rect = self._signals_plot.mapFromScene(vb_scene_rect).boundingRect()
+        center_y = vb_widget_rect.center().y()
+        return QtCore.QPointF(signals_x, center_y)
+
+    def _forward_wheel_to_signals(self, event: QtGui.QWheelEvent) -> None:
+        if self._signals_plot is None:
+            return
+        local_pos = self._signals_local_pos(event.position().x())
+        # Convert to viewport coordinates (viewport may have a small offset vs. PlotWidget)
+        viewport = self._signals_plot.viewport()
+        vp_pos = viewport.mapFrom(self._signals_plot, local_pos.toPoint())
+        vp_posf = QtCore.QPointF(vp_pos)
+        global_pos = viewport.mapToGlobal(vp_pos)
+        synthetic = QtGui.QWheelEvent(
+            vp_posf,
+            QtCore.QPointF(global_pos),
+            event.pixelDelta(),
+            QtCore.QPoint(0, event.angleDelta().y()),
+            event.buttons(),
+            event.modifiers(),
+            event.phase(),
+            event.isInverted(),
+        )
+        QtWidgets.QApplication.sendEvent(viewport, synthetic)
+
+    def _forward_mouse_to_signals_viewbox(
+        self,
+        event: QtGui.QMouseEvent,
+        override_button: QtCore.Qt.MouseButton | None = None,
+    ) -> None:
+        if self._signals_plot is None:
+            return
+        local_pos = self._signals_local_pos(event.position().x())
+        viewport = self._signals_plot.viewport()
+        vp_pos = viewport.mapFrom(self._signals_plot, local_pos.toPoint())
+        vp_posf = QtCore.QPointF(vp_pos)
+        global_pos = viewport.mapToGlobal(vp_pos)
+        button = override_button if override_button is not None else event.button()
+        buttons = event.buttons()
+        # For press events, add the pressed button to buttons mask
+        if event.type() == QtCore.QEvent.Type.MouseButtonPress:
+            buttons = buttons | button
+        elif event.type() == QtCore.QEvent.Type.MouseButtonRelease:
+            buttons = buttons & ~button
+        synthetic = QtGui.QMouseEvent(
+            event.type(),
+            vp_posf,
+            QtCore.QPointF(global_pos),
+            button,
+            buttons,
+            event.modifiers(),
+        )
+        QtWidgets.QApplication.sendEvent(viewport, synthetic)
+
+    def wheelEvent(self, event: QtGui.QWheelEvent) -> None:
+        self._forward_wheel_to_signals(event)
+        event.accept()
+
+    # ------------------------------------------------------------------
+    # Off-screen playhead indicator
+    # ------------------------------------------------------------------
+
+    def _draw_offscreen_playhead_indicator(self, painter: QtGui.QPainter, plot_rect: QtCore.QRectF, playhead_color: QtGui.QColor) -> None:
+        range_start_s, range_end_s = self._range_model.visible_range_s()
+        t = self._current_time_s
+        sz = self._OFFSCREEN_INDICATOR_SIZE_PX
+        self._offscreen_indicator_rect = None
+        if t > range_end_s:
+            # Arrow pointing right at right edge
+            cx = plot_rect.right() - sz * 0.5
+            cy = plot_rect.top() + 16  # same y as playhead
+            poly = QtGui.QPolygonF([
+                QtCore.QPointF(cx - sz, cy - sz * 0.6),
+                QtCore.QPointF(cx + sz * 0.5, cy),
+                QtCore.QPointF(cx - sz, cy + sz * 0.6),
+            ])
+            self._offscreen_indicator_rect = QtCore.QRectF(cx - sz, cy - sz * 0.6, sz * 1.5, sz * 1.2)
+            painter.setPen(QtCore.Qt.PenStyle.NoPen)
+            painter.setBrush(QtGui.QBrush(playhead_color))
+            painter.drawPolygon(poly)
+        elif t < range_start_s:
+            # Arrow pointing left at left edge
+            cx = plot_rect.left() + sz * 0.5
+            cy = plot_rect.top() + 16
+            poly = QtGui.QPolygonF([
+                QtCore.QPointF(cx + sz, cy - sz * 0.6),
+                QtCore.QPointF(cx - sz * 0.5, cy),
+                QtCore.QPointF(cx + sz, cy + sz * 0.6),
+            ])
+            self._offscreen_indicator_rect = QtCore.QRectF(cx - sz * 0.5, cy - sz * 0.6, sz * 1.5, sz * 1.2)
+            painter.setPen(QtCore.Qt.PenStyle.NoPen)
+            painter.setBrush(QtGui.QBrush(playhead_color))
+            painter.drawPolygon(poly)
+
+    def _handle_offscreen_indicator_click(self, widget_pos: QtCore.QPointF) -> bool:
+        if self._offscreen_indicator_rect is None:
+            return False
+        if not self._offscreen_indicator_rect.contains(widget_pos):
+            return False
+        range_start_s, range_end_s = self._range_model.visible_range_s()
+        span_s = range_end_s - range_start_s
+        t = self._current_time_s
+        if t > range_end_s:
+            new_start = t - span_s * 0.8
+        else:
+            new_start = t - span_s * 0.2
+        self._range_model.set_visible_range(new_start, new_start + span_s)
+        return True

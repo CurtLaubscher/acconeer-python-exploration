@@ -2863,7 +2863,7 @@ def test_signal_playhead_drag_in_manual_x_mode_uses_signal_plot_x_scale(
 ) -> None:
     plot = _make_signal_plot_with_range(qapplication, x_start=2.0, x_end=4.0, current_time_s=3.0)
     plot.set_view_settings(
-        SignalPlotViewSettings(x_range_mode="manual", y_range_mode="auto", manual_x_range=(2.0, 4.0))
+        SignalPlotViewSettings(y_range_mode="auto")
     )
     qapplication.processEvents()
 
@@ -2901,7 +2901,7 @@ def test_signal_playhead_drag_preserves_ranges_modes_and_offsets(
 
     plot = _make_signal_plot_with_range(qapplication, x_start=0.0, x_end=10.0, current_time_s=5.0)
     plot.set_view_settings(
-        SignalPlotViewSettings(x_range_mode="manual", y_range_mode="manual", manual_x_range=(0.0, 10.0))
+        SignalPlotViewSettings(y_range_mode="manual", manual_y_range=(-1.0, 3.0))
     )
     plot.attach_timeline_range_model(range_model)
     qapplication.processEvents()
@@ -2928,7 +2928,7 @@ def test_signal_playhead_drag_preserves_ranges_modes_and_offsets(
 
     assert vb.viewRange()[0] == pytest.approx(x_range_before, abs=1e-6)
     assert vb.viewRange()[1] == pytest.approx(y_range_before, abs=1e-6)
-    assert plot.view_settings().x_range_mode == "manual"
+    assert plot.view_settings().x_range_mode == "auto"
     assert plot.view_settings().y_range_mode == "manual"
     assert range_model.visible_range_s() == pytest.approx(timeline_range_before, abs=1e-6)
     assert range_model.camera_offset_s == pytest.approx(camera_offset_before, abs=1e-6)
