@@ -438,6 +438,7 @@ Possible directions:
 - Keep deleting partial output files on failure or cancellation.
 - Make export failure messages more specific when camera decode, H5 render, or video writer setup fails.
 - Add focused handling for camera files with unreadable trailing frames or inconsistent reported frame counts.
+- Investigate intermittent OpenCV/FFmpeg stream timeout warnings during camera decode, such as `[ WARN:0@35.157] global cap_ffmpeg_impl.hpp:453 _opencv_ffmpeg_interrupt_callback Stream timeout triggered after 35140.265000 ms`, which can cause the camera video to become completely desynchronized. This has been observed before, appears inconsistent, and is not specific to the stale-resource-state work. Possible directions: detect timeout warnings or failed seeks/reads, invalidate the affected preview/proxy state, retry with bounded backoff, surface a clear decode warning, and consider PyAV/FFmpeg decode experiments if OpenCV seeking proves unreliable for these files.
 - Add export smoke tests using synthetic videos with known bad/missing frames.
 - Keep codec-specific work measurement-driven rather than switching decode/export stacks speculatively.
 
