@@ -4066,6 +4066,122 @@ def test_heatmap_peak_combo_resets_to_none_when_selected_series_unloaded(qapplic
     assert window._heatmap_peak_combo.currentData() is None
 
 
+def test_heatmap_peak_combo_change_refreshes_detection_strip(
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Changing the heatmap-selected peak series updates the strip without scrubbing."""
+    from heatmap_peak_distance_resource import PeakSeriesResource
+
+    first_ratio = np.array([1.25, 0.5], dtype=np.float64)
+    second_ratio = np.array([0.75, 1.75], dtype=np.float64)
+    metadata = PeakDistanceMetadata(
+        source_path="/tmp/test.h5",
+        source_name="test.h5",
+        session_index=0,
+        group_index=0,
+        entry_index=0,
+        sensor_id=1,
+        subsweep_index=0,
+        source_frame_count=1,
+        source_duration_s=0.1,
+        ticks_per_second=1000,
+        threshold=650.0,
+        peak_extraction_method="sum_velocity",
+        zero_velocity_bin_index=3,
+        zero_velocity_m_s=0.0,
+    )
+    window = HeatmapAlignmentWindow()
+    window.heatmap_source = object()  # type: ignore[assignment]
+    monkeypatch.setattr(window, "_current_heatmap_frame_index", lambda: 0)
+    captured: list[np.ndarray | None] = []
+    monkeypatch.setattr(window._detection_strip, "set_detection_ratio", captured.append)
+    window._peak_series_list = [
+        PeakSeriesResource(
+            series_id="first",
+            display_name="First",
+            provenance="generated",
+            measurements=(
+                FramePeakMeasurement(
+                    0, 0, 0.0, None, STATUS_DETECTED, 1.0, 1.0, 700.0, first_ratio
+                ),
+            ),
+            color="#3b82f6",
+            metadata=metadata,
+        ),
+        PeakSeriesResource(
+            series_id="second",
+            display_name="Second",
+            provenance="generated",
+            measurements=(
+                FramePeakMeasurement(
+                    0, 0, 0.0, None, STATUS_DETECTED, 1.5, 1.5, 800.0, second_ratio
+                ),
+            ),
+            color="#f59e0b",
+            metadata=metadata,
+        ),
+    ]
+    window._heatmap_peak_selector_id = "first"
+    window._update_heatmap_peak_selector()
+
+    second_index = window._heatmap_peak_combo.findData("second")
+    assert second_index >= 0
+    window._heatmap_peak_combo.setCurrentIndex(second_index)
+    window._on_heatmap_peak_combo_changed(second_index)
+
+    assert np.array_equal(captured[-1], second_ratio)
+
+
+def test_unload_selected_peak_series_clears_detection_strip(
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unloading the active peak series clears the strip without requiring a scrub."""
+    from heatmap_peak_distance_resource import PeakSeriesResource
+
+    ratio = np.array([1.25, 0.5], dtype=np.float64)
+    metadata = PeakDistanceMetadata(
+        source_path="/tmp/test.h5",
+        source_name="test.h5",
+        session_index=0,
+        group_index=0,
+        entry_index=0,
+        sensor_id=1,
+        subsweep_index=0,
+        source_frame_count=1,
+        source_duration_s=0.1,
+        ticks_per_second=1000,
+        threshold=650.0,
+        peak_extraction_method="sum_velocity",
+        zero_velocity_bin_index=3,
+        zero_velocity_m_s=0.0,
+    )
+    window = HeatmapAlignmentWindow()
+    window.heatmap_source = object()  # type: ignore[assignment]
+    monkeypatch.setattr(window, "_current_heatmap_frame_index", lambda: 0)
+    captured: list[np.ndarray | None] = []
+    monkeypatch.setattr(window._detection_strip, "set_detection_ratio", captured.append)
+    series = PeakSeriesResource(
+        series_id="selected",
+        display_name="Selected",
+        provenance="generated",
+        measurements=(
+            FramePeakMeasurement(0, 0, 0.0, None, STATUS_DETECTED, 1.0, 1.0, 700.0, ratio),
+        ),
+        color="#3b82f6",
+        metadata=metadata,
+    )
+    window._peak_series_list = [series]
+    window._heatmap_peak_selector_id = series.series_id
+
+    window._refresh_current_heatmap_peak_overlay()
+    window._unload_peak_series(series.series_id, confirm=False)
+
+    assert np.array_equal(captured[-2], ratio)
+    assert captured[-1] is None
+
+
 def test_resources_window_has_generate_and_import_buttons(qapplication: QApplication) -> None:
     """Req 2/8: Resources window must expose Generate Peak Series and Import Peak Series buttons."""
     window = HeatmapAlignmentWindow()

@@ -1235,6 +1235,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
                 break
         self._update_heatmap_peak_selector()
         self._refresh_signal_plot()
+        self._refresh_current_heatmap_peak_overlay()
         self._refresh_resources_ui()
 
     # ------------------------------------------------------------------
@@ -1295,6 +1296,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._heatmap_peak_selector_id = series.series_id
         self._refresh_signal_plot()
         self._update_heatmap_peak_selector()
+        self._refresh_current_heatmap_peak_overlay()
         self._refresh_resources_ui()
         counts = peak_state_detected_counts(result)
         if counts:
@@ -1364,6 +1366,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             self._heatmap_peak_selector_id = self._peak_series_list[-1].series_id
             self._refresh_signal_plot()
             self._update_heatmap_peak_selector()
+            self._refresh_current_heatmap_peak_overlay()
             self._refresh_resources_ui()
             self.statusBar().showMessage(f"Imported {imported_count} peak series.")
         self._mark_session_dirty()
@@ -1401,6 +1404,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._set_resource_warnings("radar_peak", tuple(warnings))
         self._refresh_signal_plot()
         self._update_heatmap_peak_selector()
+        self._refresh_current_heatmap_peak_overlay()
         self._refresh_resources_ui()
         if mark_dirty:
             self._mark_session_dirty()
@@ -1426,6 +1430,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             self._heatmap_peak_selector_id = None
         self._refresh_signal_plot()
         self._update_heatmap_peak_selector()
+        self._refresh_current_heatmap_peak_overlay()
         self._refresh_resources_ui()
         self._mark_session_dirty()
 
@@ -1490,7 +1495,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
 
     def _on_heatmap_peak_combo_changed(self, _index: int) -> None:
         self._heatmap_peak_selector_id = self._heatmap_peak_combo.currentData()
-        self._sync_previews(camera_access_hint="auto")
+        self._refresh_current_heatmap_peak_overlay()
 
     def _active_peak_state(self):
         """Return measurements/metadata for the heatmap-selected peak series, or None."""
@@ -1609,6 +1614,31 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
                     self._heatmap_distance_header.set_peak_distance(None)
                     return
             self._heatmap_distance_header.set_peak_distance(dist)
+
+    def _current_heatmap_frame_index(self) -> int | None:
+        if self.heatmap_source is None:
+            return None
+        current_time_s = self.session.timeline.current_time_s
+        if current_time_s < 0.0 or current_time_s > self.session.heatmap_track.duration_s:
+            return None
+        frame_idx, _truth_frame = self.heatmap_source.frame_at_seconds(current_time_s)
+        return frame_idx
+
+    def _refresh_current_heatmap_peak_overlay(self, frame_idx: int | None = None) -> None:
+        if frame_idx is None:
+            frame_idx = self._current_heatmap_frame_index()
+        if frame_idx is None:
+            self._update_heatmap_peak_cue(None)
+            self._detection_strip.set_detection_ratio(None)
+            if self._hover_last_pos is not None:
+                self._refresh_hover_tooltip()
+            return
+
+        self._update_heatmap_peak_cue(frame_idx)
+        if self._hover_last_pos is not None:
+            self._refresh_hover_tooltip()
+        peak_overlay = self._peak_overlay_for_frame(frame_idx)
+        self._detection_strip.set_detection_ratio(None if peak_overlay is None else peak_overlay[2])
 
     def eventFilter(self, obj: QtCore.QObject, event: QtCore.QEvent) -> bool:
         if obj is self.truth_view:
@@ -2946,15 +2976,10 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             if self._hover_dvm_cache is None or self._hover_dvm_cache[0] != frame_idx:
                 subframe = self.heatmap_source.record.results[frame_idx].subframes[self.heatmap_source.subsweep_idx]
                 self._hover_dvm_cache = (frame_idx, distance_velocity_map(subframe))
-            self._update_heatmap_peak_cue(frame_idx)
-            if self._hover_last_pos is not None:
-                self._refresh_hover_tooltip()
-            peak_overlay = self._peak_overlay_for_frame(frame_idx)
-            self._detection_strip.set_detection_ratio(None if peak_overlay is None else peak_overlay[2])
+            self._refresh_current_heatmap_peak_overlay(frame_idx)
         else:
             self._hover_dvm_cache = None
-            self._update_heatmap_peak_cue(None)
-            self._detection_strip.set_detection_ratio(None)
+            self._refresh_current_heatmap_peak_overlay()
         self.truth_view.set_frame(truth_frame)
         return frame_idx, truth_frame
 
@@ -3428,6 +3453,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         ps.unsaved = False
         ps.warnings = tuple(warnings)
         self._refresh_signal_plot()
+        self._refresh_current_heatmap_peak_overlay()
         self._refresh_resources_ui()
 
     def _reveal_path(self, path: Path) -> None:
