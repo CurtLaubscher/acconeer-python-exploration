@@ -61,6 +61,7 @@ from heatmap_alignment_core import (
     build_leg2_ultrasonic_signal_series,
     build_peak_distance_signal_series,
     derive_signal_plot_color,
+    desired_h5_identity,
     elide_path_middle,
     import_leg2_mat_for_heatmap,
     import_peak_distance_json_for_heatmap,
@@ -420,7 +421,20 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
 
     def _abandon_resource_jobs(self) -> None:
         self._resource_job_manager.abandon_all_jobs()
+        self._discard_camera_replacement_backup()
+        self._discard_h5_replacement_backup()
+        self._pending_peak_session_reload = False
+
+    def _discard_camera_replacement_backup(self) -> None:
+        backup = self._camera_replacement_backup
+        if isinstance(backup, _CameraResourceBackup):
+            backup.camera_source.close()
         self._camera_replacement_backup = None
+
+    def _discard_h5_replacement_backup(self) -> None:
+        backup = self._h5_replacement_backup
+        if isinstance(backup, _H5ResourceBackup):
+            backup.heatmap_source.close()
         self._h5_replacement_backup = None
         self._inflight_h5_identity = None
         self._pending_peak_session_reload = False
@@ -888,6 +902,45 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.camera_view.set_corners(None)
         self.viewport_view.set_frame(None)
 
+    def _clear_active_camera_resource(self) -> None:
+        self._set_playback_active(False, refresh_viewport=False)
+        if self.camera_source is not None:
+            self.camera_source = None
+        self._camera_reference_width = 0
+        self._camera_reference_height = 0
+        self.current_camera_frame = None
+        self.session.camera_track = CameraTrack()
+        self.session.export_overlay = ExportOverlaySettings()
+        self.session.timeline.offset_s = 0.0
+        self._freeze_export_overlay_preview = False
+        self.camera_view.set_frame(None)
+        self.camera_view.set_corners(None)
+        self.camera_view.set_export_overlay(self.session.export_overlay)
+        self.camera_view.set_export_overlay_preview_frame(None)
+        self._source_resolution_request_token += 1
+        self._source_resolution_viewport_frame = None
+        self._pending_source_resolution_request = None
+        self.viewport_view.set_frame(None)
+
+    def _clear_active_h5_resource(self) -> None:
+        self._set_playback_active(False, refresh_viewport=False)
+        if self.heatmap_source is not None:
+            self.heatmap_source = None
+        self._overlay_plot_renderer = None
+        self._hover_dvm_cache = None
+        self._hover_last_pos = None
+        self._heatmap_axes = None
+        self.session.heatmap_track = HeatmapTrack()
+        self.session.viewport.output_width = 0
+        self.session.viewport.output_height = 0
+        self.truth_view.set_frame(None)
+        self._detection_strip.set_detection_ratio(None)
+        QtWidgets.QToolTip.hideText()
+        self._update_heatmap_peak_cue(None)
+        self._update_heatmap_extent_labels()
+        self.camera_view.set_export_overlay_preview_frame(None)
+        self.viewport_view.set_frame(None)
+
     def _load_camera_video(self) -> None:
         start_path = self._dialog_start_path("last_camera_path")
         filename, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -909,11 +962,14 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         replaces_active = self.camera_source is not None
         if replaces_active:
             self._camera_replacement_backup = self._snapshot_active_camera()
+            self._clear_active_camera_resource()
+        self.session.camera_track = CameraTrack(path=str(camera_path))
         self._set_resource_reload_error("camera", None)
         self._resource_job_manager.start_camera_job(
             camera_path,
             replaces_active=replaces_active,
         )
+        self._update_controls_enabled_state()
         self._update_resource_loading_overlays()
         self._refresh_resources_ui()
         self.statusBar().showMessage(f"Loading camera video: {camera_path.name}")
@@ -936,28 +992,41 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             self._set_resource_reload_error("radar_h5", f"File not found: {h5_path}")
             self._refresh_resources_ui()
             return
+        session_idx = self.session.heatmap_track.session_idx
+        group_idx = self.session.heatmap_track.group_idx
+        entry_idx = self.session.heatmap_track.entry_idx
+        subsweep_idx = self.session.heatmap_track.subsweep_idx
         replaces_active = self.heatmap_source is not None
         if replaces_active:
             self._h5_replacement_backup = self._snapshot_active_h5()
+            self._clear_active_h5_resource()
+        self.session.heatmap_track = HeatmapTrack(
+            path=str(h5_path),
+            session_idx=session_idx,
+            group_idx=group_idx,
+            entry_idx=entry_idx,
+            subsweep_idx=subsweep_idx,
+        )
         self._set_resource_reload_error("radar_h5", None)
         self._inflight_h5_identity = H5SlotIdentity(
             path=str(h5_path),
-            session_idx=self.session.heatmap_track.session_idx,
-            group_idx=self.session.heatmap_track.group_idx,
-            entry_idx=self.session.heatmap_track.entry_idx,
-            subsweep_idx=self.session.heatmap_track.subsweep_idx,
+            session_idx=session_idx,
+            group_idx=group_idx,
+            entry_idx=entry_idx,
+            subsweep_idx=subsweep_idx,
         )
         self._resource_job_manager.start_h5_job(
             h5_path,
             replaces_active=replaces_active,
-            session_idx=self.session.heatmap_track.session_idx,
-            group_idx=self.session.heatmap_track.group_idx,
-            entry_idx=self.session.heatmap_track.entry_idx,
-            subsweep_idx=self.session.heatmap_track.subsweep_idx,
+            session_idx=session_idx,
+            group_idx=group_idx,
+            entry_idx=entry_idx,
+            subsweep_idx=subsweep_idx,
             color_min=self.color_min_spin.value(),
             color_max=self.color_max_spin.value(),
             fixed_levels=True,
         )
+        self._update_controls_enabled_state()
         self._update_resource_loading_overlays()
         self._refresh_resources_ui()
         self.statusBar().showMessage(f"Loading H5 recording: {h5_path.name}")
@@ -1174,7 +1243,10 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
 
     def _generate_peak_series(self) -> None:
         """Open the Generate Peak Series dialog and add a new series."""
-        if self.heatmap_source is None:
+        if not self._h5_ready_for_generation():
+            return
+        heatmap_source = self.heatmap_source
+        if heatmap_source is None:
             return
         dialog = GeneratePeakSeriesDialog(self)
         if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
@@ -1191,9 +1263,9 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         )
         try:
             result = generate_peak_distances_from_heatmap_record(
-                self.heatmap_source.record,
-                h5_path=self.heatmap_source.path,
-                subsweep_idx=self.heatmap_source.subsweep_idx,
+                heatmap_source.record,
+                h5_path=heatmap_source.path,
+                subsweep_idx=heatmap_source.subsweep_idx,
                 threshold=dialog.threshold,
                 peak_extraction_method=dialog.algorithm_id,
                 threshold_max=threshold_max,
@@ -1674,6 +1746,16 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         """Return identity of the currently loaded H5 source, or None."""
         if self.heatmap_source is None:
             return None
+        if not all(
+            hasattr(self.heatmap_source, attr)
+            for attr in ("path", "record", "subsweep_idx")
+        ):
+            return None
+        if not all(
+            hasattr(self.heatmap_source.record, attr)
+            for attr in ("session_idx", "group_idx", "entry_idx")
+        ):
+            return None
         return H5SlotIdentity(
             path=str(self.heatmap_source.path),
             session_idx=self.heatmap_source.record.session_idx,
@@ -1681,6 +1763,18 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             entry_idx=self.heatmap_source.record.entry_idx,
             subsweep_idx=self.heatmap_source.subsweep_idx,
         )
+
+    def _h5_job_active(self) -> bool:
+        return self._resource_job_manager.board().radar_h5.phase not in (
+            "idle",
+            "failed",
+            "superseded",
+        )
+
+    def _h5_ready_for_generation(self) -> bool:
+        if self.heatmap_source is None or self._h5_job_active():
+            return False
+        return self._loaded_h5_identity() == desired_h5_identity(self.session)
 
     def _reconcile_session_load(
         self,
@@ -1947,51 +2041,6 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._update_heatmap_extent_labels()
         self.statusBar().showMessage(f"Loaded H5 recording: {payload.path.name}")
 
-    def _restore_camera_replacement_backup(self) -> None:
-        backup = self._camera_replacement_backup
-        if backup is None:
-            return
-        if self.camera_source is not None and self.camera_source is not backup.camera_source:
-            self.camera_source.close()
-        self.camera_source = backup.camera_source
-        self._camera_reference_width = backup.reference_width
-        self._camera_reference_height = backup.reference_height
-        self.session.camera_track = backup.camera_track
-        self.session.viewport.corners = [list(point) for point in backup.viewport_corners]
-        self.session.export_overlay = ExportOverlaySettings(
-            visible=backup.export_overlay.visible,
-            preview_enabled=backup.export_overlay.preview_enabled,
-            x=backup.export_overlay.x,
-            y=backup.export_overlay.y,
-            width=backup.export_overlay.width,
-            height=backup.export_overlay.height,
-        )
-        self.current_camera_frame = (
-            None if backup.current_camera_frame is None else backup.current_camera_frame.copy()
-        )
-        if self.current_camera_frame is not None:
-            self.camera_view.set_frame(self.current_camera_frame)
-        else:
-            self._load_current_camera_frame(access_hint="random")
-        self._refresh_camera_view_corners()
-        self.camera_view.set_export_overlay(self.session.export_overlay)
-        self._camera_replacement_backup = None
-
-    def _restore_h5_replacement_backup(self) -> None:
-        backup = self._h5_replacement_backup
-        if backup is None:
-            return
-        if self.heatmap_source is not None and self.heatmap_source is not backup.heatmap_source:
-            self.heatmap_source.close()
-        self.heatmap_source = backup.heatmap_source
-        self.session.heatmap_track = backup.heatmap_track
-        self.session.viewport.output_width = backup.viewport_output_width
-        self.session.viewport.output_height = backup.viewport_output_height
-        self._rebuild_overlay_plot_renderer()
-        self._h5_replacement_backup = None
-        self._pending_peak_session_reload = False
-        self._update_heatmap_extent_labels()
-
     def _handle_resource_job_state_changed(self) -> None:
         for kind in ("camera", "radar_h5"):
             slot = self._resource_job_manager.board().slot(kind)
@@ -2006,15 +2055,15 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
                 self._sync_previews(camera_access_hint="auto")
             elif slot.phase == "failed":
                 if kind == "camera":
-                    self._restore_camera_replacement_backup()
+                    self._discard_camera_replacement_backup()
                 else:
-                    self._restore_h5_replacement_backup()
+                    self._discard_h5_replacement_backup()
                 self._set_resource_reload_error(kind, slot.message)
             elif slot.phase == "idle":
                 if kind == "camera" and self._camera_replacement_backup is not None:
-                    self._restore_camera_replacement_backup()
+                    self._discard_camera_replacement_backup()
                 elif kind == "radar_h5" and self._h5_replacement_backup is not None:
-                    self._restore_h5_replacement_backup()
+                    self._discard_h5_replacement_backup()
         self._update_resource_loading_overlays()
         self._refresh_resources_ui()
 
@@ -3074,7 +3123,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
 
         return AlignmentResourceRuntime(
             camera_loaded=self.camera_source is not None,
-            radar_h5_loaded=self.heatmap_source is not None,
+            radar_h5_loaded=self._h5_ready_for_generation(),
             radar_peak_loaded=self._has_peaks_in_memory(),
             leg2_loaded=leg2_adapter.is_loaded(),
             peak_detected_count=peak_detected,
@@ -3191,7 +3240,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             self._resources_window.refresh(summaries, self._session_lifecycle.current_path)
             # Update generate/import buttons in Resources window footer.
             self._resources_window.generate_peak_series_button.setEnabled(
-                self.heatmap_source is not None
+                self._h5_ready_for_generation()
             )
             self._resources_window.import_peak_series_button.setEnabled(True)
 
