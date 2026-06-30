@@ -337,7 +337,7 @@ def build_alignment_resource_summaries(
             )
     else:
         # Fallback: one aggregate row for tests and the empty-list state.
-        peak_actions: list[ResourceAction] = []
+        peak_actions: list[ResourceAction] = ["load"]
         if runtime.radar_h5_loaded:
             peak_actions.append("generate")
         if runtime.radar_peak_loaded:

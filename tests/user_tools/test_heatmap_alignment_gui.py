@@ -4075,6 +4075,30 @@ def test_resources_window_has_generate_and_import_buttons(qapplication: QApplica
     assert hasattr(rw, "import_peak_series_button")
 
 
+def test_resources_window_peak_aggregate_row_enables_load(qapplication: QApplication) -> None:
+    """The empty Radar Peak row must allow importing peak series from row details."""
+    window = HeatmapAlignmentWindow()
+    window._show_resources_window()
+    rw = window._resources_window
+    assert rw is not None
+    window._refresh_resources_ui()
+
+    peak_row = next(
+        (
+            row
+            for row in range(rw.table.rowCount())
+            if rw._summaries[row].kind == "radar_peak" and not rw._summaries[row].series_id
+        ),
+        None,
+    )
+    assert peak_row is not None
+
+    rw._select_table_row(peak_row)
+    rw._update_details_for_selection()
+
+    assert rw.load_button.isEnabled()
+
+
 def test_import_peak_series_from_path_appends(
     qapplication: QApplication,
     tmp_path: Path,
