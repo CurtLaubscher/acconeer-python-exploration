@@ -3763,6 +3763,8 @@ def test_generate_appends_without_replacing_existing_series(
             session_idx = 0; group_idx = 0; entry_idx = 0
         path = Path("/tmp/x.h5")
         subsweep_idx = 0
+        def frame_at_seconds(self, time_s):
+            return 0, np.zeros((1, 1, 3), dtype=np.uint8)
 
     window.heatmap_source = _FakeH5Source()
     window.session.heatmap_track = HeatmapTrack(path=str(Path("/tmp/x.h5")))
@@ -4278,8 +4280,8 @@ def test_reload_peak_series_from_session_restores_persisted_fields(
         )
     ]
     monkeypatch.setattr(
-        "sparse_iq_peak_distance_core.load_peak_distance_json",
-        lambda path: _FakeDatasource(),
+        "heatmap_alignment_gui.import_peak_distance_json_for_heatmap",
+        lambda path, heatmap_source: (_FakeDatasource(), ()),
     )
     monkeypatch.setattr(window, "_refresh_signal_plot", lambda: None)
     monkeypatch.setattr(window, "_refresh_resources_ui", lambda: None)
@@ -4295,6 +4297,65 @@ def test_reload_peak_series_from_session_restores_persisted_fields(
     assert restored.heatmap_selected is True
     assert restored.json_path == json_path
     assert window._heatmap_peak_selector_id == restored.series_id
+
+
+def test_reload_peak_series_from_session_refreshes_detection_strip(
+    qapplication: QApplication,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    json_path = tmp_path / "session_peaks.json"
+    json_path.write_text("{}", encoding="utf-8")
+    ratio = np.array([0.25, 1.5, 0.75], dtype=np.float64)
+    metadata = PeakDistanceMetadata(
+        source_path=str(json_path),
+        source_name=json_path.name,
+        session_index=0,
+        group_index=0,
+        entry_index=0,
+        sensor_id=1,
+        subsweep_index=0,
+        source_frame_count=1,
+        source_duration_s=0.1,
+        ticks_per_second=1000,
+        threshold=650.0,
+        peak_extraction_method="sum_velocity",
+        zero_velocity_bin_index=3,
+        zero_velocity_m_s=0.0,
+    )
+
+    class _FakeDatasource:
+        measurements = (
+            FramePeakMeasurement(0, 0, 0.0, None, STATUS_DETECTED, 1.2, 1.2, 700.0, ratio),
+        )
+
+    _FakeDatasource.metadata = metadata
+
+    window = HeatmapAlignmentWindow()
+    window.heatmap_source = object()  # type: ignore[assignment]
+    window.session.peak_series = [
+        PeakSeriesSessionEntry(
+            path=str(json_path),
+            display_name="restored peaks",
+            color="#f59e0b",
+            visible=True,
+            heatmap_selected=True,
+        )
+    ]
+    captured: list[np.ndarray | None] = []
+    monkeypatch.setattr(window, "_current_heatmap_frame_index", lambda: 0)
+    monkeypatch.setattr(window._detection_strip, "set_detection_ratio", captured.append)
+    monkeypatch.setattr(
+        "heatmap_alignment_gui.import_peak_distance_json_for_heatmap",
+        lambda path, heatmap_source: (_FakeDatasource(), ()),
+    )
+    monkeypatch.setattr(window, "_refresh_signal_plot", lambda: None)
+    monkeypatch.setattr(window, "_refresh_resources_ui", lambda: None)
+    monkeypatch.setattr(window, "_update_heatmap_peak_selector", lambda: None)
+
+    window._reload_peak_series_from_session()
+
+    assert np.array_equal(captured[-1], ratio)
 
 
 # ---------------------------------------------------------------------------

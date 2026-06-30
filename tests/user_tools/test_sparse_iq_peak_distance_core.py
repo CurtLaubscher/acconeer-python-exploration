@@ -185,6 +185,18 @@ def test_json_roundtrip_preserves_metadata_and_measurements(tmp_path: Path) -> N
     assert loaded.measurements[1].candidate_peak_distance_m == pytest.approx(0.9)
 
 
+def test_json_roundtrip_preserves_detection_ratio(tmp_path: Path) -> None:
+    output_path = tmp_path / "peaks.json"
+    ratio = np.array([0.2, 1.5, 0.8], dtype=np.float64)
+    result = _sample_export_result()
+    result.measurements[0].detection_ratio = ratio
+
+    write_peak_distance_json(result, output_path)
+    loaded = load_peak_distance_json(output_path)
+
+    assert np.array_equal(loaded.measurements[0].detection_ratio, ratio)
+
+
 def test_peak_distance_document_shape() -> None:
     document = peak_distance_document(_sample_export_result())
     assert document["format"] == PEAK_DISTANCE_FORMAT

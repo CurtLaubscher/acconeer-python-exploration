@@ -1189,8 +1189,6 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.timeline_view.update()
 
     def _reload_peak_series_from_session(self) -> None:
-        from sparse_iq_peak_distance_core import load_peak_distance_json
-
         self._peak_series_list = []
         for entry in self.session.peak_series:
             json_path_text = entry.path
@@ -1207,7 +1205,10 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
                 continue
 
             try:
-                datasource = load_peak_distance_json(json_path)
+                datasource, warnings = import_peak_distance_json_for_heatmap(
+                    json_path,
+                    self.heatmap_source,
+                )
             except Exception as exc:
                 message = f"Could not reload peak-distance JSON: {exc}"
                 self._set_resource_reload_error("radar_peak", message)
@@ -1223,6 +1224,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
                 color=entry.color or None,
                 visible=entry.visible,
                 heatmap_selected=entry.heatmap_selected,
+                warnings=tuple(warnings),
             )
             self._peak_series_list.append(series)
             self._set_resource_reload_error("radar_peak", None)
