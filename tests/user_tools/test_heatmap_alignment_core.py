@@ -482,6 +482,18 @@ def test_timeline_view_bounds_s_adds_padding() -> None:
     assert bounds[1] > 10.0
 
 
+def test_timeline_view_bounds_s_uses_blank_default_without_resources() -> None:
+    bounds = timeline_view_bounds_s(
+        heatmap_duration_s=0.0,
+        camera_duration_s=0.0,
+        camera_offset_s=0.0,
+        leg2_duration_s=0.0,
+        leg2_offset_s=0.0,
+    )
+
+    assert bounds == pytest.approx((0.0, 60.0))
+
+
 def test_alignment_session_defaults_missing_viewport_visibility_settings(tmp_path: Path) -> None:
     camera_path = tmp_path / "camera.mp4"
     heatmap_path = tmp_path / "truth.h5"

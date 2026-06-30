@@ -278,6 +278,59 @@ The system SHALL represent camera video time, H5 heatmap time, and loaded offset
 - **WHEN** the user drags the H5 duration bar and no non-H5 offset-bearing track is loaded
 - **THEN** the system does not change the shared current time, visible timeline x-limits, or persisted alignment state
 
+### Requirement: Preview synchronization preserves timeline x-range by default
+The heatmap alignment GUI SHALL preserve the current shared timeline x-range during preview synchronization unless the caller explicitly requests a range reset. Preview synchronization that updates camera frames, heatmap frames, viewport previews, export overlay previews, current-time indicators, signal plots, resource rows, labels, or source-resolution viewport state SHALL NOT recompute the shared x-range by default.
+
+#### Scenario: Plain preview refresh preserves zoom
+- **WHEN** the workbench performs a preview refresh after the user has zoomed or panned the shared x-range
+- **THEN** the shared x-range remains unchanged
+
+#### Scenario: Source-resolution viewport result preserves zoom
+- **WHEN** a source-resolution viewport worker result arrives after the user has zoomed or panned the shared x-range
+- **THEN** the shared x-range remains unchanged
+
+#### Scenario: Render and viewport display changes preserve zoom
+- **WHEN** the user changes color limits, viewport corners, viewport visibility settings, export overlay settings, heatmap peak marker selection, Leg2 signal kind, or plotted signal visibility
+- **THEN** the shared x-range remains unchanged
+
+### Requirement: Resource mutations preserve timeline x-range
+Resource load, reload, replace, unload, and background completion SHALL update resource state and displayed data without changing the current shared x-range. This applies to Camera Video, Radar Raw (H5), Radar Peak series, and Leg2 MAT resources. Clearing all resources while the current session remains open SHALL also preserve the current shared x-range.
+
+#### Scenario: H5 load completion preserves zoom
+- **WHEN** a Radar Raw (H5) background load completes after the user has zoomed or panned the shared x-range
+- **THEN** the shared x-range remains unchanged
+
+#### Scenario: Camera load completion preserves zoom
+- **WHEN** a Camera Video background load completes after the user has zoomed or panned the shared x-range
+- **THEN** the shared x-range remains unchanged
+
+#### Scenario: Resource unload preserves zoom
+- **WHEN** the user unloads Camera Video, Radar Raw (H5), Radar Peak series, or Leg2 MAT resources
+- **THEN** the shared x-range remains unchanged
+
+#### Scenario: Clear all resources preserves zoom
+- **WHEN** the user clears all resources while keeping the current session open
+- **THEN** the shared x-range remains unchanged
+
+### Requirement: Session lifecycle controls timeline x-range resets
+Opening or loading a session SHALL recompute the shared x-range from that session's resource domain and SHALL use the same behavior whether the workbench previously had no session resources or a different session loaded. Closing the session or resetting to a new empty session SHALL reset the shared x-range to the blank/default range `0..60 s`. The system SHALL NOT persist the current shared x-range in alignment session JSON as part of this behavior.
+
+#### Scenario: Open session recomputes range
+- **WHEN** the user opens an alignment session
+- **THEN** the shared x-range recomputes from the opened session's loaded or requested resource domain
+
+#### Scenario: Open session from populated workbench uses same range behavior
+- **WHEN** the user opens an alignment session while another session or resources are already loaded
+- **THEN** the shared x-range behavior matches opening the same session from an empty workbench
+
+#### Scenario: Close session resets to blank range
+- **WHEN** the user closes the current session and returns to an untitled empty workbench
+- **THEN** the shared x-range resets to `0..60 s`
+
+#### Scenario: Session save omits shared x-range
+- **WHEN** the user saves an alignment session after zooming or panning
+- **THEN** the saved session does not persist the current shared x-range
+
 ### Requirement: Manual playback preview
 The system SHALL provide basic playback controls for previewing the aligned camera video and rendered heatmap together without requiring MVP audio playback.
 
@@ -960,85 +1013,73 @@ The system SHALL present each resource row with scan-friendly status, visual ide
 ### Requirement: Resources window actions
 The system SHALL allow users to manage resources from the Resources window.
 
-#### Scenario: Load empty resource slot
+#### Scenario: Load unloaded resource
 - **WHEN** the user selects an unloaded primary resource row and invokes its load action
-- **THEN** the system opens the appropriate file picker and loads the selected resource type using the same validation behavior as the existing interactive load path
+- **THEN** the system opens the appropriate file picker and starts loading that resource into the selected slot
 
 #### Scenario: Replace loaded resource
 - **WHEN** the user selects a loaded primary resource row and invokes its load or replace action
-- **THEN** the system opens the appropriate file picker and replaces that resource only after the new file validates successfully
+- **THEN** the system clears the currently active resource from that slot before starting the replacement load, presents the target as pending/loading, and does not allow the previous resource to remain active while the target is pending
 
 #### Scenario: Import peak series from Resources window
 - **WHEN** the user invokes Import Peak Series from the Resources window
-- **THEN** the system opens a peak-distance JSON file picker and appends each accepted import as a new peak series resource
+- **THEN** the system opens the appropriate file picker and appends the imported peak series as a separate resource row after validation
 
 #### Scenario: Generate peak series from Resources window
-- **WHEN** Radar Raw (H5) is loaded and the user invokes Generate Peak Series from the Resources window
-- **THEN** the system opens the Generate Peak Series dialog and appends a new generated peak series when the dialog is confirmed
+- **WHEN** Radar Raw (H5) is loaded, no H5 load or replacement is pending, and the user invokes Generate Peak Series from the Resources window
+- **THEN** the system opens the Generate Peak Series dialog for the active loaded H5 resource
 
-#### Scenario: Unload selected resource
+#### Scenario: Unload optional resource row
 - **WHEN** the user selects a loaded optional resource row and invokes its unload action
-- **THEN** the system removes that resource from the current session without changing unrelated resources
+- **THEN** the system clears that resource row without unloading unrelated resources
 
-#### Scenario: Unload selected peak series
-- **WHEN** the user unloads a peak series resource row
-- **THEN** the system removes only that peak series and updates Signals plotting and rendered-heatmap marker selection as needed
-
-#### Scenario: Unload primary resource
+#### Scenario: Unload primary resource row
 - **WHEN** the user selects a loaded Camera Video or Radar Raw (H5) row and invokes its unload action
-- **THEN** the system clears the selected primary resource and also clears or disables only the preview, timeline, signal, or export state that directly depends on that primary resource
+- **THEN** the system clears that primary resource slot and dependent preview state without unloading unrelated resources that remain valid independently
 
-#### Scenario: Unload camera without clearing radar resources
+#### Scenario: Unload camera preserves independent radar resources
 - **WHEN** the user unloads Camera Video while Radar Raw (H5), peak series resources, or Leg2 MAT resources are loaded
 - **THEN** the system clears camera-dependent preview, timeline, viewport, and export state while preserving the loaded radar and Leg2 resources that remain valid
 
-#### Scenario: Unload radar raw without clearing optional signal resources
+#### Scenario: Unload H5 preserves independent signal resources
 - **WHEN** the user unloads Radar Raw (H5) while peak series resources or Leg2 MAT resources are loaded
 - **THEN** the system clears radar-H5-dependent rendered heatmap and radar timeline state while preserving loaded peak series and Leg2 MAT resources as signal resources when their loaded data remains available
 
-#### Scenario: Display optional signal resources without radar raw
+#### Scenario: Signal resources without H5
 - **WHEN** Radar Raw (H5) is not loaded and peak series resources, Leg2 MAT, both, or neither are loaded
 - **THEN** the Signals and Timeline areas display whichever optional signal resources are loaded against the shared absolute zero-time coordinate
 
 #### Scenario: Reload remembered resource
 - **WHEN** the user selects a resource row with a remembered path and invokes reload
-- **THEN** the system attempts to load that remembered path using the same validation behavior as the corresponding resource load path
+- **THEN** the system loads the remembered path using the same immediate-clear behavior as load or replace when the requested identity differs from the active resource identity
 
 #### Scenario: Reveal resource path
-- **WHEN** the user selects a resource row with an existing file path and invokes reveal path
-- **THEN** the system opens the platform file browser at that path or its containing folder when supported
-
-#### Scenario: Label file manager action clearly
 - **WHEN** the Resources window or resource row context menu shows the action that opens the platform file browser
-- **THEN** the action is labeled "Show in File Manager"
+- **THEN** invoking that action reveals the resource path without changing loaded resources
 
-#### Scenario: Inspect resource warnings
-- **WHEN** the user selects a resource row with warnings or load errors
-- **THEN** the system provides a way to inspect the warning or error details without relying only on the status bar
-
-#### Scenario: Use row context menu actions
-- **WHEN** the user opens a context menu on a resource row
+#### Scenario: Context menu mirrors row actions
+- **WHEN** the user opens a Resources row context menu
 - **THEN** the context menu offers the same applicable row-scoped actions as the Resources window selected-row controls, including save, save as, reload, and unload for peak series rows when applicable
 
-#### Scenario: Omit double-click load behavior
-- **WHEN** the user double-clicks a resource row
+#### Scenario: Ignore empty table action target
+- **WHEN** the user invokes a row action without a selected applicable resource row
 - **THEN** the system is not required to start a load or replace action
 
-#### Scenario: Clear all resources
+#### Scenario: Clear all resources asks confirmation
 - **WHEN** the user invokes Clear All Resources from the Resources window and confirms the action
-- **THEN** the system unloads Camera Video, Radar Raw (H5), all peak series resources, Leg2 MAT, and dependent preview, timeline, and signal state while preserving the current session path
+- **THEN** the system clears loaded resources and dependent preview state while preserving the current session path
 
-#### Scenario: Confirm clear all resources
+#### Scenario: Clear all resources message
 - **WHEN** the user invokes Clear All Resources
 - **THEN** the confirmation message tells the user that loaded resources will be cleared and the current session path will be kept
 
-#### Scenario: Confirm clear all with unsaved generated peaks
+#### Scenario: Clear all resources with unsaved peaks
 - **WHEN** unsaved generated peak series exist and the user invokes Clear All Resources
-- **THEN** the confirmation message also states that unsaved generated peak data will be lost
+- **THEN** the system includes the unsaved peak-loss warning in the confirmation flow before discarding those peaks
 
 #### Scenario: Save peak series from Resources window
-- **WHEN** the user selects a peak series row and invokes Save while it is unsaved, or Save As while peak data is in memory
-- **THEN** the system writes canonical peak-distance JSON according to the save-peaks requirements for that selected row
+- **WHEN** a peak series row with in-memory measurements is selected and the user invokes Save or Save As
+- **THEN** the system writes that selected peak series to canonical peak-distance JSON according to the peak-save requirements
 
 ### Requirement: Session dirty state
 The system SHALL use a single session-level dirty flag. Any **user-initiated** change to persisted `AlignmentSession` fields SHALL mark the session dirty, including viewport geometry, render and preprocess settings, timeline offset, export overlay settings and visibility, signal plot view settings, optional datasource paths and signal kind, and resource changes from explicit user load, unload, replace, import, or clear actions.
@@ -1229,7 +1270,9 @@ The system SHALL run long-running heatmap alignment resource preparation work wi
 - **THEN** the system schedules them with bounded concurrency so proxy generation and file loading do not create unbounded background work
 
 ### Requirement: Pending resource replacement
-The system SHALL treat a pending same-resource load request as replaceable by the newest request while preserving the last successfully loaded resource until a replacement succeeds.
+The system SHALL treat a pending same-resource load request as replaceable by the newest request while clearing any differing active resource from that slot before the new load begins.
+
+The system SHALL NOT keep a previous active resource available as the active value for a slot while a different resource identity is pending for that slot. If the pending load fails, the slot SHALL remain empty or failed and SHALL NOT automatically restore the previous active resource.
 
 #### Scenario: Supersede pending camera load
 - **WHEN** a camera video load is pending and the user starts loading another camera video
@@ -1243,24 +1286,32 @@ The system SHALL treat a pending same-resource load request as replaceable by th
 - **WHEN** a superseded camera load finishes after a newer camera load request has started
 - **THEN** the system ignores the stale result and does not apply it to the session or previews
 
-#### Scenario: Restore previous camera after replacement failure
-- **WHEN** a loaded camera video exists and a replacement camera video fails to load
-- **THEN** the system keeps the previous camera video as the active camera resource and restores its usable preview state
+#### Scenario: Clear previous camera before replacement
+- **WHEN** a loaded camera video exists and the user starts loading a different camera video
+- **THEN** the system clears the previous camera video, camera preview, camera-dependent viewport/export state, and active camera metadata before the replacement load is presented as pending
 
-#### Scenario: Restore previous H5 after replacement failure
-- **WHEN** a loaded Radar Raw (H5) recording exists and a replacement H5 recording fails to load
-- **THEN** the system keeps the previous H5 recording as the active H5 resource and restores its usable rendered-heatmap state
+#### Scenario: Clear previous H5 before replacement
+- **WHEN** a loaded Radar Raw (H5) recording exists and the user starts loading a different H5 recording or a different H5 selection identity
+- **THEN** the system clears the previous active H5 recording, rendered heatmap state, H5 axes/hover caches, H5 timeline metadata, and H5-derived action readiness before the replacement load is presented as pending
+
+#### Scenario: Failed camera replacement leaves slot failed
+- **WHEN** a loaded camera video existed and a replacement camera video fails to load
+- **THEN** the system leaves the camera slot empty or failed, reports the failure in the Resources window, and does not automatically restore the previous camera video
+
+#### Scenario: Failed H5 replacement leaves slot failed
+- **WHEN** a loaded Radar Raw (H5) recording existed and a replacement H5 recording fails to load
+- **THEN** the system leaves the H5 slot empty or failed, reports the failure in the Resources window, and does not automatically restore the previous H5 recording
 
 #### Scenario: Apply session resource path after replacement success
 - **WHEN** a pending resource replacement finishes successfully
 - **THEN** the system updates the active session resource path and metadata to the replacement resource
 
-#### Scenario: Do not apply failed resource path to session
+#### Scenario: Do not apply failed resource path to loaded metadata
 - **WHEN** a pending resource replacement fails or is superseded
-- **THEN** the system does not update the active session resource path to the failed or superseded file
+- **THEN** the system does not present the failed or superseded file as a loaded resource, while it may keep the failed target path visible as the row's pending or failed request for retry/reload purposes
 
 #### Scenario: Preserve viewport for same-size camera replacement
-- **WHEN** a replacement camera video successfully loads with the same source dimensions as the previously active camera video
+- **WHEN** a replacement camera video successfully loads with the same source dimensions as the previously active camera video and the previous viewport geometry was preserved as session state
 - **THEN** the system preserves the existing native viewport corner coordinates for the replacement camera
 
 #### Scenario: Handle different-size camera replacement viewport
@@ -1347,9 +1398,9 @@ The system SHALL present pending, failed, and cancelled resource work in the Res
 - **WHEN** a cancellable resource job is pending
 - **THEN** the Resources window provides a row-scoped cancel action for that pending job
 
-#### Scenario: Cancel pending replacement
-- **WHEN** the user cancels a pending replacement for a resource that already has an active loaded value
-- **THEN** the system leaves the active loaded resource in effect and restores its usable preview state
+#### Scenario: Cancel pending load
+- **WHEN** the user cancels a pending load or replacement for a resource slot
+- **THEN** the system cancels or abandons the pending target, leaves the slot empty or failed if a different active resource was already cleared for that target, and does not restore stale data automatically
 
 #### Scenario: Cancel wins before late success is applied
 - **WHEN** the user cancels a pending resource job before that job's completion is accepted on the GUI thread
@@ -1357,7 +1408,7 @@ The system SHALL present pending, failed, and cancelled resource work in the Res
 
 #### Scenario: Show cancellation promptly
 - **WHEN** the user cancels a pending resource job whose underlying file operation cannot stop immediately
-- **THEN** the Resources window and affected previews show cancelling or restored state promptly without waiting for the underlying operation to return
+- **THEN** the Resources window and affected previews show cancelling or cleared state promptly without waiting for the underlying operation to return
 
 #### Scenario: Do not stack placeholder and loading text
 - **WHEN** a preview panel is showing a loading overlay and does not yet have target content to display
@@ -1372,7 +1423,7 @@ The system SHALL cancel or abandon active camera and H5 resource jobs safely whe
 
 #### Scenario: Abandon jobs on window close
 - **WHEN** the main workbench window closes while a camera or H5 resource job is pending
-- **THEN** the system cancels or abandons those jobs, clears pending job state and replacement backups, and does not apply their completions to a later workbench instance
+- **THEN** the system cancels or abandons those jobs, clears pending job state and stale slot state, and does not apply their completions to a later workbench instance
 
 #### Scenario: Ignore worker completion after manager deletion
 - **WHEN** a background resource worker completes after the workbench has been closed and its job manager QObject is no longer alive
@@ -1384,7 +1435,7 @@ The system SHALL cancel or abandon active camera and H5 resource jobs safely whe
 
 #### Scenario: Abandon jobs on session close
 - **WHEN** the user closes the current session and returns to an empty workbench while a camera or H5 resource job is pending
-- **THEN** the system cancels or abandons those jobs, clears pending job state and replacement backups, and does not apply their completions to the reset session
+- **THEN** the system cancels or abandons those jobs, clears pending job state and stale slot state, and does not apply their completions to the reset session
 
 #### Scenario: Discard stale pending job payloads
 - **WHEN** a superseded or otherwise ignored camera or H5 job completion would leave a pending result payload unused
@@ -1394,21 +1445,25 @@ The system SHALL cancel or abandon active camera and H5 resource jobs safely whe
 - **WHEN** the user opens a saved alignment session and reconciliation selects **keep** for a camera or H5 slot with an in-flight job for the same resource identity
 - **THEN** the system does not abandon that in-flight job solely because of the session open
 
-### Requirement: H5 replacement clears peak datasource
-The system SHALL preserve peak series resources as optional signal resources when a different Radar Raw (H5) resource successfully replaces the current H5 recording.
+### Requirement: H5 replacement preserves independent peak series
+The system SHALL preserve peak series resources as optional signal resources when a different Radar Raw (H5) resource is requested or successfully replaces the current H5 recording, unless a session-open reconciliation or explicit clear/unload operation removes those peak resources.
 
-The system SHALL NOT automatically unload all peak series solely because H5 changed. Imported peak series validation warnings SHALL remain row-specific. Generated peak series that remain after H5 replacement SHALL continue to behave as signal resources until the user unloads them, clears all resources, or opens another session.
+The system SHALL NOT automatically unload all peak series solely because H5 changed. Imported peak series validation warnings SHALL remain row-specific. Generated peak series that remain after H5 replacement SHALL continue to behave as signal resources until the user unloads them, clears all resources, or opens another session. H5-derived actions SHALL NOT use preserved peak series or stale H5 data as a substitute for an active loaded H5 resource.
 
-#### Scenario: Preserve peak series after different H5 replacement
+#### Scenario: Preserve peak series after H5 replacement request
+- **WHEN** a new H5 recording is requested while peak series resources exist
+- **THEN** the system may preserve existing peak series resources as independent signal resources while clearing the previous active H5 recording and H5-dependent rendered heatmap state
+
+#### Scenario: Preserve peak series after different H5 replacement succeeds
 - **WHEN** a new H5 recording successfully replaces a different active H5 recording while peak series resources exist
 - **THEN** the system preserves the existing peak series resources and updates H5-dependent rendered heatmap state for the new H5
 
-#### Scenario: Preserve peaks after failed H5 replacement
+#### Scenario: Preserve peaks after failed H5 replacement without restoring H5
 - **WHEN** a pending H5 replacement fails before becoming active
-- **THEN** the system preserves the previously active H5 recording and all peak series resources
+- **THEN** the system preserves independent peak series resources but leaves the H5 slot empty or failed instead of restoring the previously active H5 recording
 
 ### Requirement: Export availability during resource jobs
-The system SHALL keep synced video export outside the background resource job system for this change while preventing export from starting with unstable required resources.
+The system SHALL keep synced video export outside the background resource job system for this change while preventing export from starting with unstable or unavailable required resources.
 
 #### Scenario: Disable export while camera is loading
 - **WHEN** a camera video load or replacement is pending
@@ -1422,12 +1477,12 @@ The system SHALL keep synced video export outside the background resource job sy
 - **WHEN** camera video and Radar Raw (H5) resources are loaded and no required export resource is in an in-flight load, replace, or cancel phase
 - **THEN** the system allows synced video export according to the existing export requirements
 
-#### Scenario: Allow export after failed replacement with restore
-- **WHEN** a camera or H5 replacement fails and the system restores the previously active required resources
-- **THEN** the system allows synced video export when camera and H5 are loaded and no required export resource is in an in-flight job phase
+#### Scenario: Failed replacement does not allow export without resources
+- **WHEN** a camera or H5 replacement fails after clearing the previous active required resource
+- **THEN** the system keeps synced video export disabled until the required camera and H5 resources are loaded again
 
 #### Scenario: Failed job status does not alone block export
-- **WHEN** a resource job slot is in `failed` phase because the last load attempt failed but required export resources remain loaded and stable
+- **WHEN** a resource job slot is in `failed` phase because the last load attempt failed but required export resources are loaded and stable
 - **THEN** starting synced video export is not disabled solely because of the failed job phase
 
 #### Scenario: Preserve existing export progress behavior
@@ -1440,30 +1495,30 @@ The system SHALL load a saved alignment session by reconciling the session JSON 
 Reconciliation SHALL iterate a registered set of resource slots (camera video, Radar Raw (H5), Radar Peak (JSON), and Leg2 MAT for the current workbench) and, for each slot, SHALL choose one of:
 
 - **keep** - the desired resource identity from the session matches the active loaded resource or an in-flight resource job for that slot; the system does not close, unload, abandon, or restart load work for that slot solely because of the session open
-- **load** - the session requests a non-empty resource identity that does not match the active or in-flight identity, or the slot is not loaded; the system loads or replaces that resource using the same behavior as an explicit resource load or reload, including pending replacement and restore-on-failure when a different resource was already loaded, without pre-clearing the active resource before starting the load
+- **load** - the session requests a non-empty resource identity that does not match the active or in-flight identity, or the slot is not loaded; the system clears any differing active resource for that slot before starting load work for the desired identity
 - **unload** - the session requests an empty path for that slot but the slot is still loaded; the system clears or unloads that resource so it does not remain active from a previous session
 
 Resource identity SHALL be determined from session content, not from the session JSON file path on disk. Camera identity is the camera video path. H5 identity is the H5 file path plus session, group, entry, and subsweep indices. Radar Peak (JSON) identity is the peak-distance JSON path. Leg2 MAT identity is the Leg2 MAT path. An empty path means the slot is not requested.
 
 After resource reconciliation, the system SHALL always apply non-resource session fields from the JSON snapshot, including viewport geometry, render settings, timeline state, export overlay, signal plot view, preview state, Leg2 offset, and selected Leg2 signal kind, even when one or more resource slots used **keep**.
 
-Before starting H5 **load** actions, the system SHALL assign the desired session snapshot to the active workbench session object so H5 selection indices read during `load_h5_from_path` match the session being opened.
+Before starting H5 **load** actions, the system SHALL assign the desired session snapshot to the active workbench session object so H5 selection indices read during H5 load setup match the session being opened.
 
 #### Scenario: Keep camera slot when identity matches
 - **WHEN** the user loads a saved alignment session whose camera video path matches the active camera resource or matches the target of an in-flight camera resource job
 - **THEN** the system reconciles the camera slot as **keep** and does not close the active camera source or abandon the in-flight camera job solely because of the session open
 
 #### Scenario: Keep H5 slot when identity matches
-- **WHEN** the user loads a saved alignment session whose H5 path and selection indices match the active H5 resource or match the target of an in-flight H5 resource job
+- **WHEN** the user loads a saved alignment session whose H5 path and selection indices match the active H5 resource or match the target of an in-flight H5 job
 - **THEN** the system reconciles the H5 slot as **keep** and does not close the active H5 source or abandon the in-flight H5 job solely because of the session open
 
 #### Scenario: Load camera when session requests different identity
 - **WHEN** the user loads a saved alignment session whose camera video path differs from the active camera resource and in-flight camera job target
-- **THEN** the system reconciles the camera slot as **load** and starts camera loading using the same background camera resource job behavior as an explicit camera load or reload
+- **THEN** the system clears the active camera slot and starts camera loading using the same background camera resource job behavior as an explicit camera load or reload
 
 #### Scenario: Load H5 when session requests different identity
 - **WHEN** the user loads a saved alignment session whose H5 path or selection indices differ from the active H5 resource and in-flight H5 job target
-- **THEN** the system reconciles the H5 slot as **load** and starts H5 loading using the same background H5 resource job behavior as an explicit H5 load or reload
+- **THEN** the system clears the active H5 slot and starts H5 loading using the same background H5 resource job behavior as an explicit H5 load or reload
 
 #### Scenario: Unload camera when session omits path
 - **WHEN** the user loads a saved alignment session whose camera video path is empty and a camera video resource is still loaded from a previous session
@@ -1493,22 +1548,34 @@ Before starting H5 **load** actions, the system SHALL assign the desired session
 - **WHEN** the user opens a saved alignment session that requires background camera or H5 resource work for slots reconciled as **load**
 - **THEN** the system keeps the main window and Resources window responsive on the GUI thread while that work continues, using the same non-blocking resource job presentation as explicit resource loads
 
+#### Scenario: Failed session-open load leaves slot failed
+- **WHEN** the user opens a saved alignment session that requests a different camera or H5 resource and that resource fails to load
+- **THEN** the corresponding slot remains empty or failed and the system does not restore the previous session's resource for that slot
+
 ### Requirement: In-app peak generation from loaded H5
 The system SHALL allow the user to generate peak series measurements from the currently loaded Radar Raw (H5) recording without leaving the heatmap alignment workbench.
 
-Generation SHALL use the loaded H5 session, group, entry, and subsweep indices from the current heatmap track. Generation SHALL process all frames. Generation SHALL use the selected algorithm and threshold from the Generate Peak Series dialog.
+Generation SHALL use the loaded H5 session, group, entry, and subsweep indices from the active current heatmap track. Generation SHALL process all frames. Generation SHALL use the selected algorithm and threshold from the Generate Peak Series dialog.
 
-The system SHALL enable Generate Peak Series only when Radar Raw (H5) is loaded. The system SHALL disable or omit Generate Peak Series when H5 is not loaded.
+The system SHALL enable Generate Peak Series only when Radar Raw (H5) is loaded, the active loaded H5 identity matches the current H5 slot/session request, and no H5 load, replacement, cancellation, or waiting job is pending. The system SHALL disable or omit Generate Peak Series when H5 is not loaded or when the H5 slot is pending, failed, cancelling, waiting, or stale.
 
 Generation SHALL run synchronously on the GUI thread for v1 unless implementation measurements show that background execution is necessary, and SHALL reuse the in-memory H5 record rather than re-opening the file through `export_peak_distances()`.
 
 #### Scenario: Generate peaks from loaded H5
-- **WHEN** Radar Raw (H5) is loaded and the user confirms the Generate Peak Series dialog
-- **THEN** the system computes peak-distance measurements from the loaded H5 and appends them as a new unsaved peak series resource without writing JSON to disk
+- **WHEN** Radar Raw (H5) is loaded, no H5 load or replacement is pending, and the user confirms the Generate Peak Series dialog
+- **THEN** the system computes peak-distance measurements from the active loaded H5 and appends them as a new unsaved peak series resource without writing JSON to disk
 
 #### Scenario: Generate disabled without H5
 - **WHEN** Radar Raw (H5) is not loaded
 - **THEN** the system does not offer a usable Generate Peak Series action
+
+#### Scenario: Generate disabled while H5 load is pending
+- **WHEN** a Radar Raw (H5) load, replacement, waiting, or cancellation job is pending
+- **THEN** the system does not offer a usable Generate Peak Series action and does not generate peaks from any previous H5 data
+
+#### Scenario: Generate blocked from stale H5 object
+- **WHEN** an old H5 object or peak series remains in memory but the active H5 slot no longer matches the current requested H5 identity
+- **THEN** Generate Peak Series does not use that stale object and reports or presents H5 as unavailable for generation
 
 #### Scenario: Refresh UI after generate
 - **WHEN** peak generation completes successfully

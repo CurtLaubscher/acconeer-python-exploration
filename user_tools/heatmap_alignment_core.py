@@ -461,6 +461,8 @@ def timeline_view_bounds_s(
     heatmap_duration_s = max(0.0, heatmap_duration_s)
     camera_duration_s = max(0.0, camera_duration_s)
     leg2_duration_s = max(0.0, leg2_duration_s)
+    if heatmap_duration_s <= 0.0 and camera_duration_s <= 0.0 and leg2_duration_s <= 0.0:
+        return 0.0, 60.0
     camera_start_s = -camera_offset_s
     leg2_start_s = -leg2_offset_s
     track_starts = [0.0]

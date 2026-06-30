@@ -98,6 +98,9 @@ Possible directions:
 - Add an explicit timeline x-range view mode so the Timeline does not always auto-fit all tracks. Users should be able to pan and zoom the Timeline x-axis manually, with actions to return to auto-fit behavior when desired.
 - Add a Premiere-like timeline navigator for zooming and panning the shared time axis: wheel or pinch zoom centered on the cursor or playhead, click-drag on empty timeline background to pan, optional zoom slider or `+` / `-` controls, and `Fit All` / `Fit Overlap` / fit-to-selection actions. Consider a compact overview strip or scrollbar under the track rows that shows the full recording span with the current visible window highlighted, similar to an NLE sequence navigator.
 - Keep Timeline zoom/pan synchronized with the Signals plot when x-axis Timeline mode is active so scrubbing and alignment review stay visually aligned.
+- Add off-screen indicators for timeline tracks that are completely outside the current visible x-range. Camera, H5, and Leg2 track bars could show small left/right edge arrows colored to match their track bars, so users can tell that a loaded or replaced resource exists outside the current view after preserving zoom.
+- Make off-screen track indicators clickable, similar to the existing off-screen playhead indicator, so clicking one pans the shared x-range to bring that track into view while preserving the current zoom span.
+- Bug: the timeline playhead vertical line can remain visible and hoverable when the playhead time is outside the visible x-range, even though the Signals playhead is correctly not shown. The timeline should hide the out-of-range playhead line and disable its hover/drag hit-test, leaving only the off-screen playhead indicator interactive.
 - Add optional overlap shading if users still find the two-track relationship confusing.
 - Improve tick density and labels as zoom changes.
 - Clean up the timeline time-axis presentation: move tick labels farther from vertical grid lines so decimal points remain legible, remove the horizontal time-axis line if the grid already communicates scale, and remove the redundant "Time" label.
@@ -113,6 +116,7 @@ Possible directions:
 - While dragging timeline bars, render the rendered heatmap continuously (or at a configured preview FPS) instead of waiting for mouse release. All corresponding resources (camera frames, overlay previews, peak markers) should update live while dragging so alignment feedback is immediate. Architect this with cancellable, worker-threaded preview jobs that coalesce updates and prioritize the latest requested time; provide a fast LQ interactive path and defer expensive HQ work until the drag settles.
 - During playback, target source/native FPS or a configured preview FPS, but skip or coalesce preview work if the previous refresh is still busy so playback does not fall into an inconsistent slow cadence.
 - Avoid rebuilding or refreshing signal plot data on current-time-only updates; moving the current-time indicator should be enough unless plotted data or x/y range state changed.
+- Investigate and optimize major Signals plot performance issues with large H5-derived series, especially when many points are visible after generating peaks. One concrete repro is loading `L:\Member Folders\Curt Laubscher\Data\260626 Radar stairs parallel sensor\sync2.json`, waiting for resources to load, generating peaks with the `dist normalized` algorithm and default params, then panning/zooming the linked x-axis; the `sum v` algorithm with the default `650` threshold is also slow, though less severe. Possible directions: downsample plotted series by visible x-range, use level-of-detail curves, decimate no-detection/candidate segments, avoid rebuilding unchanged curves, and add plot-stage timing before choosing an implementation.
 - Consider a fast interactive preview path plus a higher-quality settled path, similar to the source-resolution viewport preview direction.
 - Bug: changing the Leg2 ultrasonic signal kind between raw and filtered currently makes the viewport drop to low quality and then return to high quality. Viewport quality invalidation should only be triggered by changes that affect the camera/viewport/heatmap preview; choosing which ultrasonic signal to plot in Signals should not invalidate or refresh viewport quality.
 - Bug: resizing splitter handles can sometimes make the viewport preview refresh, drop to low quality, or otherwise behave like viewport-relevant state changed. Layout-only resizing should not invalidate viewport quality or trigger unnecessary source-resolution viewport work unless the displayed preview size genuinely requires a repaint.
@@ -131,6 +135,7 @@ Possible directions:
 The workbench should grow a small default transport set, then later mature into a configurable bindings surface suitable for a general sync tool.
 
 Near-term transport examples (exact keys can change, but aim for NLE-adjacent defaults):
+- `Ctrl+O`: open an alignment session
 - Space: play/pause
 - Left/Right arrow: step by one frame or a small time increment on the shared timeline
 - Home/End: jump to the visible or full timeline range start/end
@@ -200,6 +205,7 @@ Initial algorithm direction:
 Future in-app direction:
 - Add a "Calculate Peaks" action in the heatmap app/workbench after the standalone script proves useful.
 - Reuse the same non-GUI peak calculation core from the script.
+- Guard in-app peak generation while the H5 resource is still loading or stale. A suspected bug needs investigation: triggering peak generation before the H5 background load finishes may appear to do something, possibly using stale data or partial/unready resource state. The action should likely be disabled, queued explicitly, or fail with a clear message until the current H5 resource is ready and matches the requested generation inputs.
 - Consider threshold preview only if repeated CLI runs are too slow or awkward.
 - Add a visibility toggle for the imported/generated peak datasource.
 - If batch peak generation becomes slow in real datasets, consider adding parallel execution to the standalone script after measuring memory use and HDF5 behavior. Keep the first batch implementation serial but structured around independent per-file jobs so a future `--jobs` option does not require redesigning input/output planning.
@@ -432,6 +438,7 @@ Possible directions:
 - Keep deleting partial output files on failure or cancellation.
 - Make export failure messages more specific when camera decode, H5 render, or video writer setup fails.
 - Add focused handling for camera files with unreadable trailing frames or inconsistent reported frame counts.
+- Investigate intermittent OpenCV/FFmpeg stream timeout warnings during camera decode, such as `[ WARN:0@35.157] global cap_ffmpeg_impl.hpp:453 _opencv_ffmpeg_interrupt_callback Stream timeout triggered after 35140.265000 ms`, which can cause the camera video to become completely desynchronized. This has been observed before, appears inconsistent, and is not specific to the stale-resource-state work. Possible directions: detect timeout warnings or failed seeks/reads, invalidate the affected preview/proxy state, retry with bounded backoff, surface a clear decode warning, and consider PyAV/FFmpeg decode experiments if OpenCV seeking proves unreliable for these files.
 - Add export smoke tests using synthetic videos with known bad/missing frames.
 - Keep codec-specific work measurement-driven rather than switching decode/export stacks speculatively.
 

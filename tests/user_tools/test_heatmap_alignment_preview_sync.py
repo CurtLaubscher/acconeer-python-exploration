@@ -20,6 +20,7 @@ def test_preview_sync_plan_defaults() -> None:
     assert plan.camera_access_hint == "auto"
     assert plan.invalidate_source_resolution is True
     assert plan.timeline_visible_range_s is None
+    assert plan.recompute_timeline_range is False
     assert plan.refresh_signal_data is True
 
 
@@ -28,12 +29,14 @@ def test_preview_sync_plan_custom_values() -> None:
         camera_access_hint="scrub",
         invalidate_source_resolution=False,
         timeline_visible_range_s=(1.0, 2.0),
+        recompute_timeline_range=True,
         refresh_signal_data=False,
     )
 
     assert plan.camera_access_hint == "scrub"
     assert plan.invalidate_source_resolution is False
     assert plan.timeline_visible_range_s == (1.0, 2.0)
+    assert plan.recompute_timeline_range is True
     assert plan.refresh_signal_data is False
 
 
@@ -55,9 +58,12 @@ class _RecordingPreviewHost:
         self,
         *,
         timeline_visible_range_s: tuple[float, float] | None,
+        recompute_timeline_range: bool,
         refresh_signal_data: bool,
     ) -> None:
-        self.calls.append(f"timeline:{timeline_visible_range_s}:{refresh_signal_data}")
+        self.calls.append(
+            f"timeline:{timeline_visible_range_s}:{recompute_timeline_range}:{refresh_signal_data}"
+        )
 
     def _sync_heatmap_truth_preview(self) -> tuple[int | None, np.ndarray | None]:
         self.calls.append("truth")
@@ -94,7 +100,7 @@ def test_run_preview_sync_runs_stages_in_order() -> None:
         "invalidate",
         "camera:scrub",
         "corners",
-        "timeline:(1.0, 2.0):False",
+        "timeline:(1.0, 2.0):False:False",
         "truth",
         "overlay:7:True",
         "viewport:True:True",

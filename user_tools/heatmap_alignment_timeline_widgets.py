@@ -159,7 +159,7 @@ class TimelineRangeModel(QtCore.QObject):
     def __init__(self, parent: QtCore.QObject | None = None) -> None:
         super().__init__(parent)
         self._range_start_s = 0.0
-        self._range_end_s = 1.0
+        self._range_end_s = 60.0
         self._camera_duration_s = 0.0
         self._heatmap_duration_s = 0.0
         self._camera_offset_s = 0.0
