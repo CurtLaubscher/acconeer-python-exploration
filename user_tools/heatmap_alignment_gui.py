@@ -2006,7 +2006,6 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             )
             previous_corners = self._camera_replacement_backup.viewport_corners
         self.session.camera_track = result.camera_track
-        self.session.timeline.current_time_s = 0.0
         resolved_corners = resolve_replacement_viewport_corners(
             existing_corners=previous_corners,
             previous_native_size=previous_size,

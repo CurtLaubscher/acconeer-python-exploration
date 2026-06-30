@@ -1801,6 +1801,56 @@ def test_apply_camera_job_result_resets_incompatible_viewport(
     assert window.session.viewport.corners == [[1.0, 1.0], [2.0, 1.0], [2.0, 2.0], [1.0, 2.0]]
 
 
+def test_apply_camera_job_result_preserves_timeline_state(
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from heatmap_alignment_core import ProxyVideoResult, VideoProbe
+    from heatmap_alignment_resource_jobs import CameraResourceJobResult
+
+    window = HeatmapAlignmentWindow()
+    window.session.timeline.current_time_s = 12.345
+    window.session.timeline.offset_s = 5.5
+
+    class _FakeCameraSource:
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        "heatmap_alignment_gui.CameraVideoSource",
+        lambda path: _FakeCameraSource(),
+    )
+    monkeypatch.setattr(window, "_initialize_default_export_overlay_if_needed", lambda: None)
+    monkeypatch.setattr(window, "_load_current_camera_frame", lambda access_hint="auto": None)
+    monkeypatch.setattr(window, "_refresh_camera_view_corners", lambda: None)
+    monkeypatch.setattr(window, "_native_viewport_corners", lambda: None)
+    monkeypatch.setattr(window, "_initialize_default_viewport_corners_native", lambda: None)
+
+    result = CameraResourceJobResult(
+        source_path=Path("/tmp/new.mp4"),
+        proxy_result=ProxyVideoResult(
+            source_path=Path("/tmp/new.mp4"),
+            display_path=Path("/tmp/new.mp4"),
+            source_probe=VideoProbe(
+                path=Path("/tmp/new.mp4"),
+                fps=30.0,
+                frame_count=900,
+                duration_s=30.0,
+                width=640,
+                height=480,
+            ),
+            proxy_path=None,
+            state="original",
+        ),
+        camera_track=CameraTrack(path="/tmp/new.mp4", fps=30.0, duration_s=30.0, frame_count=900),
+    )
+
+    window._apply_camera_job_result(result)
+
+    assert window.session.timeline.current_time_s == pytest.approx(12.345)
+    assert window.session.timeline.offset_s == pytest.approx(5.5)
+
+
 # ---------------------------------------------------------------------------
 # Session reconcile integration tests (tasks 4.1–4.7)
 # ---------------------------------------------------------------------------
