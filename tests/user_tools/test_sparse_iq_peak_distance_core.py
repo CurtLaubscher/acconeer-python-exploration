@@ -32,6 +32,8 @@ from sparse_iq_peak_distance_core import (  # noqa: E402
     reduced_measurements_to_dataframe,
     PEAK_EXTRACTION_METHOD_SUM_VELOCITY,
     PEAK_EXTRACTION_METHOD_ZERO_VELOCITY_SLICE,
+    PEAK_SELECTION_METHOD_NEAREST_ISLAND,
+    PEAK_SELECTION_METHOD_STRONGEST_PEAK,
     strongest_peak_after_sum_over_velocity,
     strongest_peak_in_zero_velocity_slice,
     validate_peak_distance_import,
@@ -106,6 +108,25 @@ def test_strongest_peak_exports_distance_when_above_threshold() -> None:
     assert peak_ratio == pytest.approx(1.5)
 
 
+def test_strongest_peak_exports_distance_when_equal_to_threshold() -> None:
+    dvm = np.zeros((3, 5), dtype=np.float64)
+    dvm[1, 3] = 500.0
+    distances_m = np.array([0.4, 0.8, 1.2, 1.6, 2.0])
+
+    status, candidate_peak_distance_m, peak_distance_m, peak_ratio, _ = (
+        strongest_peak_after_sum_over_velocity(
+            dvm,
+            distances_m,
+            threshold=500.0,
+        )
+    )
+
+    assert status == STATUS_DETECTED
+    assert candidate_peak_distance_m == pytest.approx(1.6)
+    assert peak_distance_m == pytest.approx(1.6)
+    assert peak_ratio == pytest.approx(1.0)
+
+
 def test_strongest_peak_preserves_candidate_when_below_threshold() -> None:
     dvm = np.ones((2, 3), dtype=np.float64) * 100.0
     distances_m = np.array([0.5, 1.0, 1.5])
@@ -122,6 +143,65 @@ def test_strongest_peak_preserves_candidate_when_below_threshold() -> None:
     assert candidate_peak_distance_m == pytest.approx(0.5)
     assert peak_distance_m is None
     assert peak_ratio == pytest.approx(200.0 / DEFAULT_PEAK_THRESHOLD)
+
+
+def test_nearest_island_selects_near_island_peak_instead_of_far_strongest_peak() -> None:
+    dvm = np.array([[0.0, 110.0, 105.0, 20.0, 900.0]], dtype=np.float64)
+    distances_m = np.array([0.0, 0.1, 0.2, 0.3, 0.4])
+
+    status, candidate_peak_distance_m, peak_distance_m, peak_ratio, _ = (
+        strongest_peak_after_sum_over_velocity(
+            dvm,
+            distances_m,
+            threshold=100.0,
+            selection_method=PEAK_SELECTION_METHOD_NEAREST_ISLAND,
+            bridge_gap_m=0.0,
+        )
+    )
+
+    assert status == STATUS_DETECTED
+    assert candidate_peak_distance_m == pytest.approx(0.1)
+    assert peak_distance_m == pytest.approx(0.1)
+    assert peak_ratio == pytest.approx(1.1)
+
+
+def test_nearest_island_bridges_one_distance_bin_gap_by_default_width() -> None:
+    dvm = np.array([[0.0, 110.0, 20.0, 150.0, 20.0, 20.0, 900.0]], dtype=np.float64)
+    distances_m = np.array([0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6])
+
+    status, candidate_peak_distance_m, peak_distance_m, peak_ratio, _ = (
+        strongest_peak_after_sum_over_velocity(
+            dvm,
+            distances_m,
+            threshold=100.0,
+            selection_method=PEAK_SELECTION_METHOD_NEAREST_ISLAND,
+            bridge_gap_m=0.1,
+        )
+    )
+
+    assert status == STATUS_DETECTED
+    assert candidate_peak_distance_m == pytest.approx(0.3)
+    assert peak_distance_m == pytest.approx(0.3)
+    assert peak_ratio == pytest.approx(1.5)
+
+
+def test_nearest_island_does_not_bridge_gap_larger_than_bridge_setting() -> None:
+    dvm = np.array([[0.0, 110.0, 20.0, 150.0]], dtype=np.float64)
+    distances_m = np.array([0.0, 0.1, 0.2, 0.3])
+
+    _, candidate_peak_distance_m, peak_distance_m, peak_ratio, _ = (
+        strongest_peak_after_sum_over_velocity(
+            dvm,
+            distances_m,
+            threshold=100.0,
+            selection_method=PEAK_SELECTION_METHOD_NEAREST_ISLAND,
+            bridge_gap_m=0.05,
+        )
+    )
+
+    assert candidate_peak_distance_m == pytest.approx(0.1)
+    assert peak_distance_m == pytest.approx(0.1)
+    assert peak_ratio == pytest.approx(1.1)
 
 
 def test_elapsed_time_seconds_uses_first_tick_as_zero() -> None:
@@ -143,6 +223,8 @@ def _sample_export_result() -> PeakDistanceExportResult:
         ticks_per_second=100,
         threshold=DEFAULT_PEAK_THRESHOLD,
         peak_extraction_method=PEAK_EXTRACTION_METHOD_SUM_VELOCITY,
+        selection_method=PEAK_SELECTION_METHOD_NEAREST_ISLAND,
+        bridge_gap_m=0.01,
         zero_velocity_bin_index=4,
         zero_velocity_m_s=0.0,
     )
@@ -203,6 +285,8 @@ def test_peak_distance_document_shape() -> None:
     assert document["version"] == PEAK_DISTANCE_VERSION
     assert document["metadata"]["sensor_id"] == 1
     assert document["metadata"]["peak_extraction_method"] == PEAK_EXTRACTION_METHOD_SUM_VELOCITY
+    assert document["metadata"]["selection_method"] == PEAK_SELECTION_METHOD_NEAREST_ISLAND
+    assert document["metadata"]["bridge_gap_m"] == pytest.approx(0.01)
     assert document["measurements"][1]["absolute_time"] is None
     assert document["measurements"][1]["peak_distance_m"] is None
 
@@ -211,10 +295,14 @@ def test_load_peak_distance_json_defaults_legacy_peak_extraction_method(tmp_path
     output_path = tmp_path / "legacy.json"
     document = peak_distance_document(_sample_export_result())
     del document["metadata"]["peak_extraction_method"]
+    del document["metadata"]["selection_method"]
+    del document["metadata"]["bridge_gap_m"]
     output_path.write_text(json.dumps(document), encoding="utf-8")
 
     loaded = load_peak_distance_json(output_path)
     assert loaded.metadata.peak_extraction_method == PEAK_EXTRACTION_METHOD_SUM_VELOCITY
+    assert loaded.metadata.selection_method == PEAK_SELECTION_METHOD_STRONGEST_PEAK
+    assert loaded.metadata.bridge_gap_m == pytest.approx(0.0)
 
 
 def test_reduced_csv_has_only_measurement_columns(tmp_path: Path) -> None:
@@ -317,18 +405,34 @@ def test_reduced_measurements_to_dataframe_uses_stable_column_order() -> None:
 # add-multi-peak-series: algorithm label constants and config field
 # ---------------------------------------------------------------------------
 
+
 def test_algorithm_label_constants():
-    from sparse_iq_peak_distance_core import ALGORITHM_LABEL_SUM_VELOCITY, ALGORITHM_LABEL_ZERO_VELOCITY_SLICE
+    from sparse_iq_peak_distance_core import (
+        ALGORITHM_LABEL_SUM_VELOCITY,
+        ALGORITHM_LABEL_ZERO_VELOCITY_SLICE,
+    )
+
     assert ALGORITHM_LABEL_SUM_VELOCITY == "sum v"
     assert ALGORITHM_LABEL_ZERO_VELOCITY_SLICE == "v0 slice"
 
+
 def test_peak_algorithm_registry():
-    from sparse_iq_peak_distance_core import PEAK_ALGORITHM_REGISTRY, PEAK_EXTRACTION_METHOD_SUM_VELOCITY, PEAK_EXTRACTION_METHOD_ZERO_VELOCITY_SLICE
+    from sparse_iq_peak_distance_core import (
+        PEAK_ALGORITHM_REGISTRY,
+        PEAK_EXTRACTION_METHOD_SUM_VELOCITY,
+        PEAK_EXTRACTION_METHOD_ZERO_VELOCITY_SLICE,
+    )
+
     assert PEAK_EXTRACTION_METHOD_SUM_VELOCITY in PEAK_ALGORITHM_REGISTRY
     assert PEAK_EXTRACTION_METHOD_ZERO_VELOCITY_SLICE in PEAK_ALGORITHM_REGISTRY
 
+
 def test_export_config_default_method():
-    from sparse_iq_peak_distance_core import PeakDistanceExportConfig, PEAK_EXTRACTION_METHOD_SUM_VELOCITY
+    from sparse_iq_peak_distance_core import (
+        PeakDistanceExportConfig,
+        PEAK_EXTRACTION_METHOD_SUM_VELOCITY,
+    )
+
     config = PeakDistanceExportConfig(
         h5_path=Path("x.h5"), session_idx=0, group_idx=0, entry_idx=0, subsweep_idx=0
     )

@@ -28,6 +28,8 @@ ResourceAction = Literal[
     "save",
     "save_as",
 ]
+
+
 @dataclass(frozen=True)
 class ResourceSummary:
     """Scan-friendly summary for one heatmap alignment resource slot."""
@@ -71,6 +73,8 @@ class AlignmentResourceRuntime:
     peak_measurement_count: int | None = None
     leg2_valid_segment_count: int | None = None
     leg2_sample_count: int | None = None
+    radar_distance_bin_width_m: float | None = None
+    radar_velocity_bin_width_m_s: float | None = None
     peaks_dirty: bool = False
     reload_errors: tuple[tuple[ResourceKind, str], ...] = ()
     load_warnings: tuple[tuple[ResourceKind, str], ...] = ()
@@ -136,7 +140,13 @@ def _resource_actions(
     job: ResourceJobPresentation | None = None,
 ) -> tuple[ResourceAction, ...]:
     actions: list[ResourceAction] = []
-    if job is not None and job.phase in ("pending", "loading", "building", "waiting", "cancelling"):
+    if job is not None and job.phase in (
+        "pending",
+        "loading",
+        "building",
+        "waiting",
+        "cancelling",
+    ):
         if job.cancellable:
             actions.append("cancel")
         if status in ("loaded", "warning"):
@@ -272,6 +282,13 @@ def build_alignment_resource_summaries(
             f"{session.heatmap_track.fps:.3f} fps, "
             f"{session.heatmap_track.duration_s:.3f} s"
         )
+        bin_details: list[str] = []
+        if runtime.radar_distance_bin_width_m is not None:
+            bin_details.append(f"distance bin {runtime.radar_distance_bin_width_m:.6g} m")
+        if runtime.radar_velocity_bin_width_m_s is not None:
+            bin_details.append(f"velocity bin {runtime.radar_velocity_bin_width_m_s:.6g} m/s")
+        if bin_details:
+            h5_details = f"{h5_details}\n{', '.join(bin_details)}"
     elif h5_path:
         h5_details = "Remembered H5 path is not currently loaded."
     summaries.append(

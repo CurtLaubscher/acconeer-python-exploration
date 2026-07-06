@@ -303,6 +303,52 @@ def test_single_file_execution_keeps_legacy_success_output(
     assert "Batch summary" not in captured.out
 
 
+def test_single_file_execution_passes_selection_options(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    src = tmp_path / "single.h5"
+    _touch_h5(src)
+    captured_configs = []
+
+    monkeypatch.setattr(
+        "export_sparse_iq_peak_distances.resolve_selection_indices",
+        lambda **_: (0, 0, 0, 0),
+    )
+
+    def fake_export_peak_distances(config) -> _FakeResult:
+        captured_configs.append(config)
+        return _FakeResult(measurements=(_FakeMeasurement(status="detected"),))
+
+    monkeypatch.setattr(
+        "export_sparse_iq_peak_distances.export_peak_distances",
+        fake_export_peak_distances,
+    )
+    monkeypatch.setattr(
+        "export_sparse_iq_peak_distances.write_peak_distance_json",
+        lambda _result, output_path: output_path.write_text("{}", encoding="utf-8"),
+    )
+
+    import export_sparse_iq_peak_distances as cli  # noqa: E402
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "prog",
+            str(src),
+            "--selection-method",
+            "nearest_island",
+            "--bridge-gap-m",
+            "0.0125",
+        ],
+    )
+
+    cli.main()
+
+    assert captured_configs[0].selection_method == "nearest_island"
+    assert captured_configs[0].bridge_gap_m == pytest.approx(0.0125)
+
+
 def test_batch_execution_continues_after_failure_and_summarizes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

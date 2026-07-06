@@ -17,6 +17,7 @@ from sparse_iq_heatmap_common import (
     HeatmapAxes,
     HeatmapRecord,
     distance_velocity_map,
+    distance_bin_width_m,
     elapsed_time_seconds,
     heatmap_axes,
     load_heatmap_record,
@@ -34,6 +35,9 @@ PEAK_EXTRACTION_METHOD_SUM_VELOCITY = "sum_velocity"
 PEAK_EXTRACTION_METHOD_ZERO_VELOCITY_SLICE = "zero_velocity_slice"
 PEAK_EXTRACTION_METHOD_DISTANCE_NORMALIZED = "distance_normalized"
 
+PEAK_SELECTION_METHOD_STRONGEST_PEAK = "strongest_peak"
+PEAK_SELECTION_METHOD_NEAREST_ISLAND = "nearest_island"
+
 DEFAULT_DIST_NORM_THRESHOLD_MAX = 1250.0
 DEFAULT_DIST_NORM_THRESHOLD_MIN = 300.0
 DEFAULT_DIST_NORM_REFERENCE_DISTANCE_M = 0.700
@@ -45,6 +49,12 @@ PEAK_ALGORITHM_REGISTRY = {
     PEAK_EXTRACTION_METHOD_SUM_VELOCITY: ALGORITHM_LABEL_SUM_VELOCITY,
     PEAK_EXTRACTION_METHOD_ZERO_VELOCITY_SLICE: ALGORITHM_LABEL_ZERO_VELOCITY_SLICE,
     PEAK_EXTRACTION_METHOD_DISTANCE_NORMALIZED: ALGORITHM_LABEL_DISTANCE_NORMALIZED,
+}
+SELECTION_LABEL_STRONGEST_PEAK = "strongest peak"
+SELECTION_LABEL_NEAREST_ISLAND = "nearest island"
+PEAK_SELECTION_METHOD_REGISTRY = {
+    PEAK_SELECTION_METHOD_STRONGEST_PEAK: SELECTION_LABEL_STRONGEST_PEAK,
+    PEAK_SELECTION_METHOD_NEAREST_ISLAND: SELECTION_LABEL_NEAREST_ISLAND,
 }
 
 STATUS_DETECTED: Literal["detected"] = "detected"
@@ -77,6 +87,8 @@ class PeakDistanceExportConfig:
     every_n: int = 1
     max_frames: int | None = None
     peak_extraction_method: str = PEAK_EXTRACTION_METHOD_SUM_VELOCITY
+    selection_method: str = PEAK_SELECTION_METHOD_STRONGEST_PEAK
+    bridge_gap_m: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -163,6 +175,8 @@ class DetectionMetadata:
     threshold_max: float = DEFAULT_DIST_NORM_THRESHOLD_MAX
     threshold_min: float = DEFAULT_DIST_NORM_THRESHOLD_MIN
     reference_distance_m: float = DEFAULT_DIST_NORM_REFERENCE_DISTANCE_M
+    selection_method: str = PEAK_SELECTION_METHOD_STRONGEST_PEAK
+    bridge_gap_m: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -260,10 +274,108 @@ def _strongest_peak_from_ratio_profile(
     peak_bin = int(np.argmax(ratio_profile))
     peak_ratio = float(ratio_profile[peak_bin])
     candidate_distance_m = float(distances_m[peak_bin])
-    if peak_ratio <= 1.0:
+    if peak_ratio < 1.0:
         return STATUS_NO_DETECTION, candidate_distance_m, None, peak_ratio, ratio_profile
 
     return STATUS_DETECTED, candidate_distance_m, candidate_distance_m, peak_ratio, ratio_profile
+
+
+def _above_threshold_runs(ratio_profile: np.ndarray) -> list[tuple[int, int]]:
+    above = ratio_profile >= 1.0
+    if not bool(np.any(above)):
+        return []
+
+    indices = np.flatnonzero(above)
+    split_points = np.flatnonzero(np.diff(indices) > 1) + 1
+    return [(int(run[0]), int(run[-1])) for run in np.split(indices, split_points) if len(run) > 0]
+
+
+def _merge_runs_by_distance_gap(
+    runs: list[tuple[int, int]],
+    distances_m: np.ndarray,
+    *,
+    bridge_gap_m: float,
+) -> list[tuple[int, int]]:
+    if not runs:
+        return []
+
+    epsilon = max(abs(bridge_gap_m), distance_bin_width_m(distances_m), 1.0) * 1e-9
+    merged: list[tuple[int, int]] = [runs[0]]
+    for start, end in runs[1:]:
+        previous_start, previous_end = merged[-1]
+        local_bin_width_m = float(
+            np.median(np.diff(distances_m[previous_end : start + 1]))
+            if start > previous_end
+            else distance_bin_width_m(distances_m)
+        )
+        gap_m = max(float(distances_m[start] - distances_m[previous_end] - local_bin_width_m), 0.0)
+        if gap_m <= bridge_gap_m + epsilon:
+            merged[-1] = (previous_start, end)
+        else:
+            merged.append((start, end))
+
+    return merged
+
+
+def _nearest_island_from_ratio_profile(
+    ratio_profile: np.ndarray,
+    distances_m: np.ndarray,
+    *,
+    bridge_gap_m: float,
+) -> tuple[str, float, float | None, float, np.ndarray]:
+    """Select the nearest above-threshold island, then report its strongest bin."""
+    if ratio_profile.ndim != 1:
+        msg = f"Expected 1-D distance profile, got shape {ratio_profile.shape!r}."
+        raise ValueError(msg)
+    if len(ratio_profile) != len(distances_m):
+        msg = (
+            f"Distance profile length {len(ratio_profile)} does not match "
+            f"distance axis length {len(distances_m)}."
+        )
+        raise ValueError(msg)
+
+    peak_bin = int(np.argmax(ratio_profile))
+    peak_ratio = float(ratio_profile[peak_bin])
+    candidate_distance_m = float(distances_m[peak_bin])
+    runs = _merge_runs_by_distance_gap(
+        _above_threshold_runs(ratio_profile),
+        distances_m,
+        bridge_gap_m=max(bridge_gap_m, 0.0),
+    )
+    if not runs:
+        return STATUS_NO_DETECTION, candidate_distance_m, None, peak_ratio, ratio_profile
+
+    start, end = runs[0]
+    island_peak_bin = start + int(np.argmax(ratio_profile[start : end + 1]))
+    island_peak_ratio = float(ratio_profile[island_peak_bin])
+    island_peak_distance_m = float(distances_m[island_peak_bin])
+    return (
+        STATUS_DETECTED,
+        island_peak_distance_m,
+        island_peak_distance_m,
+        island_peak_ratio,
+        ratio_profile,
+    )
+
+
+def _select_peak_from_ratio_profile(
+    ratio_profile: np.ndarray,
+    distances_m: np.ndarray,
+    *,
+    selection_method: str,
+    bridge_gap_m: float,
+) -> tuple[str, float, float | None, float, np.ndarray]:
+    if selection_method == PEAK_SELECTION_METHOD_STRONGEST_PEAK:
+        return _strongest_peak_from_ratio_profile(ratio_profile, distances_m)
+    if selection_method == PEAK_SELECTION_METHOD_NEAREST_ISLAND:
+        return _nearest_island_from_ratio_profile(
+            ratio_profile,
+            distances_m,
+            bridge_gap_m=bridge_gap_m,
+        )
+
+    msg = f"Unsupported peak selection method {selection_method!r}."
+    raise ValueError(msg)
 
 
 def strongest_peak_after_sum_over_velocity(
@@ -271,6 +383,8 @@ def strongest_peak_after_sum_over_velocity(
     distances_m: np.ndarray,
     *,
     threshold: float,
+    selection_method: str = PEAK_SELECTION_METHOD_STRONGEST_PEAK,
+    bridge_gap_m: float = 0.0,
 ) -> tuple[str, float, float | None, float, np.ndarray]:
     if dvm.ndim != 2:
         msg = f"Expected 2-D distance/velocity map, got shape {dvm.shape!r}."
@@ -285,7 +399,12 @@ def strongest_peak_after_sum_over_velocity(
 
     collapsed_profile = np.sum(dvm, axis=0)
     ratio_profile = collapsed_profile / max(threshold, 1e-12)
-    return _strongest_peak_from_ratio_profile(ratio_profile, distances_m)
+    return _select_peak_from_ratio_profile(
+        ratio_profile,
+        distances_m,
+        selection_method=selection_method,
+        bridge_gap_m=bridge_gap_m,
+    )
 
 
 def strongest_peak_in_zero_velocity_slice(
@@ -294,6 +413,8 @@ def strongest_peak_in_zero_velocity_slice(
     *,
     zero_velocity_bin: int,
     threshold: float,
+    selection_method: str = PEAK_SELECTION_METHOD_STRONGEST_PEAK,
+    bridge_gap_m: float = 0.0,
 ) -> tuple[str, float, float | None, float, np.ndarray]:
     if dvm.ndim != 2:
         msg = f"Expected 2-D distance/velocity map, got shape {dvm.shape!r}."
@@ -306,7 +427,12 @@ def strongest_peak_in_zero_velocity_slice(
 
     slice_strengths = dvm[zero_velocity_bin, :]
     ratio_profile = slice_strengths / max(threshold, 1e-12)
-    return _strongest_peak_from_ratio_profile(ratio_profile, distances_m)
+    return _select_peak_from_ratio_profile(
+        ratio_profile,
+        distances_m,
+        selection_method=selection_method,
+        bridge_gap_m=bridge_gap_m,
+    )
 
 
 def strongest_peak_distance_normalized(
@@ -316,6 +442,8 @@ def strongest_peak_distance_normalized(
     threshold_max: float,
     threshold_min: float,
     reference_distance_m: float,
+    selection_method: str = PEAK_SELECTION_METHOD_STRONGEST_PEAK,
+    bridge_gap_m: float = 0.0,
 ) -> tuple[str, float, float | None, float, np.ndarray]:
     if dvm.ndim != 2:
         msg = f"Expected 2-D distance/velocity map, got shape {dvm.shape!r}."
@@ -334,7 +462,12 @@ def strongest_peak_distance_normalized(
         threshold_min,
     )
     ratio_profile = collapsed_profile / np.maximum(threshold_curve, 1e-12)
-    return _strongest_peak_from_ratio_profile(ratio_profile, distances_m)
+    return _select_peak_from_ratio_profile(
+        ratio_profile,
+        distances_m,
+        selection_method=selection_method,
+        bridge_gap_m=bridge_gap_m,
+    )
 
 
 def _absolute_time_value(record_timestamp: str, elapsed_s: float) -> str | None:
@@ -350,17 +483,21 @@ def _extract_strongest_peak(
     distances_m: np.ndarray,
     *,
     peak_extraction_method: str,
+    selection_method: str = PEAK_SELECTION_METHOD_STRONGEST_PEAK,
     zero_velocity_bin: int,
     threshold: float,
     threshold_max: float = DEFAULT_DIST_NORM_THRESHOLD_MAX,
     threshold_min: float = DEFAULT_DIST_NORM_THRESHOLD_MIN,
     reference_distance_m: float = DEFAULT_DIST_NORM_REFERENCE_DISTANCE_M,
+    bridge_gap_m: float = 0.0,
 ) -> tuple[str, float, float | None, float, np.ndarray]:
     if peak_extraction_method == PEAK_EXTRACTION_METHOD_SUM_VELOCITY:
         return strongest_peak_after_sum_over_velocity(
             dvm,
             distances_m,
             threshold=threshold,
+            selection_method=selection_method,
+            bridge_gap_m=bridge_gap_m,
         )
     if peak_extraction_method == PEAK_EXTRACTION_METHOD_ZERO_VELOCITY_SLICE:
         return strongest_peak_in_zero_velocity_slice(
@@ -368,6 +505,8 @@ def _extract_strongest_peak(
             distances_m,
             zero_velocity_bin=zero_velocity_bin,
             threshold=threshold,
+            selection_method=selection_method,
+            bridge_gap_m=bridge_gap_m,
         )
     if peak_extraction_method == PEAK_EXTRACTION_METHOD_DISTANCE_NORMALIZED:
         return strongest_peak_distance_normalized(
@@ -376,6 +515,8 @@ def _extract_strongest_peak(
             threshold_max=threshold_max,
             threshold_min=threshold_min,
             reference_distance_m=reference_distance_m,
+            selection_method=selection_method,
+            bridge_gap_m=bridge_gap_m,
         )
     msg = f"Unsupported peak extraction method {peak_extraction_method!r}."
     raise ValueError(msg)
@@ -389,9 +530,11 @@ def analyze_heatmap_record(
     frame_indices: list[int],
     threshold: float,
     peak_extraction_method: str = PEAK_EXTRACTION_METHOD_SUM_VELOCITY,
+    selection_method: str = PEAK_SELECTION_METHOD_STRONGEST_PEAK,
     threshold_max: float = DEFAULT_DIST_NORM_THRESHOLD_MAX,
     threshold_min: float = DEFAULT_DIST_NORM_THRESHOLD_MIN,
     reference_distance_m: float = DEFAULT_DIST_NORM_REFERENCE_DISTANCE_M,
+    bridge_gap_m: float = 0.0,
 ) -> DetectionExportResult:
     subsweep = select_subsweep(heatmap_record, subsweep_idx)
     axes = heatmap_axes(heatmap_record.metadata, heatmap_record.sensor_config, subsweep)
@@ -400,15 +543,19 @@ def analyze_heatmap_record(
     measurements: list[FrameDetectionMeasurement] = []
     for frame_index in frame_indices:
         dvm = distance_velocity_map(heatmap_record.results[frame_index].subframes[subsweep_idx])
-        status, candidate_distance_m, target_distance_m, peak_strength, detection_ratio = _extract_strongest_peak(
-            dvm,
-            axes.distances_m,
-            peak_extraction_method=peak_extraction_method,
-            zero_velocity_bin=zero_velocity.bin_index,
-            threshold=threshold,
-            threshold_max=threshold_max,
-            threshold_min=threshold_min,
-            reference_distance_m=reference_distance_m,
+        status, candidate_distance_m, target_distance_m, peak_strength, detection_ratio = (
+            _extract_strongest_peak(
+                dvm,
+                axes.distances_m,
+                peak_extraction_method=peak_extraction_method,
+                selection_method=selection_method,
+                zero_velocity_bin=zero_velocity.bin_index,
+                threshold=threshold,
+                threshold_max=threshold_max,
+                threshold_min=threshold_min,
+                reference_distance_m=reference_distance_m,
+                bridge_gap_m=bridge_gap_m,
+            )
         )
         elapsed_s = elapsed_time_seconds(
             heatmap_record.ticks,
@@ -446,6 +593,8 @@ def analyze_heatmap_record(
         ticks_per_second=heatmap_record.ticks_per_second,
         threshold=threshold,
         peak_extraction_method=peak_extraction_method,
+        selection_method=selection_method,
+        bridge_gap_m=bridge_gap_m,
         zero_velocity_bin_index=zero_velocity.bin_index,
         zero_velocity_m_s=zero_velocity.velocity_m_s,
         threshold_max=threshold_max,
@@ -475,6 +624,8 @@ def export_peak_distances(config: PeakDistanceExportConfig) -> DetectionExportRe
             frame_indices=frame_indices,
             threshold=config.threshold,
             peak_extraction_method=config.peak_extraction_method,
+            selection_method=config.selection_method,
+            bridge_gap_m=config.bridge_gap_m,
         )
     finally:
         heatmap_record.close()
@@ -497,6 +648,8 @@ def peak_distance_document(result: DetectionExportResult) -> dict[str, Any]:
             "ticks_per_second": result.metadata.ticks_per_second,
             "threshold": result.metadata.threshold,
             "peak_extraction_method": result.metadata.peak_extraction_method,
+            "selection_method": result.metadata.selection_method,
+            "bridge_gap_m": result.metadata.bridge_gap_m,
             "threshold_max": result.metadata.threshold_max,
             "threshold_min": result.metadata.threshold_min,
             "reference_distance_m": result.metadata.reference_distance_m,
@@ -556,6 +709,10 @@ def _metadata_from_dict(payload: dict[str, Any]) -> DetectionMetadata:
         "peak_extraction_method",
         PEAK_EXTRACTION_METHOD_SUM_VELOCITY,
     )
+    selection_method = payload.get(
+        "selection_method",
+        PEAK_SELECTION_METHOD_STRONGEST_PEAK,
+    )
     return DetectionMetadata(
         source_path=str(payload["source_path"]),
         source_name=str(payload["source_name"]),
@@ -569,6 +726,8 @@ def _metadata_from_dict(payload: dict[str, Any]) -> DetectionMetadata:
         ticks_per_second=int(payload["ticks_per_second"]),
         threshold=float(payload["threshold"]),
         peak_extraction_method=str(peak_extraction_method),
+        selection_method=str(selection_method),
+        bridge_gap_m=float(payload.get("bridge_gap_m", 0.0)),
         zero_velocity_bin_index=int(payload["zero_velocity_bin_index"]),
         zero_velocity_m_s=float(payload["zero_velocity_m_s"]),
         threshold_max=float(payload.get("threshold_max", DEFAULT_DIST_NORM_THRESHOLD_MAX)),

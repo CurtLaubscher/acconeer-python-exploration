@@ -18,6 +18,10 @@ from sparse_iq_peak_distance_core import (
     PEAK_EXTRACTION_METHOD_DISTANCE_NORMALIZED,
     PEAK_EXTRACTION_METHOD_SUM_VELOCITY,
     PEAK_EXTRACTION_METHOD_ZERO_VELOCITY_SLICE,
+    PEAK_SELECTION_METHOD_NEAREST_ISLAND,
+    PEAK_SELECTION_METHOD_STRONGEST_PEAK,
+    SELECTION_LABEL_NEAREST_ISLAND,
+    SELECTION_LABEL_STRONGEST_PEAK,
 )
 from heatmap_peak_distance_resource import default_generated_name
 
@@ -88,7 +92,9 @@ class ResourceColorSwatchDelegate(QtWidgets.QStyledItemDelegate):
         item_option = QtWidgets.QStyleOptionViewItem(option)
         self.initStyleOption(item_option, index)
         item_option.text = ""
-        style = option.widget.style() if option.widget is not None else QtWidgets.QApplication.style()
+        style = (
+            option.widget.style() if option.widget is not None else QtWidgets.QApplication.style()
+        )
         style.drawControl(
             QtWidgets.QStyle.ControlElement.CE_ItemViewItem,
             item_option,
@@ -287,10 +293,7 @@ class ResourcesWindow(QtWidgets.QDialog):
 
     @staticmethod
     def _configure_table_item(item: QtWidgets.QTableWidgetItem) -> None:
-        item.setFlags(
-            QtCore.Qt.ItemFlag.ItemIsSelectable
-            | QtCore.Qt.ItemFlag.ItemIsEnabled
-        )
+        item.setFlags(QtCore.Qt.ItemFlag.ItemIsSelectable | QtCore.Qt.ItemFlag.ItemIsEnabled)
 
     def _selected_table_row(self) -> int:
         selection_model = self.table.selectionModel()
@@ -337,7 +340,11 @@ class ResourcesWindow(QtWidgets.QDialog):
                 self._configure_table_item(role_item)
                 self.table.setItem(row_index, 2, role_item)
 
-                status_text = summary.status_label if summary.status_label else RESOURCE_STATUS_LABELS[summary.status]
+                status_text = (
+                    summary.status_label
+                    if summary.status_label
+                    else RESOURCE_STATUS_LABELS[summary.status]
+                )
                 if summary.job_phase not in ("idle", "superseded"):
                     status_text = RESOURCE_JOB_STATUS_LABELS[summary.job_phase]
                 status_item = QtWidgets.QTableWidgetItem(status_text)
@@ -406,10 +413,12 @@ class ResourcesWindow(QtWidgets.QDialog):
                 button.setEnabled(False)
             return
 
-        self.details_identity_label.setText(
-            f"{summary.display_name} ({summary.role})"
+        self.details_identity_label.setText(f"{summary.display_name} ({summary.role})")
+        display_status = (
+            summary.status_label
+            if summary.status_label
+            else RESOURCE_STATUS_LABELS[summary.status]
         )
-        display_status = summary.status_label if summary.status_label else RESOURCE_STATUS_LABELS[summary.status]
         self.details_status_label.setText(f"{display_status}\n{summary.details}")
         if summary.messages:
             self.details_messages_label.setText("\n".join(summary.messages))
@@ -468,15 +477,35 @@ class ResourcesWindow(QtWidgets.QDialog):
 class GenerateDetectionSeriesDialog(QtWidgets.QDialog):
     """Dialog for configuring a new generated detection series."""
 
-    def __init__(self, parent=None, *, default_threshold: float = DEFAULT_PEAK_THRESHOLD) -> None:
+    def __init__(
+        self,
+        parent=None,
+        *,
+        default_threshold: float = DEFAULT_PEAK_THRESHOLD,
+        distance_bin_width_m: float = 0.0,
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Generate Detection Series")
+        self._distance_bin_width_m = max(distance_bin_width_m, 0.0)
         layout = QtWidgets.QFormLayout(self)
         self._algo_combo = QtWidgets.QComboBox()
         self._algo_combo.addItem(ALGORITHM_LABEL_SUM_VELOCITY, PEAK_EXTRACTION_METHOD_SUM_VELOCITY)
-        self._algo_combo.addItem(ALGORITHM_LABEL_ZERO_VELOCITY_SLICE, PEAK_EXTRACTION_METHOD_ZERO_VELOCITY_SLICE)
-        self._algo_combo.addItem(ALGORITHM_LABEL_DISTANCE_NORMALIZED, PEAK_EXTRACTION_METHOD_DISTANCE_NORMALIZED)
+        self._algo_combo.addItem(
+            ALGORITHM_LABEL_ZERO_VELOCITY_SLICE, PEAK_EXTRACTION_METHOD_ZERO_VELOCITY_SLICE
+        )
+        self._algo_combo.addItem(
+            ALGORITHM_LABEL_DISTANCE_NORMALIZED, PEAK_EXTRACTION_METHOD_DISTANCE_NORMALIZED
+        )
         layout.addRow("Algorithm:", self._algo_combo)
+
+        self._selection_combo = QtWidgets.QComboBox()
+        self._selection_combo.addItem(
+            SELECTION_LABEL_STRONGEST_PEAK, PEAK_SELECTION_METHOD_STRONGEST_PEAK
+        )
+        self._selection_combo.addItem(
+            SELECTION_LABEL_NEAREST_ISLAND, PEAK_SELECTION_METHOD_NEAREST_ISLAND
+        )
+        layout.addRow("Selection:", self._selection_combo)
 
         self._threshold_spin = QtWidgets.QDoubleSpinBox()
         self._threshold_spin.setRange(0.0, 1_000_000.0)
@@ -507,23 +536,36 @@ class GenerateDetectionSeriesDialog(QtWidgets.QDialog):
         self._reference_distance_label = QtWidgets.QLabel("Reference distance (m):")
         layout.addRow(self._reference_distance_label, self._reference_distance_spin)
 
+        bridge_step_m = self._distance_bin_width_m if self._distance_bin_width_m > 0 else 0.001
+        self._bridge_gap_spin = QtWidgets.QDoubleSpinBox()
+        self._bridge_gap_spin.setRange(0.0, 100.0)
+        self._bridge_gap_spin.setDecimals(6)
+        self._bridge_gap_spin.setSingleStep(bridge_step_m)
+        self._bridge_gap_spin.setValue(bridge_step_m)
+        self._bridge_gap_label = QtWidgets.QLabel("Bridge gap (m):")
+        layout.addRow(self._bridge_gap_label, self._bridge_gap_spin)
+
         self._name_edit = QtWidgets.QLineEdit()
         layout.addRow("Name:", self._name_edit)
 
         self._algo_combo.currentIndexChanged.connect(self._on_algo_changed)
+        self._selection_combo.currentIndexChanged.connect(self._on_selection_changed)
         self._threshold_spin.valueChanged.connect(self._update_default_name)
         self._threshold_max_spin.valueChanged.connect(self._update_default_name)
         self._threshold_min_spin.valueChanged.connect(self._update_default_name)
         self._reference_distance_spin.valueChanged.connect(self._update_default_name)
+        self._bridge_gap_spin.valueChanged.connect(self._update_default_name)
 
         buttons = QtWidgets.QDialogButtonBox(
-            QtWidgets.QDialogButtonBox.StandardButton.Ok | QtWidgets.QDialogButtonBox.StandardButton.Cancel
+            QtWidgets.QDialogButtonBox.StandardButton.Ok
+            | QtWidgets.QDialogButtonBox.StandardButton.Cancel
         )
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addRow(buttons)
 
         self._on_algo_changed()
+        self._on_selection_changed()
 
     def _on_algo_changed(self) -> None:
         is_dist_norm = self._algo_combo.currentData() == PEAK_EXTRACTION_METHOD_DISTANCE_NORMALIZED
@@ -537,17 +579,35 @@ class GenerateDetectionSeriesDialog(QtWidgets.QDialog):
         self._reference_distance_spin.setVisible(is_dist_norm)
         self._update_default_name()
 
+    def _on_selection_changed(self) -> None:
+        is_nearest_island = (
+            self._selection_combo.currentData() == PEAK_SELECTION_METHOD_NEAREST_ISLAND
+        )
+        self._bridge_gap_label.setVisible(is_nearest_island)
+        self._bridge_gap_spin.setVisible(is_nearest_island)
+        self._update_default_name()
+
     def _update_default_name(self) -> None:
         algo_id = self._algo_combo.currentData()
         thresh = self._threshold_spin.value()
         ref = self._reference_distance_spin.value()
+        selection_method = self._selection_combo.currentData()
         self._name_edit.setPlaceholderText(
-            default_generated_name(algo_id, thresh, reference_distance_m=ref)
+            default_generated_name(
+                algo_id,
+                thresh,
+                reference_distance_m=ref,
+                selection_method=selection_method,
+            )
         )
 
     @property
     def algorithm_id(self) -> str:
         return self._algo_combo.currentData()
+
+    @property
+    def selection_method(self) -> str:
+        return self._selection_combo.currentData()
 
     @property
     def threshold(self) -> float:
@@ -566,12 +626,21 @@ class GenerateDetectionSeriesDialog(QtWidgets.QDialog):
         return self._reference_distance_spin.value()
 
     @property
+    def bridge_gap_m(self) -> float:
+        if self.selection_method != PEAK_SELECTION_METHOD_NEAREST_ISLAND:
+            return 0.0
+        return self._bridge_gap_spin.value()
+
+    @property
     def display_name(self) -> str:
         text = self._name_edit.text().strip()
         if text:
             return text
         return default_generated_name(
-            self.algorithm_id, self.threshold, reference_distance_m=self.reference_distance_m
+            self.algorithm_id,
+            self.threshold,
+            reference_distance_m=self.reference_distance_m,
+            selection_method=self.selection_method,
         )
 
 
@@ -662,8 +731,22 @@ class HeatmapDistanceHeader(QtWidgets.QWidget):
                 peak_right_bound = w - margin - half_peak
 
             if show_extents:
-                painter.drawText(margin, 0, w - 2 * margin, text_h, int(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter), left_text)
-                painter.drawText(margin, 0, w - 2 * margin, text_h, int(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter), right_text)
+                painter.drawText(
+                    margin,
+                    0,
+                    w - 2 * margin,
+                    text_h,
+                    int(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter),
+                    left_text,
+                )
+                painter.drawText(
+                    margin,
+                    0,
+                    w - 2 * margin,
+                    text_h,
+                    int(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter),
+                    right_text,
+                )
 
             if has_peak:
                 # Clamp peak label center to avoid running off the widget edges.
@@ -678,7 +761,14 @@ class HeatmapDistanceHeader(QtWidgets.QWidget):
 
                 # Draw peak label text in the same upper band as extent labels.
                 painter.setPen(fg)
-                painter.drawText(text_left, 0, peak_text_w + 2, text_h, int(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter), peak_text)
+                painter.drawText(
+                    text_left,
+                    0,
+                    peak_text_w + 2,
+                    text_h,
+                    int(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter),
+                    peak_text,
+                )
 
                 # Triangle always tracks true peak_x regardless of label clamping.
                 tri_tip_y = h - 1

@@ -52,6 +52,14 @@ class HeatmapAxes:
     velocity_resolution: float
 
 
+def distance_bin_width_m(distances_m: np.ndarray) -> float:
+    """Return a representative distance-bin width for a distance axis."""
+    if len(distances_m) < 2:
+        return 0.0
+
+    return float(np.median(np.diff(distances_m)))
+
+
 def recording_fps(ticks: np.ndarray, ticks_per_second: int) -> float:
     if len(ticks) < 2:
         return 1.0
@@ -156,7 +164,9 @@ def load_heatmap_record(
         raise
 
     metadata = session.extended_metadata[group_idx][sensor_id]
-    results = [extended_result[group_idx][sensor_id] for extended_result in session.extended_results]
+    results = [
+        extended_result[group_idx][sensor_id] for extended_result in session.extended_results
+    ]
     ticks = np.array([result.tick for result in results], dtype=np.int64)
     ticks_per_second = record.server_info.ticks_per_second
     fps = recording_fps(ticks, ticks_per_second)
@@ -296,7 +306,11 @@ def select_frame_indices(
 
 
 def fixed_color_level(
-    *, color_max: float | None, results: list[a121.Result], subsweep_idx: int, frame_indices: list[int]
+    *,
+    color_max: float | None,
+    results: list[a121.Result],
+    subsweep_idx: int,
+    frame_indices: list[int],
 ) -> float:
     if color_max is not None:
         return color_max
@@ -322,4 +336,8 @@ def frame_index_at_time(
 
     clamped = min(max(time_s, 0.0), heatmap_record.duration_s)
     target_tick = heatmap_record.ticks[0] + int(round(clamped * heatmap_record.ticks_per_second))
-    return int(np.searchsorted(heatmap_record.ticks, target_tick, side="left").clip(0, len(heatmap_record.ticks) - 1))
+    return int(
+        np.searchsorted(heatmap_record.ticks, target_tick, side="left").clip(
+            0, len(heatmap_record.ticks) - 1
+        )
+    )

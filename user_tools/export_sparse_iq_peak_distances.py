@@ -20,6 +20,11 @@ from typing import Literal
 from sparse_iq_heatmap_common import resolve_selection_indices
 from sparse_iq_peak_distance_core import (
     DEFAULT_PEAK_THRESHOLD,
+    PEAK_EXTRACTION_METHOD_DISTANCE_NORMALIZED,
+    PEAK_EXTRACTION_METHOD_SUM_VELOCITY,
+    PEAK_EXTRACTION_METHOD_ZERO_VELOCITY_SLICE,
+    PEAK_SELECTION_METHOD_NEAREST_ISLAND,
+    PEAK_SELECTION_METHOD_STRONGEST_PEAK,
     PeakDistanceExportConfig,
     export_peak_distances,
     write_peak_distance_csv,
@@ -252,9 +257,25 @@ def main() -> None:
     )
     parser.add_argument(
         "--method",
-        choices=("sum_velocity", "zero_velocity_slice"),
-        default="sum_velocity",
+        choices=(
+            PEAK_EXTRACTION_METHOD_SUM_VELOCITY,
+            PEAK_EXTRACTION_METHOD_ZERO_VELOCITY_SLICE,
+            PEAK_EXTRACTION_METHOD_DISTANCE_NORMALIZED,
+        ),
+        default=PEAK_EXTRACTION_METHOD_SUM_VELOCITY,
         help="Peak extraction method. Defaults to sum_velocity.",
+    )
+    parser.add_argument(
+        "--selection-method",
+        choices=(PEAK_SELECTION_METHOD_STRONGEST_PEAK, PEAK_SELECTION_METHOD_NEAREST_ISLAND),
+        default=PEAK_SELECTION_METHOD_STRONGEST_PEAK,
+        help="Peak selection method. Defaults to strongest_peak.",
+    )
+    parser.add_argument(
+        "--bridge-gap-m",
+        type=float,
+        default=0.0,
+        help="Nearest-island gap bridge distance in meters. Defaults to 0.",
     )
     parser.add_argument("--max-frames", type=int, default=None, help="Limit exported frames")
     parser.add_argument("--every-n", type=int, default=1, help="Export every Nth frame")
@@ -295,6 +316,8 @@ def main() -> None:
                 every_n=max(args.every_n, 1),
                 max_frames=args.max_frames,
                 peak_extraction_method=args.method,
+                selection_method=args.selection_method,
+                bridge_gap_m=max(args.bridge_gap_m, 0.0),
             )
             result = export_peak_distances(config)
             if export_format == "json":

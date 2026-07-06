@@ -21,6 +21,8 @@ from sparse_iq_peak_distance_core import (
     PEAK_ALGORITHM_REGISTRY,
     PEAK_EXTRACTION_METHOD_DISTANCE_NORMALIZED,
     PEAK_EXTRACTION_METHOD_SUM_VELOCITY,
+    PEAK_SELECTION_METHOD_STRONGEST_PEAK,
+    PEAK_SELECTION_METHOD_REGISTRY,
     STATUS_DETECTED,
     FrameDetectionMeasurement,
     LoadedPeakDistanceDatasource,
@@ -166,13 +168,20 @@ def build_generated_peak_series(
     threshold_max: float = DEFAULT_DIST_NORM_THRESHOLD_MAX,
     threshold_min: float = DEFAULT_DIST_NORM_THRESHOLD_MIN,
     reference_distance_m: float = DEFAULT_DIST_NORM_REFERENCE_DISTANCE_M,
+    selection_method: str = PEAK_SELECTION_METHOD_STRONGEST_PEAK,
+    bridge_gap_m: float = 0.0,
 ) -> PeakSeriesResource:
     """Create an unsaved runtime peak-series row from generated measurements."""
-    algorithm_params: dict = {"threshold": threshold}
+    algorithm_params: dict = {
+        "threshold": threshold,
+        "selection_method": selection_method,
+    }
     if algorithm_id == PEAK_EXTRACTION_METHOD_DISTANCE_NORMALIZED:
         algorithm_params["threshold_max"] = threshold_max
         algorithm_params["threshold_min"] = threshold_min
         algorithm_params["reference_distance_m"] = reference_distance_m
+    if bridge_gap_m > 0:
+        algorithm_params["bridge_gap_m"] = bridge_gap_m
     return PeakSeriesResource(
         series_id=str(uuid4()),
         display_name=display_name,
@@ -191,16 +200,19 @@ def default_generated_name(
     threshold: float,
     *,
     reference_distance_m: float = DEFAULT_DIST_NORM_REFERENCE_DISTANCE_M,
+    selection_method: str = PEAK_SELECTION_METHOD_STRONGEST_PEAK,
 ) -> str:
     """Return a human-readable default name for a generated detection series.
 
-    Examples: "v0 slice, thresh 650", "dist norm, ref 0.70m"
+    Examples: "v0 slice, strongest peak, thresh 650",
+    "dist norm, nearest island, ref 0.70m"
     """
     label = PEAK_ALGORITHM_REGISTRY.get(algorithm_id, algorithm_id)
+    selection_label = PEAK_SELECTION_METHOD_REGISTRY.get(selection_method, selection_method)
     if algorithm_id == PEAK_EXTRACTION_METHOD_DISTANCE_NORMALIZED:
-        return f"dist norm, ref {reference_distance_m:.2f}m"
+        return f"dist norm, {selection_label}, ref {reference_distance_m:.2f}m"
     thresh_int = int(threshold)
-    return f"{label}, thresh {thresh_int}"
+    return f"{label}, {selection_label}, thresh {thresh_int}"
 
 
 def default_imported_name(json_path: Path, existing_names: list[str]) -> str:
@@ -226,6 +238,8 @@ def generate_detection_series_from_heatmap_record(
     threshold_max: float = DEFAULT_DIST_NORM_THRESHOLD_MAX,
     threshold_min: float = DEFAULT_DIST_NORM_THRESHOLD_MIN,
     reference_distance_m: float = DEFAULT_DIST_NORM_REFERENCE_DISTANCE_M,
+    selection_method: str = PEAK_SELECTION_METHOD_STRONGEST_PEAK,
+    bridge_gap_m: float = 0.0,
 ) -> DetectionExportResult:
     frame_indices = list(range(len(heatmap_record.results)))
     return analyze_heatmap_record(
@@ -235,9 +249,11 @@ def generate_detection_series_from_heatmap_record(
         frame_indices=frame_indices,
         threshold=threshold,
         peak_extraction_method=peak_extraction_method,
+        selection_method=selection_method,
         threshold_max=threshold_max,
         threshold_min=threshold_min,
         reference_distance_m=reference_distance_m,
+        bridge_gap_m=bridge_gap_m,
     )
 
 
@@ -248,6 +264,8 @@ def generate_peak_distances_from_heatmap_record(
     subsweep_idx: int,
     threshold: float = DEFAULT_PEAK_THRESHOLD,
     peak_extraction_method: str = PEAK_EXTRACTION_METHOD_SUM_VELOCITY,
+    selection_method: str = PEAK_SELECTION_METHOD_STRONGEST_PEAK,
+    bridge_gap_m: float = 0.0,
 ) -> DetectionExportResult:
     frame_indices = list(range(len(heatmap_record.results)))
     return analyze_heatmap_record(
@@ -257,6 +275,8 @@ def generate_peak_distances_from_heatmap_record(
         frame_indices=frame_indices,
         threshold=threshold,
         peak_extraction_method=peak_extraction_method,
+        selection_method=selection_method,
+        bridge_gap_m=bridge_gap_m,
     )
 
 

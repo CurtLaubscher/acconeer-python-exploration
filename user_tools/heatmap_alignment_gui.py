@@ -82,7 +82,12 @@ from heatmap_alignment_resource_summaries import (
     ResourceSummary,
     build_alignment_resource_summaries,
 )
-from sparse_iq_heatmap_common import distance_velocity_map, heatmap_axes, select_subsweep
+from sparse_iq_heatmap_common import (
+    distance_bin_width_m,
+    distance_velocity_map,
+    heatmap_axes,
+    select_subsweep,
+)
 from heatmap_alignment_resource_jobs import (
     CameraResourceJobResult,
     LoadedH5ResourcePayload,
@@ -115,6 +120,7 @@ from sparse_iq_peak_distance_core import (
     DEFAULT_PEAK_THRESHOLD,
     PEAK_EXTRACTION_METHOD_SUM_VELOCITY,
     PEAK_EXTRACTION_METHOD_ZERO_VELOCITY_SLICE,
+    PEAK_SELECTION_METHOD_STRONGEST_PEAK,
     STATUS_DETECTED,
     PeakDistanceJsonImportError,
 )
@@ -584,9 +590,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             self._refresh_recent_sessions_menu()
             return
 
-        self._open_session(
-            LoadSessionPlan(session_path=session_path, prompt_for_unsaved=True)
-        )
+        self._open_session(LoadSessionPlan(session_path=session_path, prompt_for_unsaved=True))
 
     def _open_session(self, plan: LoadSessionPlan) -> bool:
         if plan.prompt_for_unsaved and not self._handle_session_transition_guard("open"):
@@ -618,9 +622,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.truth_view = ImagePreview("Rendered Heatmap")
         self.truth_view.setMinimumSize(100, 40)
         camera_group = self._wrap_group("Camera Video", self.camera_view)
-        camera_group.setMinimumHeight(
-            self._stacked_layout_minimum_height(camera_group.layout())
-        )
+        camera_group.setMinimumHeight(self._stacked_layout_minimum_height(camera_group.layout()))
         viewport_group = QtWidgets.QGroupBox("Viewport")
         viewport_layout = QtWidgets.QVBoxLayout(viewport_group)
         viewport_layout.addWidget(self.viewport_view)
@@ -777,7 +779,9 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.signal_plot.playhead_scrubbed.connect(self._signal_playhead_scrubbed)
         self.timeline_view.camera_offset_changed.connect(self._timeline_camera_offset_changed)
         self.timeline_view.leg2_offset_changed.connect(self._timeline_leg2_offset_changed)
-        self.timeline_view.h5_alignment_drag_changed.connect(self._timeline_h5_alignment_drag_changed)
+        self.timeline_view.h5_alignment_drag_changed.connect(
+            self._timeline_h5_alignment_drag_changed
+        )
         self.timeline_view.h5_alignment_drag_finished.connect(
             self._timeline_h5_alignment_drag_finished
         )
@@ -856,9 +860,8 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         visible_items = [
             layout.itemAt(index)
             for index in range(layout.count())
-            if layout.itemAt(index) is not None and not HeatmapAlignmentWindow._item_is_hidden(
-                layout.itemAt(index)
-            )
+            if layout.itemAt(index) is not None
+            and not HeatmapAlignmentWindow._item_is_hidden(layout.itemAt(index))
         ]
         if visible_items:
             height += max(0, layout.spacing()) * (len(visible_items) - 1)
@@ -1066,10 +1069,14 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         return box.exec() == QtWidgets.QMessageBox.StandardButton.Yes
 
     def _clear_peak_series(self, *, mark_dirty: bool = True, confirm: bool = True) -> None:
-        if confirm and self._any_peaks_unsaved() and not self._confirm_action_dialog(
-            title="Discard peaks",
-            question="Discard unsaved peak-distance data?",
-            accept_label="Discard",
+        if (
+            confirm
+            and self._any_peaks_unsaved()
+            and not self._confirm_action_dialog(
+                title="Discard peaks",
+                question="Discard unsaved peak-distance data?",
+                accept_label="Discard",
+            )
         ):
             return
         if mark_dirty:
@@ -1161,9 +1168,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         mat_path = Path(mat_path_text)
         if not mat_path.exists():
             self._set_resource_reload_error("leg2_mat", f"File not found: {mat_path}")
-            self.statusBar().showMessage(
-                f"Leg2 MAT not found and was not loaded: {mat_path}"
-            )
+            self.statusBar().showMessage(f"Leg2 MAT not found and was not loaded: {mat_path}")
             self._update_leg2_datasource_controls()
             self._refresh_resources_ui()
             return
@@ -1251,7 +1256,11 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         heatmap_source = self.heatmap_source
         if heatmap_source is None:
             return
-        dialog = GeneratePeakSeriesDialog(self)
+        h5_distance_bin_width_m, _ = self._active_h5_bin_widths()
+        dialog = GeneratePeakSeriesDialog(
+            self,
+            distance_bin_width_m=h5_distance_bin_width_m or 0.0,
+        )
         if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
             return
 
@@ -1264,6 +1273,12 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             "reference_distance_m",
             DEFAULT_DIST_NORM_REFERENCE_DISTANCE_M,
         )
+        selection_method = getattr(
+            dialog,
+            "selection_method",
+            PEAK_SELECTION_METHOD_STRONGEST_PEAK,
+        )
+        bridge_gap_m = getattr(dialog, "bridge_gap_m", 0.0)
         try:
             result = generate_peak_distances_from_heatmap_record(
                 heatmap_source.record,
@@ -1271,9 +1286,11 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
                 subsweep_idx=heatmap_source.subsweep_idx,
                 threshold=dialog.threshold,
                 peak_extraction_method=dialog.algorithm_id,
+                selection_method=selection_method,
                 threshold_max=threshold_max,
                 threshold_min=threshold_min,
                 reference_distance_m=reference_distance_m,
+                bridge_gap_m=bridge_gap_m,
             )
         except Exception as exc:
             QtWidgets.QApplication.restoreOverrideCursor()
@@ -1293,6 +1310,8 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             threshold_max=threshold_max,
             threshold_min=threshold_min,
             reference_distance_m=reference_distance_m,
+            selection_method=selection_method,
+            bridge_gap_m=bridge_gap_m,
         )
         self._peak_series_list.append(series)
         self._heatmap_peak_selector_id = series.series_id
@@ -1329,10 +1348,14 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         for filename in filenames:
             json_path = Path(filename)
             if json_path.suffix.lower() == ".csv":
-                QtWidgets.QMessageBox.warning(self, "Import Peak Series", self._peak_csv_rejection_message())
+                QtWidgets.QMessageBox.warning(
+                    self, "Import Peak Series", self._peak_csv_rejection_message()
+                )
                 continue
             try:
-                datasource, warnings = import_peak_distance_json_for_heatmap(json_path, self.heatmap_source)
+                datasource, warnings = import_peak_distance_json_for_heatmap(
+                    json_path, self.heatmap_source
+                )
             except ValueError as exc:
                 if isinstance(exc, PeakDistanceJsonImportError):
                     message = exc.user_message()
@@ -1383,7 +1406,9 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             self.statusBar().showMessage(self._peak_csv_rejection_message())
             return False
         try:
-            datasource, warnings = import_peak_distance_json_for_heatmap(json_path, self.heatmap_source)
+            datasource, warnings = import_peak_distance_json_for_heatmap(
+                json_path, self.heatmap_source
+            )
         except (ValueError, OSError) as exc:
             status_msg = getattr(exc, "primary_message", str(exc))
             self.statusBar().showMessage(str(status_msg))
@@ -1467,9 +1492,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
 
         if series.metadata is None:
             return
-        result = DetectionExportResult(
-            metadata=series.metadata, measurements=series.measurements
-        )
+        result = DetectionExportResult(metadata=series.metadata, measurements=series.measurements)
         try:
             write_peak_distance_json(result, output_path)
         except OSError as exc:
@@ -1481,7 +1504,9 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         series.unsaved = False
         self._mark_session_dirty()
         self._refresh_resources_ui()
-        self.statusBar().showMessage(f"Saved peak series '{series.display_name}': {output_path.name}")
+        self.statusBar().showMessage(
+            f"Saved peak series '{series.display_name}': {output_path.name}"
+        )
 
     def _update_heatmap_peak_selector(self) -> None:
         if not hasattr(self, "_heatmap_peak_combo"):
@@ -1556,13 +1581,13 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         measurements = active_peak_measurements(peak_state)
         if measurements is None:
             return None
-        measurement = next(
-            (m for m in measurements if m.frame_index == frame_idx), None
-        )
+        measurement = next((m for m in measurements if m.frame_index == frame_idx), None)
         if measurement is None or measurement.status != STATUS_DETECTED:
             # Still return detection_ratio even when no detection, so the strip renders.
             if measurement is not None:
-                ratio = measurement.detection_ratio if len(measurement.detection_ratio) > 0 else None
+                ratio = (
+                    measurement.detection_ratio if len(measurement.detection_ratio) > 0 else None
+                )
                 return (
                     None,  # type: ignore[return-value]
                     active_peak_zero_velocity_m_s(peak_state),
@@ -1592,13 +1617,15 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             self._heatmap_axes = None
             return
         subsweep = select_subsweep(self.heatmap_source.record, self.heatmap_source.subsweep_idx)
-        axes = heatmap_axes(self.heatmap_source.record.metadata, self.heatmap_source.record.sensor_config, subsweep)
-        self._heatmap_axes = axes
-        self._heatmap_distance_header.set_extent(float(axes.distances_m[0]), float(axes.distances_m[-1]))
-        v_limit = max(abs(float(axes.velocities_m_s[0])), abs(float(axes.velocities_m_s[-1])))
-        self._heatmap_vel_extent_label.setText(
-            "Velocity limits: ±{:.3f} m/s".format(v_limit)
+        axes = heatmap_axes(
+            self.heatmap_source.record.metadata, self.heatmap_source.record.sensor_config, subsweep
         )
+        self._heatmap_axes = axes
+        self._heatmap_distance_header.set_extent(
+            float(axes.distances_m[0]), float(axes.distances_m[-1])
+        )
+        v_limit = max(abs(float(axes.velocities_m_s[0])), abs(float(axes.velocities_m_s[-1])))
+        self._heatmap_vel_extent_label.setText("Velocity limits: ±{:.3f} m/s".format(v_limit))
 
     def _update_heatmap_peak_cue(self, frame_idx: int | None) -> None:
         if frame_idx is None or self.heatmap_source is None:
@@ -1640,7 +1667,9 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         if self._hover_last_pos is not None:
             self._refresh_hover_tooltip()
         peak_overlay = self._peak_overlay_for_frame(frame_idx)
-        self._detection_strip.set_detection_ratio(None if peak_overlay is None else peak_overlay[2])
+        self._detection_strip.set_detection_ratio(
+            None if peak_overlay is None else peak_overlay[2]
+        )
 
     def eventFilter(self, obj: QtCore.QObject, event: QtCore.QEvent) -> bool:
         if obj is self.truth_view:
@@ -1656,7 +1685,11 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         return super().eventFilter(obj, event)
 
     def _refresh_hover_tooltip(self) -> None:
-        if self._hover_last_pos is None or self._heatmap_axes is None or self._hover_dvm_cache is None:
+        if (
+            self._hover_last_pos is None
+            or self._heatmap_axes is None
+            or self._hover_dvm_cache is None
+        ):
             QtWidgets.QToolTip.hideText()
             return
         rect = self.truth_view.rendered_image_rect()
@@ -1677,7 +1710,9 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         vel_idx = int(np.argmin(np.abs(axes.velocities_m_s - vel_val)))
         dvm = self._hover_dvm_cache[1]
         magnitude = int(round(float(dvm[vel_idx, dist_idx])))
-        text = "Distance: {:.3f} m\nVelocity: {:.3f} m/s\nMagnitude: {}".format(dist_val, vel_val, magnitude)
+        text = "Distance: {:.3f} m\nVelocity: {:.3f} m/s\nMagnitude: {}".format(
+            dist_val, vel_val, magnitude
+        )
 
         # Append detection ratio from the active series if one is selected.
         frame_idx = self._hover_dvm_cache[0]
@@ -1772,15 +1807,16 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             "JSON files (*.json);;All files (*)",
         )
         if filename:
-            self._open_session(LoadSessionPlan(session_path=Path(filename), prompt_for_unsaved=False))
+            self._open_session(
+                LoadSessionPlan(session_path=Path(filename), prompt_for_unsaved=False)
+            )
 
     def _loaded_h5_identity(self) -> H5SlotIdentity | None:
         """Return identity of the currently loaded H5 source, or None."""
         if self.heatmap_source is None:
             return None
         if not all(
-            hasattr(self.heatmap_source, attr)
-            for attr in ("path", "record", "subsweep_idx")
+            hasattr(self.heatmap_source, attr) for attr in ("path", "record", "subsweep_idx")
         ):
             return None
         if not all(
@@ -1826,16 +1862,15 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         if self.camera_source is not None:
             source_path = getattr(self.camera_source, "path", None)
             camera_loaded_path = (
-                str(source_path)
-                if source_path is not None
-                else prior_session.camera_track.path
+                str(source_path) if source_path is not None else prior_session.camera_track.path
             )
         else:
             camera_loaded_path = None
         camera_slot = self._resource_job_manager.board().camera
         camera_inflight_path = (
             str(camera_slot.target_path)
-            if camera_slot.target_path is not None and camera_slot.phase not in ("idle", "failed", "superseded")
+            if camera_slot.target_path is not None
+            and camera_slot.phase not in ("idle", "failed", "superseded")
             else None
         )
         loaded = LoadedResourceState(
@@ -1844,13 +1879,12 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             h5_loaded_identity=self._loaded_h5_identity(),
             h5_inflight_identity=self._inflight_h5_identity,
             loaded_peak_paths=frozenset(
-                str(s.json_path)
-                for s in self._peak_series_list
-                if s.json_path is not None
+                str(s.json_path) for s in self._peak_series_list if s.json_path is not None
             ),
             leg2_loaded_path=(
                 prior_session.leg2_ultrasonic_datasource.path
-                if self.leg2_ultrasonic_datasource is not None and prior_session.leg2_ultrasonic_datasource.path
+                if self.leg2_ultrasonic_datasource is not None
+                and prior_session.leg2_ultrasonic_datasource.path
                 else None
             ),
         )
@@ -1882,7 +1916,8 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         # series that have no saved path (they cannot be represented in the session).
         # Always filter: drop pathless (unsaved generated) rows and any stale path rows.
         self._peak_series_list = [
-            s for s in self._peak_series_list
+            s
+            for s in self._peak_series_list
             if s.json_path is not None and str(s.json_path) not in plan.peak_paths_to_unload
         ]
         if self._heatmap_peak_selector_id not in {s.series_id for s in self._peak_series_list}:
@@ -1956,9 +1991,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
                 frame_count=self.session.camera_track.frame_count,
             ),
             current_camera_frame=(
-                None
-                if self.current_camera_frame is None
-                else self.current_camera_frame.copy()
+                None if self.current_camera_frame is None else self.current_camera_frame.copy()
             ),
             viewport_corners=[list(point) for point in self.session.viewport.corners],
             export_overlay=ExportOverlaySettings(
@@ -2016,14 +2049,17 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         )
         if resolved_corners is not None:
             self.session.viewport.corners = resolved_corners
-        elif replacement_viewport_needs_default_reset(
-            previous_corners=previous_corners,
-            previous_native_size=previous_size,
-            replacement_native_size=(
-                self._camera_reference_width,
-                self._camera_reference_height,
-            ),
-        ) or not self.session.viewport.corners:
+        elif (
+            replacement_viewport_needs_default_reset(
+                previous_corners=previous_corners,
+                previous_native_size=previous_size,
+                replacement_native_size=(
+                    self._camera_reference_width,
+                    self._camera_reference_height,
+                ),
+            )
+            or not self.session.viewport.corners
+        ):
             self._initialize_default_viewport_corners_native()
         self._initialize_default_export_overlay_if_needed()
         self._load_current_camera_frame(access_hint="random")
@@ -2965,9 +3001,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         truth_frame: np.ndarray | None = None
         frame_idx: int | None = None
         if self.heatmap_source is not None and (
-            0.0
-            <= self.session.timeline.current_time_s
-            <= self.session.heatmap_track.duration_s
+            0.0 <= self.session.timeline.current_time_s <= self.session.heatmap_track.duration_s
         ):
             frame_idx, truth_frame = self.heatmap_source.frame_at_seconds(
                 self.session.timeline.current_time_s
@@ -2975,7 +3009,9 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             truth_frame = self._annotate_truth_frame_with_peak(truth_frame, frame_idx)
         if self.heatmap_source is not None and frame_idx is not None:
             if self._hover_dvm_cache is None or self._hover_dvm_cache[0] != frame_idx:
-                subframe = self.heatmap_source.record.results[frame_idx].subframes[self.heatmap_source.subsweep_idx]
+                subframe = self.heatmap_source.record.results[frame_idx].subframes[
+                    self.heatmap_source.subsweep_idx
+                ]
                 self._hover_dvm_cache = (frame_idx, distance_velocity_map(subframe))
             self._refresh_current_heatmap_peak_overlay(frame_idx)
         else:
@@ -3105,8 +3141,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         )
         has_heatmap = self.heatmap_source is not None and not h5_job_busy
         has_optional_signal = (
-            self._has_peaks_in_memory()
-            or self.leg2_ultrasonic_datasource is not None
+            self._has_peaks_in_memory() or self.leg2_ultrasonic_datasource is not None
         )
         enabled = has_camera or has_heatmap or has_optional_signal
         self.play_button.setEnabled(enabled)
@@ -3146,6 +3181,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         leg2_adapter = self._leg2_adapter()
         leg2_valid = leg2_adapter.valid_segment_count()
         leg2_samples = leg2_adapter.sample_count()
+        radar_distance_bin_width, radar_velocity_bin_width = self._active_h5_bin_widths()
 
         return AlignmentResourceRuntime(
             camera_loaded=self.camera_source is not None,
@@ -3154,6 +3190,8 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             leg2_loaded=leg2_adapter.is_loaded(),
             peak_detected_count=peak_detected,
             peak_measurement_count=peak_total,
+            radar_distance_bin_width_m=radar_distance_bin_width,
+            radar_velocity_bin_width_m_s=radar_velocity_bin_width,
             peaks_dirty=self._any_peaks_unsaved(),
             leg2_valid_segment_count=leg2_valid,
             leg2_sample_count=leg2_samples,
@@ -3161,6 +3199,25 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             load_warnings=tuple(self._resource_load_warnings.items()),
             resource_jobs=self._resource_job_presentations(),
         )
+
+    def _active_h5_bin_widths(self) -> tuple[float | None, float | None]:
+        if self.heatmap_source is None:
+            return None, None
+
+        try:
+            subsweep = select_subsweep(
+                self.heatmap_source.record,
+                self.heatmap_source.subsweep_idx,
+            )
+            axes = heatmap_axes(
+                self.heatmap_source.record.metadata,
+                self.heatmap_source.record.sensor_config,
+                subsweep,
+            )
+        except (AttributeError, ValueError):
+            return None, None
+
+        return distance_bin_width_m(axes.distances_m), axes.velocity_resolution
 
     def resource_summaries(self) -> tuple[ResourceSummary, ...]:
         return build_alignment_resource_summaries(
@@ -3280,9 +3337,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
 
         self.unload_camera_action.setEnabled(self.camera_source is not None)
         self.unload_h5_action.setEnabled(self.heatmap_source is not None)
-        self.unload_peak_action.setEnabled(
-            self._has_peaks_in_memory() or has_peak_path
-        )
+        self.unload_peak_action.setEnabled(self._has_peaks_in_memory() or has_peak_path)
         self.unload_leg2_action.setEnabled(leg2_adapter.can_unload())
         self.reload_camera_action.setEnabled(has_camera_path)
         self.reload_h5_action.setEnabled(has_h5_path)
@@ -3325,7 +3380,9 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         else:
             self._resource_load_warnings.pop(kind, None)
 
-    def invoke_resource_action(self, kind: ResourceKind, action: ResourceAction, *, series_id: str = "") -> None:
+    def invoke_resource_action(
+        self, kind: ResourceKind, action: ResourceAction, *, series_id: str = ""
+    ) -> None:
         if action == "cancel":
             if kind in ("camera", "radar_h5"):
                 if self._resource_job_manager.cancel_job(kind):
@@ -3445,7 +3502,9 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         ):
             return
         try:
-            datasource, warnings = import_peak_distance_json_for_heatmap(ps.json_path, self.heatmap_source)
+            datasource, warnings = import_peak_distance_json_for_heatmap(
+                ps.json_path, self.heatmap_source
+            )
         except (ValueError, OSError) as exc:
             QtWidgets.QMessageBox.warning(self, "Reload failed", str(exc))
             return
@@ -3460,7 +3519,9 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
     def _reveal_path(self, path: Path) -> None:
         target = path if path.is_dir() else path.parent
         if not target.exists():
-            QtWidgets.QMessageBox.warning(self, "Show in File Manager", f"Path does not exist:\n{path}")
+            QtWidgets.QMessageBox.warning(
+                self, "Show in File Manager", f"Path does not exist:\n{path}"
+            )
             return
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(target.resolve())))
 
@@ -3549,7 +3610,8 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
     def clear_all_resources(self) -> None:
         peaks_warning = (
             "\n\nUnsaved generated peak-distance data will also be lost."
-            if self._any_peaks_unsaved() else ""
+            if self._any_peaks_unsaved()
+            else ""
         )
         reply = QtWidgets.QMessageBox.question(
             self,
@@ -3710,9 +3772,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
                 for frame_idx in range(output_frame_count):
                     if progress.wasCanceled():
                         raise RuntimeError("Export cancelled.")
-                    h5_time_s = min(
-                        overlap_start_s + frame_idx / export_fps, overlap_end_s
-                    )
+                    h5_time_s = min(overlap_start_s + frame_idx / export_fps, overlap_end_s)
                     camera_time_s = h5_time_s + self.session.timeline.offset_s
                     if camera_time_s < 0.0:
                         camera_frame = first_camera_frame
@@ -3839,6 +3899,7 @@ def main() -> None:
 
         QtCore.QTimer.singleShot(0, _load_session_on_start)
     else:
+
         def _load_resources_on_start() -> None:
             if args.camera is not None:
                 window.load_camera_from_path(args.camera, mark_dirty=False)

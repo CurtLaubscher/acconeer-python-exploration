@@ -83,6 +83,25 @@ def test_build_alignment_resource_summaries_mark_loaded_state() -> None:
     assert "unload" in summaries[0].actions
 
 
+def test_build_alignment_resource_summaries_includes_h5_bin_widths() -> None:
+    session = AlignmentSession(
+        heatmap_track=HeatmapTrack(path="/tmp/radar.h5", duration_s=2.0, fps=10.0),
+    )
+    summaries = build_alignment_resource_summaries(
+        session,
+        AlignmentResourceRuntime(
+            radar_h5_loaded=True,
+            radar_distance_bin_width_m=0.0025,
+            radar_velocity_bin_width_m_s=0.04,
+        ),
+    )
+
+    h5_summary = summaries[1]
+    assert h5_summary.status == "loaded"
+    assert "distance bin 0.0025 m" in h5_summary.details
+    assert "velocity bin 0.04 m/s" in h5_summary.details
+
+
 def test_build_alignment_resource_summaries_mark_loaded_warning_state() -> None:
     session = AlignmentSession(
         camera_track=CameraTrack(path="/tmp/cam.mp4", duration_s=2.0, fps=30.0, frame_count=60),
