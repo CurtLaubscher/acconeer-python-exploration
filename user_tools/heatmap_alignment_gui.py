@@ -23,6 +23,7 @@ Startup file arguments are supported, for example:
 """
 
 import argparse
+import copy
 import math
 import os
 import sys
@@ -1860,10 +1861,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
 
         # Build a plain-value snapshot of loaded/inflight state for the coordinator.
         if self.camera_source is not None:
-            source_path = getattr(self.camera_source, "path", None)
-            camera_loaded_path = (
-                str(source_path) if source_path is not None else prior_session.camera_track.path
-            )
+            camera_loaded_path = prior_session.camera_track.path or None
         else:
             camera_loaded_path = None
         camera_slot = self._resource_job_manager.board().camera
@@ -1942,7 +1940,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             prior_session = self.session
 
             # Assign self.session BEFORE reconcile so load_h5_from_path reads correct indices.
-            self.session = desired_session
+            self.session = copy.deepcopy(desired_session)
             self._resource_reload_errors.clear()
             self._resource_load_warnings.clear()
 
