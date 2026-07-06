@@ -1801,6 +1801,56 @@ def test_apply_camera_job_result_resets_incompatible_viewport(
     assert window.session.viewport.corners == [[1.0, 1.0], [2.0, 1.0], [2.0, 2.0], [1.0, 2.0]]
 
 
+def test_apply_camera_job_result_preserves_timeline_state(
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from heatmap_alignment_core import ProxyVideoResult, VideoProbe
+    from heatmap_alignment_resource_jobs import CameraResourceJobResult
+
+    window = HeatmapAlignmentWindow()
+    window.session.timeline.current_time_s = 12.345
+    window.session.timeline.offset_s = 5.5
+
+    class _FakeCameraSource:
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        "heatmap_alignment_gui.CameraVideoSource",
+        lambda path: _FakeCameraSource(),
+    )
+    monkeypatch.setattr(window, "_initialize_default_export_overlay_if_needed", lambda: None)
+    monkeypatch.setattr(window, "_load_current_camera_frame", lambda access_hint="auto": None)
+    monkeypatch.setattr(window, "_refresh_camera_view_corners", lambda: None)
+    monkeypatch.setattr(window, "_native_viewport_corners", lambda: None)
+    monkeypatch.setattr(window, "_initialize_default_viewport_corners_native", lambda: None)
+
+    result = CameraResourceJobResult(
+        source_path=Path("/tmp/new.mp4"),
+        proxy_result=ProxyVideoResult(
+            source_path=Path("/tmp/new.mp4"),
+            display_path=Path("/tmp/new.mp4"),
+            source_probe=VideoProbe(
+                path=Path("/tmp/new.mp4"),
+                fps=30.0,
+                frame_count=900,
+                duration_s=30.0,
+                width=640,
+                height=480,
+            ),
+            proxy_path=None,
+            state="original",
+        ),
+        camera_track=CameraTrack(path="/tmp/new.mp4", fps=30.0, duration_s=30.0, frame_count=900),
+    )
+
+    window._apply_camera_job_result(result)
+
+    assert window.session.timeline.current_time_s == pytest.approx(12.345)
+    assert window.session.timeline.offset_s == pytest.approx(5.5)
+
+
 # ---------------------------------------------------------------------------
 # Session reconcile integration tests (tasks 4.1–4.7)
 # ---------------------------------------------------------------------------
@@ -3763,6 +3813,8 @@ def test_generate_appends_without_replacing_existing_series(
             session_idx = 0; group_idx = 0; entry_idx = 0
         path = Path("/tmp/x.h5")
         subsweep_idx = 0
+        def frame_at_seconds(self, time_s):
+            return 0, np.zeros((1, 1, 3), dtype=np.uint8)
 
     window.heatmap_source = _FakeH5Source()
     window.session.heatmap_track = HeatmapTrack(path=str(Path("/tmp/x.h5")))
@@ -4066,6 +4118,122 @@ def test_heatmap_peak_combo_resets_to_none_when_selected_series_unloaded(qapplic
     assert window._heatmap_peak_combo.currentData() is None
 
 
+def test_heatmap_peak_combo_change_refreshes_detection_strip(
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Changing the heatmap-selected peak series updates the strip without scrubbing."""
+    from heatmap_peak_distance_resource import PeakSeriesResource
+
+    first_ratio = np.array([1.25, 0.5], dtype=np.float64)
+    second_ratio = np.array([0.75, 1.75], dtype=np.float64)
+    metadata = PeakDistanceMetadata(
+        source_path="/tmp/test.h5",
+        source_name="test.h5",
+        session_index=0,
+        group_index=0,
+        entry_index=0,
+        sensor_id=1,
+        subsweep_index=0,
+        source_frame_count=1,
+        source_duration_s=0.1,
+        ticks_per_second=1000,
+        threshold=650.0,
+        peak_extraction_method="sum_velocity",
+        zero_velocity_bin_index=3,
+        zero_velocity_m_s=0.0,
+    )
+    window = HeatmapAlignmentWindow()
+    window.heatmap_source = object()  # type: ignore[assignment]
+    monkeypatch.setattr(window, "_current_heatmap_frame_index", lambda: 0)
+    captured: list[np.ndarray | None] = []
+    monkeypatch.setattr(window._detection_strip, "set_detection_ratio", captured.append)
+    window._peak_series_list = [
+        PeakSeriesResource(
+            series_id="first",
+            display_name="First",
+            provenance="generated",
+            measurements=(
+                FramePeakMeasurement(
+                    0, 0, 0.0, None, STATUS_DETECTED, 1.0, 1.0, 700.0, first_ratio
+                ),
+            ),
+            color="#3b82f6",
+            metadata=metadata,
+        ),
+        PeakSeriesResource(
+            series_id="second",
+            display_name="Second",
+            provenance="generated",
+            measurements=(
+                FramePeakMeasurement(
+                    0, 0, 0.0, None, STATUS_DETECTED, 1.5, 1.5, 800.0, second_ratio
+                ),
+            ),
+            color="#f59e0b",
+            metadata=metadata,
+        ),
+    ]
+    window._heatmap_peak_selector_id = "first"
+    window._update_heatmap_peak_selector()
+
+    second_index = window._heatmap_peak_combo.findData("second")
+    assert second_index >= 0
+    window._heatmap_peak_combo.setCurrentIndex(second_index)
+    window._on_heatmap_peak_combo_changed(second_index)
+
+    assert np.array_equal(captured[-1], second_ratio)
+
+
+def test_unload_selected_peak_series_clears_detection_strip(
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unloading the active peak series clears the strip without requiring a scrub."""
+    from heatmap_peak_distance_resource import PeakSeriesResource
+
+    ratio = np.array([1.25, 0.5], dtype=np.float64)
+    metadata = PeakDistanceMetadata(
+        source_path="/tmp/test.h5",
+        source_name="test.h5",
+        session_index=0,
+        group_index=0,
+        entry_index=0,
+        sensor_id=1,
+        subsweep_index=0,
+        source_frame_count=1,
+        source_duration_s=0.1,
+        ticks_per_second=1000,
+        threshold=650.0,
+        peak_extraction_method="sum_velocity",
+        zero_velocity_bin_index=3,
+        zero_velocity_m_s=0.0,
+    )
+    window = HeatmapAlignmentWindow()
+    window.heatmap_source = object()  # type: ignore[assignment]
+    monkeypatch.setattr(window, "_current_heatmap_frame_index", lambda: 0)
+    captured: list[np.ndarray | None] = []
+    monkeypatch.setattr(window._detection_strip, "set_detection_ratio", captured.append)
+    series = PeakSeriesResource(
+        series_id="selected",
+        display_name="Selected",
+        provenance="generated",
+        measurements=(
+            FramePeakMeasurement(0, 0, 0.0, None, STATUS_DETECTED, 1.0, 1.0, 700.0, ratio),
+        ),
+        color="#3b82f6",
+        metadata=metadata,
+    )
+    window._peak_series_list = [series]
+    window._heatmap_peak_selector_id = series.series_id
+
+    window._refresh_current_heatmap_peak_overlay()
+    window._unload_peak_series(series.series_id, confirm=False)
+
+    assert np.array_equal(captured[-2], ratio)
+    assert captured[-1] is None
+
+
 def test_resources_window_has_generate_and_import_buttons(qapplication: QApplication) -> None:
     """Req 2/8: Resources window must expose Generate Peak Series and Import Peak Series buttons."""
     window = HeatmapAlignmentWindow()
@@ -4073,6 +4241,30 @@ def test_resources_window_has_generate_and_import_buttons(qapplication: QApplica
     rw = window._resources_window
     assert hasattr(rw, "generate_peak_series_button")
     assert hasattr(rw, "import_peak_series_button")
+
+
+def test_resources_window_peak_aggregate_row_enables_load(qapplication: QApplication) -> None:
+    """The empty Radar Peak row must allow importing peak series from row details."""
+    window = HeatmapAlignmentWindow()
+    window._show_resources_window()
+    rw = window._resources_window
+    assert rw is not None
+    window._refresh_resources_ui()
+
+    peak_row = next(
+        (
+            row
+            for row in range(rw.table.rowCount())
+            if rw._summaries[row].kind == "radar_peak" and not rw._summaries[row].series_id
+        ),
+        None,
+    )
+    assert peak_row is not None
+
+    rw._select_table_row(peak_row)
+    rw._update_details_for_selection()
+
+    assert rw.load_button.isEnabled()
 
 
 def test_import_peak_series_from_path_appends(
@@ -4138,8 +4330,8 @@ def test_reload_peak_series_from_session_restores_persisted_fields(
         )
     ]
     monkeypatch.setattr(
-        "sparse_iq_peak_distance_core.load_peak_distance_json",
-        lambda path: _FakeDatasource(),
+        "heatmap_alignment_gui.import_peak_distance_json_for_heatmap",
+        lambda path, heatmap_source: (_FakeDatasource(), ()),
     )
     monkeypatch.setattr(window, "_refresh_signal_plot", lambda: None)
     monkeypatch.setattr(window, "_refresh_resources_ui", lambda: None)
@@ -4155,6 +4347,65 @@ def test_reload_peak_series_from_session_restores_persisted_fields(
     assert restored.heatmap_selected is True
     assert restored.json_path == json_path
     assert window._heatmap_peak_selector_id == restored.series_id
+
+
+def test_reload_peak_series_from_session_refreshes_detection_strip(
+    qapplication: QApplication,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    json_path = tmp_path / "session_peaks.json"
+    json_path.write_text("{}", encoding="utf-8")
+    ratio = np.array([0.25, 1.5, 0.75], dtype=np.float64)
+    metadata = PeakDistanceMetadata(
+        source_path=str(json_path),
+        source_name=json_path.name,
+        session_index=0,
+        group_index=0,
+        entry_index=0,
+        sensor_id=1,
+        subsweep_index=0,
+        source_frame_count=1,
+        source_duration_s=0.1,
+        ticks_per_second=1000,
+        threshold=650.0,
+        peak_extraction_method="sum_velocity",
+        zero_velocity_bin_index=3,
+        zero_velocity_m_s=0.0,
+    )
+
+    class _FakeDatasource:
+        measurements = (
+            FramePeakMeasurement(0, 0, 0.0, None, STATUS_DETECTED, 1.2, 1.2, 700.0, ratio),
+        )
+
+    _FakeDatasource.metadata = metadata
+
+    window = HeatmapAlignmentWindow()
+    window.heatmap_source = object()  # type: ignore[assignment]
+    window.session.peak_series = [
+        PeakSeriesSessionEntry(
+            path=str(json_path),
+            display_name="restored peaks",
+            color="#f59e0b",
+            visible=True,
+            heatmap_selected=True,
+        )
+    ]
+    captured: list[np.ndarray | None] = []
+    monkeypatch.setattr(window, "_current_heatmap_frame_index", lambda: 0)
+    monkeypatch.setattr(window._detection_strip, "set_detection_ratio", captured.append)
+    monkeypatch.setattr(
+        "heatmap_alignment_gui.import_peak_distance_json_for_heatmap",
+        lambda path, heatmap_source: (_FakeDatasource(), ()),
+    )
+    monkeypatch.setattr(window, "_refresh_signal_plot", lambda: None)
+    monkeypatch.setattr(window, "_refresh_resources_ui", lambda: None)
+    monkeypatch.setattr(window, "_update_heatmap_peak_selector", lambda: None)
+
+    window._reload_peak_series_from_session()
+
+    assert np.array_equal(captured[-1], ratio)
 
 
 # ---------------------------------------------------------------------------

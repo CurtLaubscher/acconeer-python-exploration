@@ -160,6 +160,9 @@ class DetectionMetadata:
     peak_extraction_method: str
     zero_velocity_bin_index: int
     zero_velocity_m_s: float
+    threshold_max: float = DEFAULT_DIST_NORM_THRESHOLD_MAX
+    threshold_min: float = DEFAULT_DIST_NORM_THRESHOLD_MIN
+    reference_distance_m: float = DEFAULT_DIST_NORM_REFERENCE_DISTANCE_M
 
 
 @dataclass(frozen=True)
@@ -445,6 +448,9 @@ def analyze_heatmap_record(
         peak_extraction_method=peak_extraction_method,
         zero_velocity_bin_index=zero_velocity.bin_index,
         zero_velocity_m_s=zero_velocity.velocity_m_s,
+        threshold_max=threshold_max,
+        threshold_min=threshold_min,
+        reference_distance_m=reference_distance_m,
     )
     return DetectionExportResult(metadata=metadata, measurements=tuple(measurements))
 
@@ -491,6 +497,9 @@ def peak_distance_document(result: DetectionExportResult) -> dict[str, Any]:
             "ticks_per_second": result.metadata.ticks_per_second,
             "threshold": result.metadata.threshold,
             "peak_extraction_method": result.metadata.peak_extraction_method,
+            "threshold_max": result.metadata.threshold_max,
+            "threshold_min": result.metadata.threshold_min,
+            "reference_distance_m": result.metadata.reference_distance_m,
             "zero_velocity_bin_index": result.metadata.zero_velocity_bin_index,
             "zero_velocity_m_s": result.metadata.zero_velocity_m_s,
         },
@@ -504,6 +513,7 @@ def peak_distance_document(result: DetectionExportResult) -> dict[str, Any]:
                 "peak_distance_m": measurement.target_distance_m,
                 "candidate_peak_distance_m": measurement.candidate_distance_m,
                 "peak_strength": measurement.peak_strength,
+                "detection_ratio": [float(v) for v in measurement.detection_ratio],
             }
             for measurement in result.measurements
         ],
@@ -561,6 +571,11 @@ def _metadata_from_dict(payload: dict[str, Any]) -> DetectionMetadata:
         peak_extraction_method=str(peak_extraction_method),
         zero_velocity_bin_index=int(payload["zero_velocity_bin_index"]),
         zero_velocity_m_s=float(payload["zero_velocity_m_s"]),
+        threshold_max=float(payload.get("threshold_max", DEFAULT_DIST_NORM_THRESHOLD_MAX)),
+        threshold_min=float(payload.get("threshold_min", DEFAULT_DIST_NORM_THRESHOLD_MIN)),
+        reference_distance_m=float(
+            payload.get("reference_distance_m", DEFAULT_DIST_NORM_REFERENCE_DISTANCE_M)
+        ),
     )
 
 
@@ -582,6 +597,10 @@ def _measurement_from_dict(payload: dict[str, Any]) -> FrameDetectionMeasurement
 
     target_distance_m = payload["peak_distance_m"]
     absolute_time = payload["absolute_time"]
+    detection_ratio_payload = payload.get("detection_ratio", [])
+    if not isinstance(detection_ratio_payload, list):
+        msg = "Measurement detection_ratio must be an array when present."
+        raise _invalid_peak_distance_json_error(msg)
     return FrameDetectionMeasurement(
         frame_index=int(payload["frame_index"]),
         source_tick=int(payload["source_tick"]),
@@ -591,6 +610,7 @@ def _measurement_from_dict(payload: dict[str, Any]) -> FrameDetectionMeasurement
         target_distance_m=None if target_distance_m is None else float(target_distance_m),
         candidate_distance_m=float(payload["candidate_peak_distance_m"]),
         peak_strength=float(payload["peak_strength"]),
+        detection_ratio=np.array(detection_ratio_payload, dtype=np.float64),
     )
 
 

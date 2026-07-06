@@ -1088,6 +1088,62 @@ def test_import_peak_distance_json_without_heatmap_defers_validation(tmp_path: P
     assert len(datasource.measurements) == 2
 
 
+def test_import_peak_distance_json_recomputes_missing_detection_ratio(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    json_path = tmp_path / "legacy_peaks.json"
+    legacy_result = _sample_peak_distance_export_result()
+    write_peak_distance_json(legacy_result, json_path)
+    payload = json.loads(json_path.read_text(encoding="utf-8"))
+    for measurement in payload["measurements"]:
+        measurement.pop("detection_ratio", None)
+    json_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    ratio = np.array([0.25, 1.5, 0.75], dtype=np.float64)
+    recomputed = PeakDistanceExportResult(
+        metadata=legacy_result.metadata,
+        measurements=(
+            FramePeakMeasurement(
+                0, 10, 0.0, None, STATUS_DETECTED, 1.2, 1.2, 800.0, ratio
+            ),
+            FramePeakMeasurement(
+                1, 20, 0.1, None, STATUS_DETECTED, 1.3, 1.3, 700.0, ratio
+            ),
+        ),
+    )
+
+    class _MinimalRecord:
+        results = [object(), object()]
+        duration_s = 0.1
+        session_idx = 0
+        group_idx = 0
+        entry_idx = 0
+        sensor_id = 1
+
+    class _MinimalHeatmapSource:
+        record = _MinimalRecord()
+        path = Path("C:/logs/recording.h5")
+        subsweep_idx = 0
+
+    monkeypatch.setattr(
+        "heatmap_alignment_core.validate_peak_distance_import",
+        lambda *args, **kwargs: [],
+    )
+    monkeypatch.setattr(
+        "heatmap_alignment_core.analyze_heatmap_record",
+        lambda *args, **kwargs: recomputed,
+    )
+
+    datasource, warnings = import_peak_distance_json_for_heatmap(
+        json_path,
+        _MinimalHeatmapSource(),  # type: ignore[arg-type]
+    )
+
+    assert np.array_equal(datasource.measurements[0].detection_ratio, ratio)
+    assert "recomputed ratios" in warnings[0]
+
+
 def _write_sample_leg2_mat(
     path: Path,
     *,
