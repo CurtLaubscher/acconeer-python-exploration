@@ -1874,6 +1874,7 @@ def _make_session_file(
     group_idx: int = 0,
     entry_idx: int = 0,
     subsweep_idx: int = 0,
+    current_time_s: float = 0.0,
     offset_s: float = 0.0,
 ) -> Path:
     session = AlignmentSession(
@@ -1886,6 +1887,7 @@ def _make_session_file(
             subsweep_idx=subsweep_idx,
         ),
     )
+    session.timeline.current_time_s = current_time_s
     session.timeline.offset_s = offset_s
     path = tmp_path / "session.json"
     save_alignment_session(session, path)
@@ -1930,6 +1932,45 @@ def test_reconcile_camera_keep_does_not_abandon_inflight_job(
     assert (
         load_camera_calls == []
     ), "load_camera_from_path must not be called when identity matches"
+
+
+def test_reconcile_camera_keep_uses_original_path_when_proxy_loaded(
+    tmp_path: Path,
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    camera_file = tmp_path / "video.mp4"
+    proxy_file = tmp_path / "video_proxy.mp4"
+    camera_file.write_bytes(b"")
+    proxy_file.write_bytes(b"")
+
+    session_path = _make_session_file(tmp_path, camera_path=str(camera_file), offset_s=2.5)
+
+    class _FakeCameraSource:
+        path = proxy_file
+        preview_width = 640
+        preview_height = 480
+
+        def close(self) -> None:
+            pass
+
+    window = HeatmapAlignmentWindow()
+    window.camera_source = _FakeCameraSource()  # type: ignore[assignment]
+    window.session.camera_track = CameraTrack(path=str(camera_file), duration_s=10.0, fps=30.0)
+
+    load_camera_calls: list[Path] = []
+    monkeypatch.setattr(
+        window,
+        "load_camera_from_path",
+        lambda p, **kwargs: load_camera_calls.append(p),
+    )
+    monkeypatch.setattr(window, "_load_current_camera_frame", lambda access_hint="auto": None)
+    monkeypatch.setattr(window, "_sync_previews", lambda **kwargs: None)
+
+    window.load_session_from_path(session_path)
+
+    assert load_camera_calls == []
+    assert window.session.timeline.offset_s == pytest.approx(2.5)
 
 
 def test_reconcile_h5_keep_does_not_abandon_inflight_job(
@@ -2337,6 +2378,58 @@ def test_reconcile_camera_load_when_identity_changes(
 
     assert len(load_camera_calls) == 1
     assert load_camera_calls[0] == new_camera
+
+
+def test_session_open_changed_camera_preserves_desired_timeline_state(
+    tmp_path: Path,
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    old_camera = tmp_path / "old.mp4"
+    new_camera = tmp_path / "new.mp4"
+    old_camera.write_bytes(b"")
+    new_camera.write_bytes(b"")
+
+    session_path = _make_session_file(
+        tmp_path,
+        camera_path=str(new_camera),
+        current_time_s=27.985,
+        offset_s=5.531,
+    )
+
+    class _FakeCameraSource:
+        path = old_camera
+        preview_width = 640
+        preview_height = 480
+
+        def close(self) -> None:
+            pass
+
+    window = HeatmapAlignmentWindow()
+    window.camera_source = _FakeCameraSource()  # type: ignore[assignment]
+    window.session.camera_track = CameraTrack(path=str(old_camera), duration_s=30.0, fps=30.0)
+    window.session.timeline.current_time_s = 45.797
+    window.session.timeline.offset_s = 12.669
+
+    load_camera_calls: list[Path] = []
+
+    def _load_camera_from_path(path: Path, **kwargs: object) -> None:
+        load_camera_calls.append(path)
+        HeatmapAlignmentWindow.load_camera_from_path(window, path, **kwargs)
+
+    monkeypatch.setattr(window, "load_camera_from_path", _load_camera_from_path)
+    monkeypatch.setattr(
+        window._resource_job_manager,
+        "start_camera_job",
+        lambda *_args, **_kwargs: 1,
+    )
+    monkeypatch.setattr(window, "_sync_previews", lambda **kwargs: None)
+
+    window.load_session_from_path(session_path)
+
+    assert load_camera_calls == [new_camera]
+    assert window.session.timeline.current_time_s == pytest.approx(27.985)
+    assert window.session.timeline.offset_s == pytest.approx(5.531)
 
 
 def test_reconcile_camera_load_when_no_camera_was_loaded(
