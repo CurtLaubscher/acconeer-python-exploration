@@ -257,20 +257,24 @@ class RecentSessionStore:
         self._settings.setValue(self.SETTINGS_KEY, paths[: self.LIMIT])
 
 
-from heatmap_alignment_timeline_widgets import (  # noqa: F401
-    AlignmentTimelineWidget,
+from heatmap_alignment_signal_plot import (  # noqa: F401
     SignalPlotWidget,
-    TimeAxisGeometry,
-    TimelineRangeModel,
     _make_h5_signal_plot_pens,
     _make_leg2_signal_plot_pens,
     _plot_color_with_alpha,
+)
+from heatmap_alignment_timeline_model import (  # noqa: F401
+    TimeAxisGeometry,
+    TimelineRangeModel,
     format_track_offset_label,
     track_offset_label_rect,
     track_offset_label_should_show,
+    TIMELINE_TRACK_OFFSET_LABEL_MARGIN_PX,
+)
+from heatmap_alignment_timeline_widget import (  # noqa: F401
+    AlignmentTimelineWidget,
     TIMELINE_LABEL_GUTTER_PX,
     TIMELINE_OFFSET_LABEL_COLOR_HEX,
-    TIMELINE_TRACK_OFFSET_LABEL_MARGIN_PX,
 )
 
 
@@ -622,6 +626,8 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.camera_view.setMinimumSize(100, 40)
         self.viewport_view = ViewportEditorWidget("Viewport")
         self.viewport_view.setMinimumSize(100, 40)
+        self.viewport_view.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        self.viewport_view.setLineWidth(0)
         self.truth_view = ImagePreview("Rendered Heatmap")
         self.truth_view.setMinimumSize(100, 40)
         self.truth_view.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)

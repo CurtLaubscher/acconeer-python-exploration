@@ -4379,7 +4379,7 @@ def test_signal_plot_y_auto_range_uses_all_visible_peak_series(
         return (0.0, 10.0)
 
     monkeypatch.setattr(
-        "heatmap_alignment_timeline_widgets.visible_signal_y_range_for_series",
+        "heatmap_alignment_signal_plot.visible_signal_y_range_for_series",
         _capture_range,
     )
 
