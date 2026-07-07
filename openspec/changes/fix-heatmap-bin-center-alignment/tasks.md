@@ -4,6 +4,7 @@
 - [x] 1.2 Update compact rendered-heatmap distance header peak cue placement to project peak distance through bin-edge extents rather than first/last bin centers.
 - [x] 1.3 Update rendered-heatmap hover readout mapping so distance, velocity, and magnitude lookup use displayed bin-edge geometry and resolve to the displayed bin under the pointer.
 - [x] 1.4 Remove the rendered heatmap body frame inset so the heatmap body, detection strip, and compact peak indicator share the same horizontal drawable extent.
+- [x] 1.5 Reuse shared bin-edge helpers in the Matplotlib rendered heatmap body and detection-strip extent calculations.
 
 ## 2. H5 Frame Selection
 
