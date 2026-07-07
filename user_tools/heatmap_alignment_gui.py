@@ -84,8 +84,10 @@ from heatmap_alignment_resource_summaries import (
     build_alignment_resource_summaries,
 )
 from sparse_iq_heatmap_common import (
+    axis_center_index_at_fraction,
     distance_bin_width_m,
     distance_velocity_map,
+    finite_axis_bin_width,
     heatmap_axes,
     select_subsweep,
 )
@@ -622,6 +624,8 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.viewport_view.setMinimumSize(100, 40)
         self.truth_view = ImagePreview("Rendered Heatmap")
         self.truth_view.setMinimumSize(100, 40)
+        self.truth_view.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        self.truth_view.setLineWidth(0)
         camera_group = self._wrap_group("Camera Video", self.camera_view)
         camera_group.setMinimumHeight(self._stacked_layout_minimum_height(camera_group.layout()))
         viewport_group = QtWidgets.QGroupBox("Viewport")
@@ -1623,7 +1627,9 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         )
         self._heatmap_axes = axes
         self._heatmap_distance_header.set_extent(
-            float(axes.distances_m[0]), float(axes.distances_m[-1])
+            float(axes.distances_m[0]),
+            float(axes.distances_m[-1]),
+            finite_axis_bin_width(axes.distances_m),
         )
         v_limit = max(abs(float(axes.velocities_m_s[0])), abs(float(axes.velocities_m_s[-1])))
         self._heatmap_vel_extent_label.setText("Velocity limits: ±{:.3f} m/s".format(v_limit))
@@ -1699,16 +1705,12 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             QtWidgets.QToolTip.hideText()
             return
         axes = self._heatmap_axes
-        dist_min = float(axes.distances_m[0])
-        dist_max = float(axes.distances_m[-1])
-        vel_min = float(axes.velocities_m_s[0])
-        vel_max = float(axes.velocities_m_s[-1])
         x_frac = (pos.x() - rect.left()) / max(1, rect.width())
         y_frac = (pos.y() - rect.top()) / max(1, rect.height())
-        dist_val = dist_min + x_frac * (dist_max - dist_min)
-        vel_val = vel_min + y_frac * (vel_max - vel_min)
-        dist_idx = int(np.argmin(np.abs(axes.distances_m - dist_val)))
-        vel_idx = int(np.argmin(np.abs(axes.velocities_m_s - vel_val)))
+        dist_idx = axis_center_index_at_fraction(axes.distances_m, x_frac)
+        vel_idx = axis_center_index_at_fraction(axes.velocities_m_s, y_frac)
+        dist_val = float(axes.distances_m[dist_idx])
+        vel_val = float(axes.velocities_m_s[vel_idx])
         dvm = self._hover_dvm_cache[1]
         magnitude = int(round(float(dvm[vel_idx, dist_idx])))
         text = "Distance: {:.3f} m\nVelocity: {:.3f} m/s\nMagnitude: {}".format(
