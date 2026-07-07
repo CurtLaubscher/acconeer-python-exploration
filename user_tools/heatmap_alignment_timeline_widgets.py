@@ -286,11 +286,13 @@ class SignalPlotWidget(pg.PlotWidget):
             connect="finite",
             name="Leg2 ultrasonic (not valid)",
         )
+        self._leg2_faded_curve.curve.setSegmentedLineMode("on")
         self._leg2_primary_curve = self.plot(
             pen=primary_pen,
             connect="finite",
             name="Leg2 ultrasonic (valid)",
         )
+        self._leg2_primary_curve.curve.setSegmentedLineMode("on")
         self.addLegend(offset=(8, 8))
         self._current_time_line = pg.InfiniteLine(
             pos=0.0,
@@ -475,7 +477,11 @@ class SignalPlotWidget(pg.PlotWidget):
             plot_color = derive_signal_plot_color(color_hex)
             det_pen, cand_pen = _make_h5_signal_plot_pens(plot_color)
             det_curve = self.plot(pen=det_pen, connect="finite", name=f"{display_name} (detected)")
-            cand_curve = self.plot(pen=cand_pen, connect="finite", name=f"{display_name} (no detection)")
+            cand_curve = self.plot(
+                pen=cand_pen, connect="finite", name=f"{display_name} (no detection)"
+            )
+            det_curve.curve.setSegmentedLineMode("on")
+            cand_curve.curve.setSegmentedLineMode("on")
             det_curve.setData(ps.detected_time_s, ps.detected_distance_m)
             cand_curve.setData(ps.candidate_time_s, ps.candidate_distance_m)
             self._peak_curve_groups.append((display_name, det_curve, cand_curve))
