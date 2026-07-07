@@ -25,12 +25,10 @@ Startup file arguments are supported, for example:
 import argparse
 import copy
 import math
-import os
 import sys
 import threading
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator, Literal
 
@@ -48,6 +46,7 @@ from heatmap_alignment_core import (
     AlignmentSession,
     CameraTrack,
     CameraVideoSource,
+    DetectionSignalSeries,
     ExportOverlaySettings,
     H5SlotIdentity,
     HeatmapPlotRenderer,
@@ -56,8 +55,9 @@ from heatmap_alignment_core import (
     Leg2MatImportError,
     Leg2UltrasonicSignalSeries,
     LoadedLeg2UltrasonicDatasource,
-    DetectionSignalSeries,
     SignalPlotViewSettings,
+    TimelineH5DragSnapshot,
+    apply_timeline_h5_alignment_drag,
     apply_viewport_visibility,
     build_leg2_ultrasonic_signal_series,
     build_peak_distance_signal_series,
@@ -68,37 +68,39 @@ from heatmap_alignment_core import (
     import_peak_distance_json_for_heatmap,
     rectify_viewport,
     scale_viewport_corners,
-    TimelineH5DragSnapshot,
-    apply_timeline_h5_alignment_drag,
     timeline_h5_drag_affects_alignment,
     timeline_view_bounds_s,
     visible_signal_y_range,
     visible_signal_y_range_for_series,
 )
-from heatmap_alignment_resource_summaries import (
-    AlignmentResourceRuntime,
-    ResourceAction,
-    ResourceJobPresentation,
-    ResourceKind,
-    ResourceSummary,
-    build_alignment_resource_summaries,
+from heatmap_alignment_dialogs import (  # noqa: F401
+    RESOURCE_ACTION_LABELS,
+    RESOURCE_JOB_STATUS_LABELS,
+    RESOURCE_STATUS_LABELS,
+    RESOURCES_DETAILS_PATH_BLOCK_TOP_MARGIN_PX,
+    RESOURCES_DETAILS_SECTION_SPACING_PX,
+    RESOURCES_TABLE_RESOURCE_COLUMN_DEFAULT_WIDTH_PX,
+    RESOURCES_TABLE_STATUS_COLUMN_DEFAULT_WIDTH_PX,
+    ElidedPathItemDelegate,
+    GenerateDetectionSeriesDialog,
+    HeatmapDistanceHeader,
+    ResourceColorSwatchDelegate,
+    ResourcesWindow,
 )
-from sparse_iq_heatmap_common import (
-    axis_center_index_at_fraction,
-    distance_bin_width_m,
-    distance_velocity_map,
-    finite_axis_bin_width,
-    heatmap_axes,
-    select_subsweep,
-)
+from heatmap_alignment_export import first_usable_frame, last_usable_frame
+from heatmap_alignment_peak_overlay import peak_overlay_for_frame
+from heatmap_alignment_preview_sync import PreviewSyncPlan, run_preview_sync
+from heatmap_alignment_recent_sessions import RecentSessionStore
+from heatmap_alignment_resource_actions import containing_directory, resource_path_for_kind
+from heatmap_alignment_resource_backups import CameraResourceBackup, H5ResourceBackup
 from heatmap_alignment_resource_jobs import (
     CameraResourceJobResult,
     LoadedH5ResourcePayload,
     ResourceJobBoard,
     ResourceJobError,
     ResourceJobKind,
-    ResourceJobSnapshot,
     ResourceJobSlotState,
+    ResourceJobSnapshot,
     begin_resource_job,
     build_h5_truth_source_from_payload,
     clear_resource_job,
@@ -114,6 +116,50 @@ from heatmap_alignment_resource_jobs import (
     run_camera_resource_job,
     should_apply_job_result,
 )
+from heatmap_alignment_resource_summaries import (
+    AlignmentResourceRuntime,
+    ResourceAction,
+    ResourceJobPresentation,
+    ResourceKind,
+    ResourceSummary,
+    build_alignment_resource_summaries,
+)
+from heatmap_alignment_session_coordinator import (
+    LoadedResourceState,
+    LoadSessionPlan,
+    plan_session_reconcile,
+)
+from heatmap_alignment_session_lifecycle import (
+    SessionLifecycleState,
+    SessionPromptAction,
+    SessionTransitionGuard,
+)
+from heatmap_alignment_source_resolution import SourceResolutionViewportWorker
+from heatmap_alignment_widgets import (
+    DetectionStripWidget,
+    DoubleRangeSlider,
+    ImagePreview,
+    rgb_to_qpixmap,
+)
+from heatmap_leg2_resource import Leg2ResourceAdapter
+from heatmap_peak_distance_resource import (
+    PeakSeriesResource,
+    PeakSeriesResourceAdapter,
+    build_generated_peak_series,
+    build_imported_peak_series,
+    default_generated_name,
+    default_imported_name,
+    generate_detection_series_from_heatmap_record,
+    peak_state_detected_counts,
+)
+from sparse_iq_heatmap_common import (
+    axis_center_index_at_fraction,
+    distance_bin_width_m,
+    distance_velocity_map,
+    finite_axis_bin_width,
+    heatmap_axes,
+    select_subsweep,
+)
 from sparse_iq_peak_distance_core import (
     ALGORITHM_LABEL_SUM_VELOCITY,
     ALGORITHM_LABEL_ZERO_VELOCITY_SLICE,
@@ -124,38 +170,7 @@ from sparse_iq_peak_distance_core import (
     PEAK_EXTRACTION_METHOD_SUM_VELOCITY,
     PEAK_EXTRACTION_METHOD_ZERO_VELOCITY_SLICE,
     PEAK_SELECTION_METHOD_STRONGEST_PEAK,
-    STATUS_DETECTED,
     PeakDistanceJsonImportError,
-)
-from heatmap_peak_distance_resource import (
-    PeakSeriesResourceAdapter,
-    PeakSeriesResource,
-    active_peak_measurements,
-    active_peak_zero_velocity_m_s,
-    build_generated_peak_series,
-    build_imported_peak_series,
-    default_generated_name,
-    default_imported_name,
-    generate_detection_series_from_heatmap_record,
-    peak_state_detected_counts,
-)
-from heatmap_leg2_resource import Leg2ResourceAdapter
-from heatmap_alignment_preview_sync import PreviewSyncPlan, run_preview_sync
-from heatmap_alignment_session_coordinator import (
-    LoadSessionPlan,
-    LoadedResourceState,
-    plan_session_reconcile,
-)
-from heatmap_alignment_session_lifecycle import (
-    SessionLifecycleState,
-    SessionPromptAction,
-    SessionTransitionGuard,
-)
-from heatmap_alignment_widgets import (
-    DetectionStripWidget,
-    DoubleRangeSlider,
-    ImagePreview,
-    rgb_to_qpixmap,
 )
 
 from PySide6 import QtCore, QtGui, QtWidgets
@@ -165,98 +180,16 @@ from PySide6.QtGui import QDesktopServices
 import pyqtgraph as pg
 
 
-from heatmap_alignment_dialogs import (  # noqa: F401
-    ElidedPathItemDelegate,
-    GenerateDetectionSeriesDialog,
-    HeatmapDistanceHeader,
-    RESOURCE_ACTION_LABELS,
-    RESOURCE_JOB_STATUS_LABELS,
-    RESOURCE_STATUS_LABELS,
-    RESOURCES_DETAILS_PATH_BLOCK_TOP_MARGIN_PX,
-    RESOURCES_DETAILS_SECTION_SPACING_PX,
-    RESOURCES_TABLE_RESOURCE_COLUMN_DEFAULT_WIDTH_PX,
-    RESOURCES_TABLE_STATUS_COLUMN_DEFAULT_WIDTH_PX,
-    ResourceColorSwatchDelegate,
-    ResourcesWindow,
-)
-
 GeneratePeakSeriesDialog = GenerateDetectionSeriesDialog
 generate_peak_distances_from_heatmap_record = generate_detection_series_from_heatmap_record
+_CameraResourceBackup = CameraResourceBackup
+_H5ResourceBackup = H5ResourceBackup
 
 
-class RecentSessionStore:
-    """Persist the Heatmap Alignment Workbench recent-session list."""
-
-    SETTINGS_KEY = "recent_session_paths"
-    LIMIT = 10
-
-    def __init__(self, settings: QtCore.QSettings) -> None:
-        self._settings = settings
-
-    @staticmethod
-    def normalized_path(path: Path | str) -> str:
-        return str(Path(path).expanduser().resolve(strict=False))
-
-    @staticmethod
-    def _dedupe_key(path: str) -> str:
-        return os.path.normcase(path)
-
-    def paths(self) -> tuple[Path, ...]:
-        return tuple(Path(path) for path in self._read_path_strings())
-
-    def add(self, path: Path | str) -> None:
-        normalized = self.normalized_path(path)
-        new_key = self._dedupe_key(normalized)
-        remaining = [
-            existing
-            for existing in self._read_path_strings()
-            if self._dedupe_key(existing) != new_key
-        ]
-        self._write_path_strings([normalized, *remaining][: self.LIMIT])
-
-    def remove(self, path: Path | str) -> None:
-        normalized = self.normalized_path(path)
-        remove_key = self._dedupe_key(normalized)
-        self._write_path_strings(
-            [
-                existing
-                for existing in self._read_path_strings()
-                if self._dedupe_key(existing) != remove_key
-            ]
-        )
-
-    def clear(self) -> None:
-        self._settings.remove(self.SETTINGS_KEY)
-
-    def _read_path_strings(self) -> list[str]:
-        raw_value = self._settings.value(self.SETTINGS_KEY, [])
-        if isinstance(raw_value, str):
-            candidates = [raw_value]
-        elif isinstance(raw_value, (list, tuple)):
-            candidates = [value for value in raw_value if isinstance(value, str)]
-        else:
-            candidates = []
-
-        result: list[str] = []
-        seen: set[str] = set()
-        for candidate in candidates:
-            candidate = candidate.strip()
-            if not candidate:
-                continue
-            normalized = self.normalized_path(candidate)
-            key = self._dedupe_key(normalized)
-            if key in seen:
-                continue
-            seen.add(key)
-            result.append(normalized)
-            if len(result) == self.LIMIT:
-                break
-        return result
-
-    def _write_path_strings(self, paths: list[str]) -> None:
-        self._settings.setValue(self.SETTINGS_KEY, paths[: self.LIMIT])
-
-
+from heatmap_alignment_resource_job_manager import (  # noqa: F401
+    ResourceJobManager,
+    _ResourceJobRunnable,
+)
 from heatmap_alignment_signal_plot import (  # noqa: F401
     SignalPlotWidget,
     _make_h5_signal_plot_pens,
@@ -264,77 +197,22 @@ from heatmap_alignment_signal_plot import (  # noqa: F401
     _plot_color_with_alpha,
 )
 from heatmap_alignment_timeline_model import (  # noqa: F401
+    TIMELINE_TRACK_OFFSET_LABEL_MARGIN_PX,
     TimeAxisGeometry,
     TimelineRangeModel,
     format_track_offset_label,
     track_offset_label_rect,
     track_offset_label_should_show,
-    TIMELINE_TRACK_OFFSET_LABEL_MARGIN_PX,
 )
 from heatmap_alignment_timeline_widget import (  # noqa: F401
-    AlignmentTimelineWidget,
     TIMELINE_LABEL_GUTTER_PX,
     TIMELINE_OFFSET_LABEL_COLOR_HEX,
+    AlignmentTimelineWidget,
 )
-
-
 from heatmap_alignment_viewport_widgets import (  # noqa: F401
     CornerEditorWidget,
     ViewportEditorWidget,
 )
-
-
-class SourceResolutionViewportWorker(QtCore.QObject):
-    render_finished = QtCore.Signal(object)
-
-    @QtCore.Slot(object)
-    def render_request(self, request: object) -> None:
-        payload = dict(request) if isinstance(request, dict) else {}
-        result: dict[str, object] = {"token": payload.get("token"), "frame": None, "error": None}
-        try:
-            camera_path = Path(str(payload["camera_path"]))
-            source = CameraVideoSource(camera_path, max_preview_dimension=None)
-            try:
-                _, frame = source.frame_at_seconds(
-                    float(payload["camera_time_s"]),
-                    access_hint="random",
-                )
-            finally:
-                source.close()
-            viewport_frame = rectify_viewport(
-                frame,
-                np.asarray(payload["corners"], dtype=np.float32),
-                tuple(int(value) for value in payload["output_size"]),
-            )
-            result["frame"] = viewport_frame
-        except Exception as exc:
-            result["error"] = str(exc)
-        self.render_finished.emit(result)
-
-
-from heatmap_alignment_resource_job_manager import (  # noqa: F401
-    _ResourceJobRunnable,
-    ResourceJobManager,
-)
-
-
-@dataclass
-class _CameraResourceBackup:
-    camera_source: CameraVideoSource
-    reference_width: int
-    reference_height: int
-    camera_track: CameraTrack
-    current_camera_frame: np.ndarray | None
-    viewport_corners: list[list[float]]
-    export_overlay: ExportOverlaySettings
-
-
-@dataclass
-class _H5ResourceBackup:
-    heatmap_source: HeatmapTruthSource
-    heatmap_track: HeatmapTrack
-    viewport_output_width: int
-    viewport_output_height: int
 
 
 class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
@@ -379,8 +257,8 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             self._handle_resource_job_state_changed
         )
         self.recent_sessions = RecentSessionStore(self.settings)
-        self._camera_replacement_backup: _CameraResourceBackup | None = None
-        self._h5_replacement_backup: _H5ResourceBackup | None = None
+        self._camera_replacement_backup: CameraResourceBackup | None = None
+        self._h5_replacement_backup: H5ResourceBackup | None = None
         self._inflight_h5_identity: H5SlotIdentity | None = None
         self._pending_peak_session_reload: bool = False
 
@@ -440,13 +318,13 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
 
     def _discard_camera_replacement_backup(self) -> None:
         backup = self._camera_replacement_backup
-        if isinstance(backup, _CameraResourceBackup):
+        if isinstance(backup, CameraResourceBackup):
             backup.camera_source.close()
         self._camera_replacement_backup = None
 
     def _discard_h5_replacement_backup(self) -> None:
         backup = self._h5_replacement_backup
-        if isinstance(backup, _H5ResourceBackup):
+        if isinstance(backup, H5ResourceBackup):
             backup.heatmap_source.close()
         self._h5_replacement_backup = None
         self._inflight_h5_identity = None
@@ -1586,33 +1464,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
 
         Returns None if no series is active or the frame has no detection.
         """
-        peak_state = self._active_peak_state()
-        if peak_state is None:
-            return None
-        measurements = active_peak_measurements(peak_state)
-        if measurements is None:
-            return None
-        measurement = next((m for m in measurements if m.frame_index == frame_idx), None)
-        if measurement is None or measurement.status != STATUS_DETECTED:
-            # Still return detection_ratio even when no detection, so the strip renders.
-            if measurement is not None:
-                ratio = (
-                    measurement.detection_ratio if len(measurement.detection_ratio) > 0 else None
-                )
-                return (
-                    None,  # type: ignore[return-value]
-                    active_peak_zero_velocity_m_s(peak_state),
-                    ratio,
-                )
-            return None
-        if measurement.target_distance_m is None:
-            return None
-        ratio = measurement.detection_ratio if len(measurement.detection_ratio) > 0 else None
-        return (
-            measurement.target_distance_m,
-            active_peak_zero_velocity_m_s(peak_state),
-            ratio,
-        )
+        return peak_overlay_for_frame(self._active_peak_state(), frame_idx)  # type: ignore[return-value]
 
     def _annotate_truth_frame_with_peak(
         self,
@@ -1983,10 +1835,10 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._clear_session_dirty()
         self._refresh_session_title()
 
-    def _snapshot_active_camera(self) -> _CameraResourceBackup:
+    def _snapshot_active_camera(self) -> CameraResourceBackup:
         if self.camera_source is None:
             raise RuntimeError("Cannot snapshot camera resource when no camera is loaded.")
-        return _CameraResourceBackup(
+        return CameraResourceBackup(
             camera_source=self.camera_source,
             reference_width=self._camera_reference_width,
             reference_height=self._camera_reference_height,
@@ -2010,10 +1862,10 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             ),
         )
 
-    def _snapshot_active_h5(self) -> _H5ResourceBackup:
+    def _snapshot_active_h5(self) -> H5ResourceBackup:
         if self.heatmap_source is None:
             raise RuntimeError("Cannot snapshot H5 resource when no recording is loaded.")
-        return _H5ResourceBackup(
+        return H5ResourceBackup(
             heatmap_source=self.heatmap_source,
             heatmap_track=HeatmapTrack(
                 path=self.session.heatmap_track.path,
@@ -3457,16 +3309,12 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             self._inspect_resource_messages(kind)
 
     def _resource_path_for_kind(self, kind: ResourceKind) -> str:
-        if kind == "camera":
-            return self.session.camera_track.path
-        if kind == "radar_h5":
-            return self.session.heatmap_track.path
-        if kind == "radar_peak":
-            for s in self._peak_series_list:
-                if s.json_path is not None:
-                    return str(s.json_path)
-            return ""
-        return self._leg2_adapter().path_text()
+        return resource_path_for_kind(
+            self.session,
+            kind,
+            peak_series=self._peak_series_list,
+            leg2_path_text=self._leg2_adapter().path_text(),
+        )
 
     def _reload_resource(self, kind: ResourceKind) -> None:
         path_text = self._resource_path_for_kind(kind)
@@ -3523,7 +3371,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._refresh_resources_ui()
 
     def _reveal_path(self, path: Path) -> None:
-        target = path if path.is_dir() else path.parent
+        target = containing_directory(path)
         if not target.exists():
             QtWidgets.QMessageBox.warning(
                 self, "Show in File Manager", f"Path does not exist:\n{path}"
@@ -3536,7 +3384,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         if not path_text:
             return
         path = Path(path_text)
-        target = path if path.is_dir() else path.parent
+        target = containing_directory(path)
         if not target.exists():
             QtWidgets.QMessageBox.warning(
                 self,
@@ -3707,26 +3555,6 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             self._export_in_progress = False
             self._update_controls_enabled_state()
 
-    @staticmethod
-    def _first_usable_frame(source: CameraVideoSource) -> np.ndarray:
-        last_exc: Exception | None = None
-        for frame_idx in range(source.frame_count):
-            try:
-                return source.frame_at_index(frame_idx, access_hint="random")
-            except ValueError as exc:
-                last_exc = exc
-        raise RuntimeError("Could not read any usable frame from the camera video.") from last_exc
-
-    @staticmethod
-    def _last_usable_frame(source: CameraVideoSource) -> np.ndarray:
-        last_exc: Exception | None = None
-        for frame_idx in range(source.frame_count - 1, -1, -1):
-            try:
-                return source.frame_at_index(frame_idx, access_hint="random")
-            except ValueError as exc:
-                last_exc = exc
-        raise RuntimeError("Could not read any usable frame from the camera video.") from last_exc
-
     def _write_synced_video(
         self,
         output_path: Path,
@@ -3772,8 +3600,8 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
                         int(round(export_rect.height())),
                     ),
                 )
-            first_camera_frame = self._first_usable_frame(original_camera_source)
-            last_camera_frame = self._last_usable_frame(original_camera_source)
+            first_camera_frame = first_usable_frame(original_camera_source)
+            last_camera_frame = last_usable_frame(original_camera_source)
             try:
                 for frame_idx in range(output_frame_count):
                     if progress.wasCanceled():
