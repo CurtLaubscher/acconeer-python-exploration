@@ -712,6 +712,8 @@ def test_signal_plot_legend_shows_leg2_valid_and_not_valid_labels(
         "Leg2 raw ultrasonic (not valid)",
         "Stance phase",
     ]
+    assert plot._leg2_primary_curve.curve.opts["segmentedLineMode"] == "on"
+    assert plot._leg2_faded_curve.curve.opts["segmentedLineMode"] == "on"
 
 
 def test_signal_plot_legend_hides_when_no_signals_plotted(
@@ -735,6 +737,32 @@ def test_signal_plot_legend_hides_when_no_signals_plotted(
     assert legend is not None
     assert legend.isVisible() is False
     assert _legend_item_labels(legend) == []
+
+
+def test_signal_plot_peak_curves_force_segmented_line_mode(
+    qapplication: QApplication,
+) -> None:
+    plot = SignalPlotWidget()
+    plot.resize(480, 240)
+    plot.show()
+    qapplication.processEvents()
+
+    peak_series = PeakDistanceSignalSeries(
+        detected_time_s=np.array([0.0, 1.0, np.nan, 2.0], dtype=np.float64),
+        detected_distance_m=np.array([1.0, 1.2, np.nan, 1.4], dtype=np.float64),
+        candidate_time_s=np.array([0.5, np.nan, 1.5], dtype=np.float64),
+        candidate_distance_m=np.array([0.9, np.nan, 1.1], dtype=np.float64),
+    )
+
+    plot.set_plotted_signals(
+        peak_series_list=[("peaks", "#3b82f6", peak_series)],
+    )
+    qapplication.processEvents()
+
+    assert len(plot._peak_curve_groups) == 1
+    _name, det_curve, cand_curve = plot._peak_curve_groups[0]
+    assert det_curve.curve.opts["segmentedLineMode"] == "on"
+    assert cand_curve.curve.opts["segmentedLineMode"] == "on"
 
 
 def test_timeline_plot_rect_uses_configured_time_axis_span(
