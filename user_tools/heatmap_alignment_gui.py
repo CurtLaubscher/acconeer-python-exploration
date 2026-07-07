@@ -34,7 +34,7 @@ from typing import Any, Iterator, Literal
 
 import cv2
 import numpy as np
-from heatmap_alignment_core import (
+from heatmap_alignment_core_models import (
     H5_TIMELINE_TRACK_COLOR_HEX,
     LEG2_TIMELINE_TRACK_COLOR_HEX,
     PLAYHEAD_ALPHA,
@@ -45,31 +45,23 @@ from heatmap_alignment_core import (
     TIMELINE_PLAYHEAD_COLOR_HEX,
     AlignmentSession,
     CameraTrack,
-    CameraVideoSource,
     DetectionSignalSeries,
     ExportOverlaySettings,
-    H5SlotIdentity,
-    HeatmapPlotRenderer,
     HeatmapTrack,
-    HeatmapTruthSource,
     Leg2MatImportError,
     Leg2UltrasonicSignalSeries,
     LoadedLeg2UltrasonicDatasource,
     SignalPlotViewSettings,
     TimelineH5DragSnapshot,
     apply_timeline_h5_alignment_drag,
-    apply_viewport_visibility,
-    build_leg2_ultrasonic_signal_series,
-    build_peak_distance_signal_series,
     derive_signal_plot_color,
-    desired_h5_identity,
-    elide_path_middle,
-    import_leg2_mat_for_heatmap,
-    import_peak_distance_json_for_heatmap,
-    rectify_viewport,
-    scale_viewport_corners,
     timeline_h5_drag_affects_alignment,
     timeline_view_bounds_s,
+)
+from heatmap_alignment_core_signals import (
+    build_leg2_ultrasonic_signal_series,
+    build_peak_distance_signal_series,
+    import_leg2_mat_for_heatmap,
     visible_signal_y_range,
     visible_signal_y_range_for_series,
 )
@@ -88,9 +80,12 @@ from heatmap_alignment_dialogs import (  # noqa: F401
     ResourcesWindow,
 )
 from heatmap_alignment_export import first_usable_frame, last_usable_frame
+from heatmap_alignment_peak_import import import_peak_distance_json_for_heatmap
 from heatmap_alignment_peak_overlay import peak_overlay_for_frame
 from heatmap_alignment_preview_sync import PreviewSyncPlan, run_preview_sync
 from heatmap_alignment_recent_sessions import RecentSessionStore
+from heatmap_alignment_reconcile import H5SlotIdentity, desired_h5_identity, elide_path_middle
+from heatmap_alignment_rendering import HeatmapPlotRenderer
 from heatmap_alignment_resource_actions import containing_directory, resource_path_for_kind
 from heatmap_alignment_resource_backups import CameraResourceBackup, H5ResourceBackup
 from heatmap_alignment_resource_jobs import (
@@ -135,6 +130,12 @@ from heatmap_alignment_session_lifecycle import (
     SessionTransitionGuard,
 )
 from heatmap_alignment_source_resolution import SourceResolutionViewportWorker
+from heatmap_alignment_sources import CameraVideoSource, HeatmapTruthSource
+from heatmap_alignment_viewport_processing import (
+    apply_viewport_visibility,
+    rectify_viewport,
+    scale_viewport_corners,
+)
 from heatmap_alignment_widgets import (
     DetectionStripWidget,
     DoubleRangeSlider,

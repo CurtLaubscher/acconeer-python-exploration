@@ -20,20 +20,24 @@ and does not define product behavior.
 
 ## Phases
 
-### Phase 0 - Branch and Plan Artifact
+### Phase 0 - Branch and Plan Artifact - Completed
 
 - Add this plan.
 - Review the plan artifact.
 - Commit before moving code.
 
-### Phase 1 - Timeline and Signal Widgets
+Status: completed in `c107e5ec`.
+
+### Phase 1 - Timeline and Signal Widgets - Completed
 
 - Extract timeline range/model and geometry helpers.
 - Extract `SignalPlotWidget`.
 - Extract `AlignmentTimelineWidget`.
 - Keep `heatmap_alignment_timeline_widgets.py` as a compatibility facade.
 
-### Phase 2 - Core Domains
+Status: completed in `c1be21ed`.
+
+### Phase 2 - Core Domains - Completed
 
 - Extract session model/load/save/validation.
 - Extract camera and H5 source adapters.
@@ -43,7 +47,9 @@ and does not define product behavior.
 - Extract resource identity and reconcile helpers.
 - Keep `heatmap_alignment_core.py` as a compatibility facade.
 
-### Phase 3 - Main GUI Ownership Areas
+Status: completed in `9bce2275`.
+
+### Phase 3 - Main GUI Ownership Areas - Completed
 
 - Extract recent-session support.
 - Extract source-resolution viewport worker/helpers.
@@ -52,11 +58,15 @@ and does not define product behavior.
 - Extract export helpers.
 - Keep `HeatmapAlignmentWindow` as the orchestration shell.
 
-### Phase 4 - Import Consolidation and Cleanup
+Status: completed in `a446a877`.
+
+### Phase 4 - Import Consolidation and Cleanup - Completed
 
 - Move internal imports to the new modules where it improves clarity.
 - Keep compatibility facades where external scripts/tests still rely on them.
 - Record deferred follow-ups here or in `openspec/specs/heatmap-alignment-gui/ideas.md`.
+
+Status: completed in this cleanup commit.
 
 ## Phase Gate
 
@@ -68,3 +78,10 @@ For every phase:
 - Add tests when moved behavior lacks meaningful coverage.
 - Commit the phase separately.
 
+## Deferred Follow-ups
+
+- Keep `heatmap_alignment_core.py` and `heatmap_alignment_timeline_widgets.py` as compatibility
+  facades for now. They still protect tests, ad hoc scripts, and older user workflows during the
+  first modularization pass.
+- `HeatmapAlignmentWindow` remains large. A later pass can move more coupled workflow methods into
+  narrow service modules once the current flat module boundaries have settled.
