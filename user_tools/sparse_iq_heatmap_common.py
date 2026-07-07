@@ -60,6 +60,47 @@ def distance_bin_width_m(distances_m: np.ndarray) -> float:
     return float(np.median(np.diff(distances_m)))
 
 
+def finite_axis_bin_width(values: np.ndarray, *, fallback: float = 1.0) -> float:
+    """Return a positive representative bin width for a physical heatmap axis."""
+    if len(values) >= 2:
+        finite_diffs = np.diff(values)
+        finite_diffs = finite_diffs[np.isfinite(finite_diffs)]
+        if len(finite_diffs) > 0:
+            width = float(abs(np.median(finite_diffs)))
+            if width > 0.0:
+                return width
+
+    return float(abs(fallback)) if abs(fallback) > 0.0 else 1.0
+
+
+def axis_bin_edge_extent(
+    values: np.ndarray,
+    *,
+    bin_width: float | None = None,
+    fallback_width: float = 1.0,
+) -> tuple[float, float]:
+    """Return displayed edge extent for an axis whose values are bin centers."""
+    if len(values) == 0:
+        return 0.0, 1.0
+
+    resolved_width = (
+        finite_axis_bin_width(values, fallback=fallback_width)
+        if bin_width is None or not np.isfinite(bin_width) or bin_width <= 0.0
+        else float(bin_width)
+    )
+    return float(values[0] - 0.5 * resolved_width), float(values[-1] + 0.5 * resolved_width)
+
+
+def axis_center_index_at_fraction(values: np.ndarray, fraction: float) -> int:
+    """Return the displayed bin index under a 0..1 axis fraction."""
+    if len(values) == 0:
+        msg = "Cannot resolve a bin index for an empty heatmap axis."
+        raise ValueError(msg)
+
+    clipped = float(np.clip(fraction, 0.0, np.nextafter(1.0, 0.0)))
+    return int(np.clip(np.floor(clipped * len(values)), 0, len(values) - 1))
+
+
 def recording_fps(ticks: np.ndarray, ticks_per_second: int) -> float:
     if len(ticks) < 2:
         return 1.0
@@ -336,8 +377,13 @@ def frame_index_at_time(
 
     clamped = min(max(time_s, 0.0), heatmap_record.duration_s)
     target_tick = heatmap_record.ticks[0] + int(round(clamped * heatmap_record.ticks_per_second))
-    return int(
-        np.searchsorted(heatmap_record.ticks, target_tick, side="left").clip(
-            0, len(heatmap_record.ticks) - 1
-        )
-    )
+    insert_idx = int(np.searchsorted(heatmap_record.ticks, target_tick, side="left"))
+    if insert_idx <= 0:
+        return 0
+    if insert_idx >= len(heatmap_record.ticks):
+        return len(heatmap_record.ticks) - 1
+
+    previous_idx = insert_idx - 1
+    previous_delta = abs(int(target_tick) - int(heatmap_record.ticks[previous_idx]))
+    next_delta = abs(int(heatmap_record.ticks[insert_idx]) - int(target_tick))
+    return previous_idx if previous_delta <= next_delta else insert_idx

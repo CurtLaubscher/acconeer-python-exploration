@@ -20,6 +20,7 @@ import numpy as np
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
 from scipy.io import loadmat
+from sparse_iq_heatmap_common import axis_bin_edge_extent, finite_axis_bin_width
 from sparse_iq_peak_distance_core import (
     STATUS_DETECTED,
     FrameDetectionMeasurement,
@@ -1473,12 +1474,17 @@ class HeatmapPlotRenderer:
         axes = heatmap_axes(
             heatmap_source.record.metadata, heatmap_source.record.sensor_config, subsweep
         )
-        distance_step = np.median(np.diff(axes.distances_m)) if len(axes.distances_m) > 1 else 1.0
+        x_min, x_max = axis_bin_edge_extent(axes.distances_m)
+        y_min, y_max = axis_bin_edge_extent(
+            axes.velocities_m_s,
+            bin_width=axes.velocity_resolution,
+            fallback_width=finite_axis_bin_width(axes.velocities_m_s),
+        )
         self.extent = (
-            float(axes.distances_m[0] - 0.5 * distance_step),
-            float(axes.distances_m[-1] + 0.5 * distance_step),
-            float(axes.velocities_m_s[0] - 0.5 * axes.velocity_resolution),
-            float(axes.velocities_m_s[-1] + 0.5 * axes.velocity_resolution),
+            x_min,
+            x_max,
+            y_min,
+            y_max,
         )
         self._distances_m = axes.distances_m
 
@@ -1725,11 +1731,8 @@ class HeatmapPlotRenderer:
         if len(distances) != len(detection_ratio):
             return
 
-        dist_step = float(np.median(np.diff(distances))) if len(distances) > 1 else 1.0
-        x_edges = np.concatenate([
-            distances - 0.5 * dist_step,
-            [distances[-1] + 0.5 * dist_step],
-        ])
+        dist_step = finite_axis_bin_width(distances)
+        x_edges = np.concatenate([distances - 0.5 * dist_step, [distances[-1] + 0.5 * dist_step]])
         y_edges = np.array([0.0, 1.0])
         ratio_row = detection_ratio[np.newaxis, :]
 

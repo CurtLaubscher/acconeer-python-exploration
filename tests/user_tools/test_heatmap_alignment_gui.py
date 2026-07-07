@@ -4908,12 +4908,61 @@ def test_heatmap_distance_header_paint_no_crash_narrow_with_peak(
     header.repaint()
 
 
+def test_heatmap_distance_header_peak_x_uses_first_bin_center(
+    qapplication: QApplication,
+) -> None:
+    header = HeatmapDistanceHeader()
+    header.set_extent(0.5, 1.5, 0.25)
+    header.set_peak_distance(0.5)
+
+    assert header.peak_x_for_width(200) == pytest.approx(20.0)
+
+
+def test_heatmap_distance_header_peak_x_uses_interior_bin_center(
+    qapplication: QApplication,
+) -> None:
+    header = HeatmapDistanceHeader()
+    header.set_extent(0.5, 1.5, 0.25)
+    header.set_peak_distance(1.0)
+
+    assert header.peak_x_for_width(200) == pytest.approx(100.0)
+
+
+def test_heatmap_distance_header_peak_x_uses_last_bin_center(
+    qapplication: QApplication,
+) -> None:
+    header = HeatmapDistanceHeader()
+    header.set_extent(0.5, 1.5, 0.25)
+    header.set_peak_distance(1.5)
+
+    assert header.peak_x_for_width(200) == pytest.approx(180.0)
+
+
+def test_heatmap_distance_header_peak_x_handles_single_bin_center(
+    qapplication: QApplication,
+) -> None:
+    header = HeatmapDistanceHeader()
+    header.set_extent(1.0, 1.0, 1.0)
+    header.set_peak_distance(1.0)
+
+    assert header.peak_x_for_width(200) == pytest.approx(100.0)
+
+
 def test_heatmap_alignment_window_has_distance_header(
     qapplication: QApplication,
 ) -> None:
     """HeatmapAlignmentWindow must expose _heatmap_distance_header."""
     window = HeatmapAlignmentWindow()
     assert hasattr(window, "_heatmap_distance_header")
+
+
+def test_rendered_heatmap_truth_view_has_no_frame_border(
+    qapplication: QApplication,
+) -> None:
+    window = HeatmapAlignmentWindow()
+
+    assert window.truth_view.frameShape() == QtWidgets.QFrame.Shape.NoFrame
+    assert window.truth_view.lineWidth() == 0
 
 
 def test_heatmap_alignment_window_has_vel_extent_label(
@@ -5123,6 +5172,70 @@ def test_hover_tooltip_magnitude_matches_dvm_lookup(
     assert len(captured) == 1
     # dvm[0, 0] == 0 * 100 == 0; magnitude line should say "Magnitude: 0"
     assert "Magnitude: 0" in captured[0]
+
+
+def test_hover_tooltip_reports_bin_center_at_displayed_bin_center(
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = HeatmapAlignmentWindow()
+    axes = _make_hover_axes()
+    n_vel, n_dist = len(axes.velocities_m_s), len(axes.distances_m)
+    dvm = np.arange(n_vel * n_dist, dtype=np.float32).reshape(n_vel, n_dist)
+    _inject_hover_state(window, axes, dvm)
+
+    window.truth_view.resize(200, 100)
+    rect = window.truth_view.rendered_image_rect()
+    dist_idx = 2
+    vel_idx = 1
+    x = rect.left() + int((dist_idx + 0.5) * rect.width() / n_dist)
+    y = rect.top() + int((vel_idx + 0.5) * rect.height() / n_vel)
+    window._hover_last_pos = QtCore.QPoint(x, y)
+
+    captured: list[str] = []
+
+    def fake_show_text(global_pos: QtCore.QPoint, text: str, widget: QtWidgets.QWidget) -> None:
+        captured.append(text)
+
+    monkeypatch.setattr(QtWidgets.QToolTip, "showText", fake_show_text)
+
+    window._refresh_hover_tooltip()
+
+    assert len(captured) == 1
+    assert "Distance: {:.3f} m".format(float(axes.distances_m[dist_idx])) in captured[0]
+    assert "Velocity: {:.3f} m/s".format(float(axes.velocities_m_s[vel_idx])) in captured[0]
+    assert "Magnitude: {}".format(int(dvm[vel_idx, dist_idx])) in captured[0]
+
+
+def test_hover_tooltip_resolves_to_displayed_bin_near_boundary(
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = HeatmapAlignmentWindow()
+    axes = _make_hover_axes()
+    n_vel, n_dist = len(axes.velocities_m_s), len(axes.distances_m)
+    dvm = np.arange(n_vel * n_dist, dtype=np.float32).reshape(n_vel, n_dist)
+    _inject_hover_state(window, axes, dvm)
+
+    window.truth_view.resize(200, 100)
+    rect = window.truth_view.rendered_image_rect()
+    # One pixel to the right of the boundary between distance bins 1 and 2.
+    boundary_x = rect.left() + int(2 * rect.width() / n_dist)
+    y = rect.top() + int(0.5 * rect.height() / n_vel)
+    window._hover_last_pos = QtCore.QPoint(boundary_x + 1, y)
+
+    captured: list[str] = []
+
+    def fake_show_text(global_pos: QtCore.QPoint, text: str, widget: QtWidgets.QWidget) -> None:
+        captured.append(text)
+
+    monkeypatch.setattr(QtWidgets.QToolTip, "showText", fake_show_text)
+
+    window._refresh_hover_tooltip()
+
+    assert len(captured) == 1
+    assert "Distance: {:.3f} m".format(float(axes.distances_m[2])) in captured[0]
+    assert "Magnitude: {}".format(int(dvm[0, 2])) in captured[0]
 
 
 def test_hover_tooltip_hides_on_leave_event(

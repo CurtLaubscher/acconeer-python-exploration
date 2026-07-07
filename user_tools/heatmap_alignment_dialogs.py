@@ -5,8 +5,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
+import numpy as np
+
 from heatmap_alignment_core import elide_path_middle
 from heatmap_alignment_resource_summaries import ResourceAction, ResourceKind, ResourceSummary
+from sparse_iq_heatmap_common import axis_bin_edge_extent
 from sparse_iq_peak_distance_core import (
     ALGORITHM_LABEL_DISTANCE_NORMALIZED,
     ALGORITHM_LABEL_SUM_VELOCITY,
@@ -651,18 +654,48 @@ class HeatmapDistanceHeader(QtWidgets.QWidget):
         super().__init__(parent)
         self._dist_min: float | None = None
         self._dist_max: float | None = None
+        self._distance_bin_width_m: float | None = None
         self._peak_dist_m: float | None = None
         self.setFixedHeight(20)
         self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
 
-    def set_extent(self, dist_min: float | None, dist_max: float | None) -> None:
+    def set_extent(
+        self,
+        dist_min: float | None,
+        dist_max: float | None,
+        distance_bin_width_m: float | None = None,
+    ) -> None:
         self._dist_min = dist_min
         self._dist_max = dist_max
+        self._distance_bin_width_m = distance_bin_width_m
         self.update()
 
     def set_peak_distance(self, peak_dist_m: float | None) -> None:
         self._peak_dist_m = peak_dist_m
         self.update()
+
+    def peak_x_for_width(self, width_px: int) -> float | None:
+        if (
+            self._peak_dist_m is None
+            or self._dist_min is None
+            or self._dist_max is None
+            or width_px <= 0
+        ):
+            return None
+
+        axis_values = np.array([self._dist_min, self._dist_max], dtype=np.float64)
+        fallback_width = abs(self._dist_max - self._dist_min) or 1.0
+        x_min, x_max = axis_bin_edge_extent(
+            axis_values,
+            bin_width=self._distance_bin_width_m,
+            fallback_width=fallback_width,
+        )
+        if x_max <= x_min:
+            return None
+
+        x_frac = (self._peak_dist_m - x_min) / (x_max - x_min)
+        x_frac = max(0.0, min(1.0, x_frac))
+        return x_frac * width_px
 
     def paintEvent(self, event: QtGui.QPaintEvent) -> None:
         del event
@@ -692,7 +725,13 @@ class HeatmapDistanceHeader(QtWidgets.QWidget):
                 self._peak_dist_m is not None
                 and self._dist_min is not None
                 and self._dist_max is not None
-                and self._dist_max != self._dist_min
+                and (
+                    self._dist_max != self._dist_min
+                    or (
+                        self._distance_bin_width_m is not None
+                        and self._distance_bin_width_m > 0.0
+                    )
+                )
             )
 
             # Measure extent labels when we have the data (regardless of show_extents threshold).
@@ -707,13 +746,11 @@ class HeatmapDistanceHeader(QtWidgets.QWidget):
             # Measure peak label.
             peak_text = ""
             peak_text_w = 0
-            peak_x = 0
+            peak_x = 0.0
             if has_peak:
                 peak_text = "{:.3f} m".format(self._peak_dist_m)
                 peak_text_w = fm.horizontalAdvance(peak_text)
-                x_frac = (self._peak_dist_m - self._dist_min) / (self._dist_max - self._dist_min)
-                x_frac = max(0.0, min(1.0, x_frac))
-                peak_x = int(x_frac * w)
+                peak_x = self.peak_x_for_width(w) or 0.0
 
             # Decide whether extent labels can coexist with the peak label without overlap.
             # Extent labels sit at [margin, margin+left_w] and [w-margin-right_w, w-margin].
