@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Literal
 
 import numpy as np
-from heatmap_alignment_core import (
+from heatmap_alignment_core_models import (
     H5_TIMELINE_TRACK_COLOR_HEX,
     LEG2_TIMELINE_TRACK_COLOR_HEX,
     PLAYHEAD_ALPHA,
@@ -18,6 +18,8 @@ from heatmap_alignment_core import (
     Leg2UltrasonicSignalSeries,
     SignalPlotViewSettings,
     derive_signal_plot_color,
+)
+from heatmap_alignment_core_signals import (
     visible_signal_y_range,
     visible_signal_y_range_for_series,
 )

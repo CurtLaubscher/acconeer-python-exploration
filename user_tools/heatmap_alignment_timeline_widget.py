@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from typing import Protocol, runtime_checkable
 
-from heatmap_alignment_core import (
+from heatmap_alignment_core_models import (
     H5_TIMELINE_TRACK_COLOR_HEX,
     LEG2_TIMELINE_TRACK_COLOR_HEX,
     PLAYHEAD_ALPHA,

@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
-from heatmap_alignment_core import timeline_view_bounds_s
+from heatmap_alignment_core_models import timeline_view_bounds_s
 
 from PySide6 import QtCore
 
