@@ -26,6 +26,13 @@ Use the repo-managed runtime and tooling defined in `pyproject.toml`.
 - Treat clear confirmations such as "ok", "green light", "go ahead", or equivalent wording as permission to proceed with the agreed implementation scope.
 - Before moving from discussion into implementation, make the transition clear so the user can correct scope or sequencing first.
 
+## Ideas Document Rules
+
+- Treat `openspec/specs/heatmap-alignment-gui/ideas.md` as a living planning file, not an archive of completed work.
+- When a branch fixes, rejects, supersedes, or deliberately defers an item from `ideas.md`, update that file in the same branch when practical.
+- Keep the `Current Triage` section synchronized with the detailed themed sections below it.
+- Remove fixed bug bullets instead of leaving them in place as historical notes unless remaining context is still actionable.
+
 ## OpenSpec Git Rules
 
 - Before creating or modifying OpenSpec change artifacts, check the current branch. If the work is for a new OpenSpec change and the current branch is `master` or otherwise unrelated, create or switch to `<user-account>/<openspec-change-name>` first.
