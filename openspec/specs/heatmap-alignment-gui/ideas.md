@@ -548,31 +548,10 @@ Possible directions:
 - Render nearby paused frames after the user stops scrubbing or dragging.
 - Keep low-quality frames available immediately as the fallback interaction path.
 - Consider consolidating source-resolution viewport rendering with the same job/request lifecycle used for resource loading, or a shared lightweight async request framework, so cancellation, stale-result discard, bounded execution, and shutdown handling are not maintained in separate systems.
-- Separate source-frame decode from viewport transformation. Today the source-resolution
-  viewport worker opens the original camera video, seeks to the requested time, decodes
-  the source frame, and warps it to the requested viewport output size as one job. That
-  is simple, but it makes size-only or layout-only changes expensive: resizing the
-  viewport, H5 load completion establishing a better comparison size, or other display
-  changes can cause a full camera seek/decode even when the camera source frame at the
-  current time has not changed. A future pipeline should treat camera decode, viewport
-  rectification, viewport visibility/post-processing, and final widget display as
-  separate products so transform-only work can reuse the decoded source frame.
-- Move toward a preview product/job dependency model. A future design could key preview
-  products by their true inputs, such as `DecodedCameraFrame(path, time)`,
-  `RectifiedViewport(frame_key, corners, output_size)`,
-  `EnhancedViewport(rectified_key, visibility_settings)`, `H5TruthFrame(h5_identity,
-  time, render_settings)`, `RenderedHeatmap(frame_key)`, `OverlayPreview(...)`, and
-  signal plot products. Each background result would be applied only if its key still
-  matches the latest request; stale results would be discarded and expensive work could
-  be cancelled when practical. This would make resize handling, scrubbing, source
-  replacement, shutdown cancellation, and future multi-resource previews easier to reason
-  about than one broad "sync previews" path.
-- Use explicit preview invalidation reasons/plans as a bridge before a full product graph.
-  Callers should describe what changed (camera time, camera source, viewport geometry,
-  viewport output size, viewport visibility settings, H5 render settings, signal-only
-  changes, export-overlay-only changes, layout-only changes), and a central policy should
-  decide which preview products are stale. This keeps caller code from knowing low-level
-  cache details such as whether a source-resolution viewport frame should be cleared.
+- Defer source-frame decode vs. viewport-transform separation until the broader
+  preview product/job dependency model exists, unless a concrete bug or measurement
+  makes a narrow interim split necessary. See **Preview product and job dependency
+  model**.
 - **Partially implemented (`heatmap-preview-invalidation-fixes`):** viewport resize now
   keeps the current best viewport frame visible, supersedes stale source-resolution
   requests, and schedules a debounced refresh for the latest effective output size. The
@@ -619,6 +598,44 @@ Possible directions:
 This matters if camera/monitor movement becomes a real problem. It is not a current priority.
 
 ## Architecture And Data Model
+
+### Preview product and job dependency model
+
+The current `PreviewChange` / `PreviewSyncPlan` layer is a bridge toward a more
+explicit dependency model. Keep using it for targeted invalidation fixes, but do
+not expand it into a full framework through ad hoc flags.
+
+A future design should key preview products by their true inputs, for example:
+- `DecodedCameraFrame(path, time)`
+- `RectifiedViewport(decoded_frame_key, corners, output_size)`
+- `EnhancedViewport(rectified_viewport_key, visibility_settings)`
+- `H5TruthFrame(h5_identity, time, render_settings)`
+- `RenderedHeatmap(h5_truth_frame_key, plot_settings)`
+- `OverlayPreview(rendered_heatmap_key, overlay_geometry, presentation_settings)`
+- `SignalPlotData(resource_identities, signal_settings, visible_range)`
+
+Each background result should apply only if its key still matches the latest
+request. Stale results should be discarded, and expensive work should be
+cancelled when practical. This would make resize handling, scrubbing, source
+replacement, shutdown cancellation, and future multi-resource previews easier to
+reason about than one broad `_sync_previews(...)` path.
+
+Stage separation should follow this dependency model rather than precede it as a
+standalone refactor:
+- Camera decode should produce a reusable decoded frame keyed by source identity
+  and time.
+- Viewport rectification should depend on the decoded frame, viewport corners,
+  and output size.
+- Viewport visibility/enhancement should depend on the rectified viewport and
+  visibility settings.
+- H5 readiness should refresh H5-derived products such as rendered heatmap,
+  hover/peak state, signals, and export overlay preview, but should not invalidate
+  camera decode or viewport products unless a real layout/viewport input changed.
+
+This keeps the current simple camera/H5 workflow intact while creating a path
+toward fully backed resources, multiple optional datasources, and job lifecycle
+rules that handle cancellation, stale-result discard, partial outputs, and
+shutdown consistently.
 
 ### Internal session naming cleanup
 
