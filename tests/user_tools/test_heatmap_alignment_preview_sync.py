@@ -11,7 +11,7 @@ if str(USER_TOOLS_PATH) not in sys.path:
 
 import numpy as np
 
-from heatmap_alignment_preview_sync import PreviewSyncPlan, run_preview_sync  # noqa: E402
+from heatmap_alignment_preview_sync import PreviewChange, PreviewSyncPlan, run_preview_sync  # noqa: E402
 
 
 def test_preview_sync_plan_defaults() -> None:
@@ -38,6 +38,79 @@ def test_preview_sync_plan_custom_values() -> None:
     assert plan.timeline_visible_range_s == (1.0, 2.0)
     assert plan.recompute_timeline_range is True
     assert plan.refresh_signal_data is False
+
+
+def test_preview_sync_plan_from_signal_only_change() -> None:
+    plan = PreviewSyncPlan.from_changes(PreviewChange.SIGNALS_ONLY)
+
+    assert plan.invalidate_source_resolution is False
+    assert plan.refresh_camera_frame is False
+    assert plan.refresh_camera_corners is False
+    assert plan.refresh_timeline_feedback is True
+    assert plan.refresh_signal_data is True
+    assert plan.refresh_heatmap_truth is False
+    assert plan.refresh_export_overlay is False
+    assert plan.refresh_viewport is False
+
+
+def test_preview_sync_plan_from_export_overlay_change() -> None:
+    plan = PreviewSyncPlan.from_changes(PreviewChange.EXPORT_OVERLAY)
+
+    assert plan.invalidate_source_resolution is False
+    assert plan.refresh_camera_frame is False
+    assert plan.refresh_timeline_feedback is False
+    assert plan.refresh_heatmap_truth is True
+    assert plan.refresh_export_overlay is True
+    assert plan.refresh_viewport is False
+
+
+def test_preview_sync_plan_from_viewport_visibility_change() -> None:
+    plan = PreviewSyncPlan.from_changes(PreviewChange.VIEWPORT_VISIBILITY)
+
+    assert plan.invalidate_source_resolution is False
+    assert plan.refresh_camera_frame is False
+    assert plan.refresh_heatmap_truth is False
+    assert plan.refresh_export_overlay is False
+    assert plan.refresh_viewport is True
+
+
+def test_preview_sync_plan_from_layout_change() -> None:
+    plan = PreviewSyncPlan.from_changes(PreviewChange.LAYOUT)
+
+    assert plan.invalidate_source_resolution is False
+    assert plan.refresh_camera_frame is False
+    assert plan.refresh_heatmap_truth is False
+    assert plan.refresh_export_overlay is False
+    assert plan.refresh_viewport is True
+
+
+def test_preview_sync_plan_from_camera_time_change() -> None:
+    plan = PreviewSyncPlan.from_changes(
+        PreviewChange.CAMERA_TIME,
+        camera_access_hint="scrub",
+        refresh_signal_data=False,
+    )
+
+    assert plan.camera_access_hint == "scrub"
+    assert plan.invalidate_source_resolution is True
+    assert plan.refresh_camera_frame is True
+    assert plan.refresh_timeline_feedback is True
+    assert plan.refresh_signal_data is False
+    assert plan.refresh_heatmap_truth is True
+    assert plan.refresh_export_overlay is True
+    assert plan.refresh_viewport is True
+
+
+def test_preview_sync_plan_combines_change_flags() -> None:
+    plan = PreviewSyncPlan.from_changes(PreviewChange.SIGNALS_ONLY | PreviewChange.LAYOUT)
+
+    assert plan.invalidate_source_resolution is False
+    assert plan.refresh_camera_frame is False
+    assert plan.refresh_timeline_feedback is True
+    assert plan.refresh_signal_data is True
+    assert plan.refresh_heatmap_truth is False
+    assert plan.refresh_export_overlay is False
+    assert plan.refresh_viewport is True
 
 
 class _RecordingPreviewHost:
@@ -115,3 +188,12 @@ def test_run_preview_sync_skips_invalidate_when_disabled() -> None:
 
     assert "invalidate" not in host.calls
     assert host.calls[0] == "camera:auto"
+
+
+def test_run_preview_sync_can_refresh_only_signal_feedback() -> None:
+    host = _RecordingPreviewHost()
+    plan = PreviewSyncPlan.from_changes(PreviewChange.SIGNALS_ONLY)
+
+    run_preview_sync(plan, host)
+
+    assert host.calls == ["timeline:None:False:True"]
