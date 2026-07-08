@@ -6,9 +6,11 @@ from pathlib import Path
 from typing import Protocol
 
 from heatmap_alignment_resource_actions import containing_directory, resource_path_for_kind
+from heatmap_alignment_resource_job_state import resource_job_target_filename
 from heatmap_alignment_resource_model import ResourceAction, ResourceKind
 from heatmap_alignment_resource_summaries import (
     AlignmentResourceRuntime,
+    ResourceJobPresentation,
     ResourceSummary,
     build_alignment_resource_summaries,
 )
@@ -45,7 +47,6 @@ class ResourceCoordinatorHost(Protocol):
     def _active_peak_state(self): ...
     def _leg2_adapter(self): ...
     def _active_h5_bin_widths(self) -> tuple[float | None, float | None]: ...
-    def _resource_job_presentations(self) -> tuple: ...
     def _generate_peak_series(self) -> None: ...
     def _resolve_peak_series_target(self, *args, **kwargs): ...
     def _save_peak_series(self, series_id: str) -> None: ...
@@ -99,8 +100,24 @@ class ResourceCoordinator:
             leg2_sample_count=leg2_adapter.sample_count(),
             reload_errors=tuple(self.reload_errors.items()),
             load_warnings=tuple(self.load_warnings.items()),
-            resource_jobs=host._resource_job_presentations(),
+            resource_jobs=self._resource_job_presentations(),
         )
+
+    def _resource_job_presentations(self) -> tuple[ResourceJobPresentation, ...]:
+        presentations: list[ResourceJobPresentation] = []
+        for snapshot in self._host._resource_job_manager.snapshots():
+            if snapshot.phase == "idle":
+                continue
+            presentations.append(
+                ResourceJobPresentation(
+                    kind=snapshot.kind,
+                    phase=snapshot.phase,
+                    target_filename=resource_job_target_filename(snapshot.target_path),
+                    detail=snapshot.message,
+                    cancellable=snapshot.cancellable,
+                )
+            )
+        return tuple(presentations)
 
     def resource_summaries(self) -> tuple[ResourceSummary, ...]:
         host = self._host

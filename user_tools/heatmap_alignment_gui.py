@@ -92,7 +92,6 @@ from heatmap_alignment_resource_job_state import (
     ResourceJobBoard,
     ResourceJobError,
     ResourceJobKind,
-    ResourceJobSlotState,
     ResourceJobSnapshot,
     begin_resource_job,
     clear_resource_job,
@@ -100,13 +99,12 @@ from heatmap_alignment_resource_job_state import (
     mark_resource_job_phase,
     request_cancel_resource_job,
     resource_job_blocks_export,
-    resource_job_target_filename,
+    resource_job_loading_overlay_message,
+    resource_job_slot_is_active,
     should_apply_job_result,
 )
 from heatmap_alignment_resource_summaries import (
-    AlignmentResourceRuntime,
     ResourceAction,
-    ResourceJobPresentation,
     ResourceKind,
     ResourceSummary,
     build_alignment_resource_summaries,
@@ -1995,49 +1993,34 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._update_resource_loading_overlays()
         self._refresh_resources_ui()
 
-    def _resource_loading_overlay_message(self, slot: ResourceJobSlotState) -> str:
-        if slot.message:
-            return slot.message
-        target = resource_job_target_filename(slot.target_path)
-        if slot.phase == "waiting":
-            return f"Waiting for {target}..."
-        if slot.phase == "building":
-            return f"Building preview proxy for {target}..."
-        return f"Loading {target}..."
-
-    _ACTIVE_RESOURCE_JOB_PHASES = ("pending", "loading", "building", "waiting", "cancelling")
-
-    def _resource_job_slot_is_active(self, slot: ResourceJobSlotState) -> bool:
-        return slot.phase in self._ACTIVE_RESOURCE_JOB_PHASES
-
     def _update_resource_loading_overlays(self) -> None:
         camera_slot = self._resource_job_manager.board().camera
-        if self._resource_job_slot_is_active(camera_slot):
+        if resource_job_slot_is_active(camera_slot):
             self.camera_view.set_loading_overlay(
                 True,
-                self._resource_loading_overlay_message(camera_slot),
+                resource_job_loading_overlay_message(camera_slot),
                 dim_content=self.camera_source is not None,
             )
         else:
             self.camera_view.set_loading_overlay(False)
 
         h5_slot = self._resource_job_manager.board().radar_h5
-        if self._resource_job_slot_is_active(h5_slot):
+        if resource_job_slot_is_active(h5_slot):
             self.truth_view.set_loading_overlay(
                 True,
-                self._resource_loading_overlay_message(h5_slot),
+                resource_job_loading_overlay_message(h5_slot),
                 dim_content=self.heatmap_source is not None,
             )
         else:
             self.truth_view.set_loading_overlay(False)
 
-        camera_active = self._resource_job_slot_is_active(camera_slot)
-        h5_active = self._resource_job_slot_is_active(h5_slot)
+        camera_active = resource_job_slot_is_active(camera_slot)
+        h5_active = resource_job_slot_is_active(h5_slot)
         if camera_active or h5_active:
             overlay_slot = camera_slot if camera_active else h5_slot
             self.viewport_view.set_loading_overlay(
                 True,
-                self._resource_loading_overlay_message(overlay_slot),
+                resource_job_loading_overlay_message(overlay_slot),
                 dim_content=(
                     self.viewport_view._pixmap is not None
                     or self.camera_source is not None
@@ -2046,22 +2029,6 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             )
         else:
             self.viewport_view.set_loading_overlay(False)
-
-    def _resource_job_presentations(self) -> tuple[ResourceJobPresentation, ...]:
-        presentations: list[ResourceJobPresentation] = []
-        for snapshot in self._resource_job_manager.snapshots():
-            if snapshot.phase == "idle":
-                continue
-            presentations.append(
-                ResourceJobPresentation(
-                    kind=snapshot.kind,
-                    phase=snapshot.phase,
-                    target_filename=resource_job_target_filename(snapshot.target_path),
-                    detail=snapshot.message,
-                    cancellable=snapshot.cancellable,
-                )
-            )
-        return tuple(presentations)
 
     def _populate_controls_from_session(self) -> None:
         with self._session_dirty_guard():
@@ -3039,9 +3006,6 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
     def _resources_window(self, value: ResourcesWindow | None) -> None:
         self._resource_coordinator.resources_window = value
 
-    def _resource_runtime(self) -> AlignmentResourceRuntime:
-        return self._resource_coordinator.resource_runtime()
-
     def _active_h5_bin_widths(self) -> tuple[float | None, float | None]:
         if self.heatmap_source is None:
             return None, None
@@ -3178,12 +3142,6 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
     ) -> None:
         self._resource_coordinator.invoke_resource_action(kind, action, series_id=series_id)
 
-    def _resource_path_for_kind(self, kind: ResourceKind) -> str:
-        return self._resource_coordinator.resource_path_for_kind(kind)
-
-    def _reload_resource(self, kind: ResourceKind) -> None:
-        self._resource_coordinator.reload_resource(kind)
-
     def _reload_peak_series(self, series_id: str) -> None:
         """Reload a specific peak series from its saved JSON path with H5-aware validation."""
         ps = next((s for s in self._peak_series_list if s.series_id == series_id), None)
@@ -3210,15 +3168,6 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._refresh_signal_plot()
         self._refresh_current_heatmap_peak_overlay()
         self._refresh_resources_ui()
-
-    def _reveal_path(self, path: Path) -> None:
-        self._resource_coordinator.reveal_path(path)
-
-    def _reveal_resource_path(self, kind: ResourceKind) -> None:
-        self._resource_coordinator.reveal_resource_path(kind)
-
-    def _inspect_resource_messages(self, kind: ResourceKind) -> None:
-        self._resource_coordinator.inspect_resource_messages(kind)
 
     def unload_camera_video(self, *, mark_dirty: bool = True) -> None:
         if mark_dirty:

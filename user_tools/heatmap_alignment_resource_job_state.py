@@ -20,6 +20,14 @@ ResourceJobPhase = Literal[
     "superseded",
 ]
 
+ACTIVE_RESOURCE_JOB_PHASES: tuple[ResourceJobPhase, ...] = (
+    "pending",
+    "loading",
+    "building",
+    "waiting",
+    "cancelling",
+)
+
 
 class ResourceJobError(RuntimeError):
     """Raised when a background resource job fails."""
@@ -169,7 +177,7 @@ def clear_resource_job(board: ResourceJobBoard, kind: ResourceJobKind) -> None:
 def resource_job_blocks_export(board: ResourceJobBoard) -> bool:
     for kind in ("camera", "radar_h5"):
         phase = board.slot(kind).phase
-        if phase in ("pending", "loading", "building", "waiting", "cancelling"):
+        if phase in ACTIVE_RESOURCE_JOB_PHASES:
             return True
     return False
 
@@ -178,3 +186,18 @@ def resource_job_target_filename(path: Path | None) -> str:
     if path is None:
         return ""
     return path.name
+
+
+def resource_job_slot_is_active(slot: ResourceJobSlotState) -> bool:
+    return slot.phase in ACTIVE_RESOURCE_JOB_PHASES
+
+
+def resource_job_loading_overlay_message(slot: ResourceJobSlotState) -> str:
+    if slot.message:
+        return slot.message
+    target = resource_job_target_filename(slot.target_path)
+    if slot.phase == "waiting":
+        return f"Waiting for {target}..."
+    if slot.phase == "building":
+        return f"Building preview proxy for {target}..."
+    return f"Loading {target}..."
