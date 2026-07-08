@@ -86,8 +86,8 @@ from heatmap_alignment_preview_sync import PreviewSyncPlan, run_preview_sync
 from heatmap_alignment_recent_sessions import RecentSessionStore
 from heatmap_alignment_reconcile import H5SlotIdentity, desired_h5_identity, elide_path_middle
 from heatmap_alignment_rendering import HeatmapPlotRenderer
-from heatmap_alignment_resource_actions import containing_directory, resource_path_for_kind
 from heatmap_alignment_resource_backups import CameraResourceBackup, H5ResourceBackup
+from heatmap_alignment_resource_coordinator import ResourceCoordinator
 from heatmap_alignment_resource_jobs import (
     CameraResourceJobResult,
     LoadedH5ResourcePayload,
@@ -175,8 +175,6 @@ from sparse_iq_peak_distance_core import (
 )
 
 from PySide6 import QtCore, QtGui, QtWidgets
-from PySide6.QtCore import QUrl
-from PySide6.QtGui import QDesktopServices
 
 import pyqtgraph as pg
 
@@ -228,9 +226,6 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
 
         self.session = AlignmentSession()
         self._session_lifecycle = SessionLifecycleState()
-        self._resources_window: ResourcesWindow | None = None
-        self._resource_reload_errors: dict[ResourceKind, str] = {}
-        self._resource_load_warnings: dict[ResourceKind, tuple[str, ...]] = {}
         self.camera_source: CameraVideoSource | None = None
         self.heatmap_source: HeatmapTruthSource | None = None
         self.current_camera_frame: np.ndarray | None = None
@@ -257,6 +252,9 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._resource_job_manager.job_state_changed.connect(
             self._handle_resource_job_state_changed
         )
+        self._resource_coordinator = ResourceCoordinator(self)
+        self._resource_reload_errors = self._resource_coordinator.reload_errors
+        self._resource_load_warnings = self._resource_coordinator.load_warnings
         self.recent_sessions = RecentSessionStore(self.settings)
         self._camera_replacement_backup: CameraResourceBackup | None = None
         self._h5_replacement_backup: H5ResourceBackup | None = None
@@ -3029,35 +3027,16 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             self._mark_session_dirty()
         self._viewport_drag_start_corners = None
 
-    def _resource_runtime(self) -> AlignmentResourceRuntime:
-        peak_detected: int | None = None
-        peak_total: int | None = None
-        peak_state = self._active_peak_state()
-        if peak_state is not None:
-            counts = peak_state_detected_counts(peak_state)
-            if counts is not None:
-                peak_detected, peak_total = counts
-        leg2_adapter = self._leg2_adapter()
-        leg2_valid = leg2_adapter.valid_segment_count()
-        leg2_samples = leg2_adapter.sample_count()
-        radar_distance_bin_width, radar_velocity_bin_width = self._active_h5_bin_widths()
+    @property
+    def _resources_window(self) -> ResourcesWindow | None:
+        return self._resource_coordinator.resources_window
 
-        return AlignmentResourceRuntime(
-            camera_loaded=self.camera_source is not None,
-            radar_h5_loaded=self._h5_ready_for_generation(),
-            radar_peak_loaded=self._has_peaks_in_memory(),
-            leg2_loaded=leg2_adapter.is_loaded(),
-            peak_detected_count=peak_detected,
-            peak_measurement_count=peak_total,
-            radar_distance_bin_width_m=radar_distance_bin_width,
-            radar_velocity_bin_width_m_s=radar_velocity_bin_width,
-            peaks_dirty=self._any_peaks_unsaved(),
-            leg2_valid_segment_count=leg2_valid,
-            leg2_sample_count=leg2_samples,
-            reload_errors=tuple(self._resource_reload_errors.items()),
-            load_warnings=tuple(self._resource_load_warnings.items()),
-            resource_jobs=self._resource_job_presentations(),
-        )
+    @_resources_window.setter
+    def _resources_window(self, value: ResourcesWindow | None) -> None:
+        self._resource_coordinator.resources_window = value
+
+    def _resource_runtime(self) -> AlignmentResourceRuntime:
+        return self._resource_coordinator.resource_runtime()
 
     def _active_h5_bin_widths(self) -> tuple[float | None, float | None]:
         if self.heatmap_source is None:
@@ -3079,9 +3058,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         return distance_bin_width_m(axes.distances_m), axes.velocity_resolution
 
     def resource_summaries(self) -> tuple[ResourceSummary, ...]:
-        return build_alignment_resource_summaries(
-            self.session, self._resource_runtime(), peak_series=self._peak_series_list or None
-        )
+        return self._resource_coordinator.resource_summaries()
 
     def _mark_session_dirty(self) -> None:
         if self._session_lifecycle.mark_dirty():
@@ -3177,172 +3154,31 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.setWindowTitle(self._session_lifecycle.window_title())
 
     def _refresh_resources_ui(self) -> None:
-        summaries = self.resource_summaries()
-        if self._resources_window is not None:
-            self._resources_window.refresh(summaries, self._session_lifecycle.current_path)
-            # Update generate/import buttons in Resources window footer.
-            self._resources_window.generate_peak_series_button.setEnabled(
-                self._h5_ready_for_generation()
-            )
-            self._resources_window.import_peak_series_button.setEnabled(True)
-
-        has_camera_path = bool(self.session.camera_track.path)
-        has_h5_path = bool(self.session.heatmap_track.path)
-        has_peak_path = bool(self._peak_series_list) or bool(
-            any(e.path for e in self.session.peak_series)
-        )  # True when a saved series path exists (for reload/reveal actions)
-        leg2_adapter = self._leg2_adapter()
-        has_leg2_path = leg2_adapter.has_path()
-
-        self.unload_camera_action.setEnabled(self.camera_source is not None)
-        self.unload_h5_action.setEnabled(self.heatmap_source is not None)
-        self.unload_peak_action.setEnabled(self._has_peaks_in_memory() or has_peak_path)
-        self.unload_leg2_action.setEnabled(leg2_adapter.can_unload())
-        self.reload_camera_action.setEnabled(has_camera_path)
-        self.reload_h5_action.setEnabled(has_h5_path)
-        self.reload_peak_action.setEnabled(has_peak_path)
-        self.reload_leg2_action.setEnabled(has_leg2_path)
-
-        self.export_synced_action.setEnabled(
-            self.camera_source is not None
-            and self.heatmap_source is not None
-            and not self._export_in_progress
-            and not self._resource_job_manager.blocks_export()
-        )
+        self._resource_coordinator.refresh_resources_ui()
 
     def _show_resources_window(self) -> None:
-        if self._resources_window is None:
-            self._resources_window = ResourcesWindow(self)
-            self._refresh_resources_ui()
-            self._resources_window.show()
-            return
-
-        saved_geometry = self._resources_window.geometry()
-        self._refresh_resources_ui()
-        self._resources_window.setGeometry(saved_geometry)
-        self._resources_window.show()
-        self._resources_window.raise_()
+        self._resource_coordinator.show_resources_window()
 
     def _set_resource_reload_error(self, kind: ResourceKind, message: str | None) -> None:
-        if message:
-            self._resource_reload_errors[kind] = message
-        else:
-            self._resource_reload_errors.pop(kind, None)
+        self._resource_coordinator.set_reload_error(kind, message)
 
     def _set_resource_warnings(
         self,
         kind: ResourceKind,
         warnings: tuple[str, ...] | list[str],
     ) -> None:
-        if warnings:
-            self._resource_load_warnings[kind] = tuple(warnings)
-        else:
-            self._resource_load_warnings.pop(kind, None)
+        self._resource_coordinator.set_warnings(kind, warnings)
 
     def invoke_resource_action(
         self, kind: ResourceKind, action: ResourceAction, *, series_id: str = ""
     ) -> None:
-        if action == "cancel":
-            if kind in ("camera", "radar_h5"):
-                if self._resource_job_manager.cancel_job(kind):
-                    self._handle_resource_job_state_changed()
-            return
-        if action == "generate":
-            if kind == "radar_peak":
-                self._generate_peak_series()
-            return
-        if action == "save":
-            if kind == "radar_peak":
-                target = self._resolve_peak_series_target(series_id, prefer_unsaved=True)
-                if target is not None:
-                    self._save_peak_series(target.series_id)
-            return
-        if action == "save_as":
-            if kind == "radar_peak":
-                target = self._resolve_peak_series_target(series_id, fallback_last=True)
-                if target is not None:
-                    self._save_peak_series_as(target.series_id)
-            return
-        if action == "load":
-            if kind == "camera":
-                self._load_camera_video()
-            elif kind == "radar_h5":
-                self._load_h5_recording()
-            elif kind == "radar_peak":
-                self._import_peak_series()
-            elif kind == "leg2_mat":
-                self._import_leg2_mat()
-            return
-        if action == "replace":
-            self.invoke_resource_action(kind, "load", series_id=series_id)
-            return
-        if action == "unload":
-            if kind == "camera":
-                self.unload_camera_video()
-            elif kind == "radar_h5":
-                self.unload_h5_recording()
-            elif kind == "radar_peak":
-                target = self._resolve_peak_series_target(series_id, fallback_last=True)
-                if target is not None:
-                    self._unload_peak_series(target.series_id)
-            elif kind == "leg2_mat":
-                self._clear_leg2_ultrasonic_datasource()
-            return
-        if action == "reload":
-            if kind == "radar_peak" and series_id:
-                self._reload_peak_series(series_id)
-            else:
-                self._reload_resource(kind)
-            return
-        if action == "reveal":
-            if kind == "radar_peak" and series_id:
-                ps = self._resolve_peak_series_target(
-                    series_id,
-                    fallback_active=False,
-                    fallback_last=False,
-                )
-                if ps and ps.json_path:
-                    self._reveal_path(ps.json_path)
-            else:
-                self._reveal_resource_path(kind)
-            return
-        if action == "inspect":
-            self._inspect_resource_messages(kind)
+        self._resource_coordinator.invoke_resource_action(kind, action, series_id=series_id)
 
     def _resource_path_for_kind(self, kind: ResourceKind) -> str:
-        return resource_path_for_kind(
-            self.session,
-            kind,
-            peak_series=self._peak_series_list,
-            leg2_path_text=self._leg2_adapter().path_text(),
-        )
+        return self._resource_coordinator.resource_path_for_kind(kind)
 
     def _reload_resource(self, kind: ResourceKind) -> None:
-        path_text = self._resource_path_for_kind(kind)
-        if not path_text:
-            return
-        path = Path(path_text)
-        if not path.exists():
-            self._set_resource_reload_error(kind, f"File not found: {path}")
-            self._refresh_resources_ui()
-            return
-        self._set_resource_reload_error(kind, None)
-        if kind == "camera":
-            self.load_camera_from_path(path)
-        elif kind == "radar_h5":
-            self.load_h5_from_path(path)
-        elif kind == "radar_peak":
-            if self._any_peaks_unsaved() and not self._confirm_action_dialog(
-                title="Reload peak series",
-                question="Reload saved peak series from disk?",
-                informative="Unsaved generated peak data will be lost.",
-                accept_label="Reload",
-            ):
-                return
-            # Reload all session-persisted peak series; drop generated unsaved rows.
-            self._reload_peak_series_from_session()
-        elif kind == "leg2_mat":
-            self.load_leg2_mat_from_path(path, show_dialogs=True)
+        self._resource_coordinator.reload_resource(kind)
 
     def _reload_peak_series(self, series_id: str) -> None:
         """Reload a specific peak series from its saved JSON path with H5-aware validation."""
@@ -3372,41 +3208,13 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._refresh_resources_ui()
 
     def _reveal_path(self, path: Path) -> None:
-        target = containing_directory(path)
-        if not target.exists():
-            QtWidgets.QMessageBox.warning(
-                self, "Show in File Manager", f"Path does not exist:\n{path}"
-            )
-            return
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(target.resolve())))
+        self._resource_coordinator.reveal_path(path)
 
     def _reveal_resource_path(self, kind: ResourceKind) -> None:
-        path_text = self._resource_path_for_kind(kind)
-        if not path_text:
-            return
-        path = Path(path_text)
-        target = containing_directory(path)
-        if not target.exists():
-            QtWidgets.QMessageBox.warning(
-                self,
-                "Show in File Manager",
-                f"Path does not exist:\n{path}",
-            )
-            return
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(target.resolve())))
+        self._resource_coordinator.reveal_resource_path(kind)
 
     def _inspect_resource_messages(self, kind: ResourceKind) -> None:
-        summary = next(
-            (entry for entry in self.resource_summaries() if entry.kind == kind),
-            None,
-        )
-        if summary is None or not summary.messages:
-            return
-        QtWidgets.QMessageBox.warning(
-            self,
-            f"{summary.display_name} details",
-            "\n".join(summary.messages),
-        )
+        self._resource_coordinator.inspect_resource_messages(kind)
 
     def unload_camera_video(self, *, mark_dirty: bool = True) -> None:
         if mark_dirty:
