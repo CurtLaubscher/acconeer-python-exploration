@@ -489,6 +489,36 @@ Possible directions:
 - Render nearby paused frames after the user stops scrubbing or dragging.
 - Keep low-quality frames available immediately as the fallback interaction path.
 - Consider consolidating source-resolution viewport rendering with the same job/request lifecycle used for resource loading, or a shared lightweight async request framework, so cancellation, stale-result discard, bounded execution, and shutdown handling are not maintained in separate systems.
+- Separate source-frame decode from viewport transformation. Today the source-resolution
+  viewport worker opens the original camera video, seeks to the requested time, decodes
+  the source frame, and warps it to the requested viewport output size as one job. That
+  is simple, but it makes size-only or layout-only changes expensive: resizing the
+  viewport, H5 load completion establishing a better comparison size, or other display
+  changes can cause a full camera seek/decode even when the camera source frame at the
+  current time has not changed. A future pipeline should treat camera decode, viewport
+  rectification, viewport visibility/post-processing, and final widget display as
+  separate products so transform-only work can reuse the decoded source frame.
+- Move toward a preview product/job dependency model. A future design could key preview
+  products by their true inputs, such as `DecodedCameraFrame(path, time)`,
+  `RectifiedViewport(frame_key, corners, output_size)`,
+  `EnhancedViewport(rectified_key, visibility_settings)`, `H5TruthFrame(h5_identity,
+  time, render_settings)`, `RenderedHeatmap(frame_key)`, `OverlayPreview(...)`, and
+  signal plot products. Each background result would be applied only if its key still
+  matches the latest request; stale results would be discarded and expensive work could
+  be cancelled when practical. This would make resize handling, scrubbing, source
+  replacement, shutdown cancellation, and future multi-resource previews easier to reason
+  about than one broad "sync previews" path.
+- Use explicit preview invalidation reasons/plans as a bridge before a full product graph.
+  Callers should describe what changed (camera time, camera source, viewport geometry,
+  viewport output size, viewport visibility settings, H5 render settings, signal-only
+  changes, export-overlay-only changes, layout-only changes), and a central policy should
+  decide which preview products are stale. This keeps caller code from knowing low-level
+  cache details such as whether a source-resolution viewport frame should be cleared.
+- For viewport resize, prefer keeping the current best viewport frame visible while the
+  user drags, then scheduling a settled refresh for the latest effective output size.
+  The ideal future path is to reuse the decoded camera source frame and only redo the
+  viewport transform during resize; until decode and transform are split, avoid clearing
+  a high-quality viewport frame immediately just because layout changed.
 
 This is related to async processing, but specifically targets viewport visual quality and not just responsiveness.
 
