@@ -2291,24 +2291,24 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._mark_session_dirty()
         self.session.export_overlay.visible = visible
         self.camera_view.set_export_overlay(self.session.export_overlay)
-        self._sync_previews(camera_access_hint="auto")
+        self._sync_previews(changes=PreviewChange.EXPORT_OVERLAY)
 
     def _set_export_overlay_preview_enabled(self, enabled: bool) -> None:
         self._mark_session_dirty()
         self.session.export_overlay.preview_enabled = enabled
         self.camera_view.set_export_overlay(self.session.export_overlay)
-        self._sync_previews(camera_access_hint="auto")
+        self._sync_previews(changes=PreviewChange.EXPORT_OVERLAY)
 
     def _set_export_overlay_drag_active(self, active: bool) -> None:
         self._freeze_export_overlay_preview = active
         if not active:
-            self._sync_previews(camera_access_hint="auto")
+            self._sync_previews(changes=PreviewChange.EXPORT_OVERLAY)
 
     def _reset_export_overlay(self) -> None:
         self._mark_session_dirty()
         self._initialize_default_export_overlay(force=True)
         self.camera_view.set_export_overlay(self.session.export_overlay)
-        self._sync_previews(camera_access_hint="auto")
+        self._sync_previews(changes=PreviewChange.EXPORT_OVERLAY)
 
     def _load_current_camera_frame(self, *, access_hint: str = "auto") -> None:
         if self.camera_source is None:

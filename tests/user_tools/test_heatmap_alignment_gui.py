@@ -4043,6 +4043,41 @@ def test_leg2_signal_changes_do_not_invalidate_viewport_quality(
     assert calls == []
 
 
+def test_export_overlay_changes_do_not_invalidate_viewport_quality(
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = HeatmapAlignmentWindow()
+    calls: list[str] = []
+    truth_frame = np.zeros((2, 2, 3), dtype=np.uint8)
+
+    monkeypatch.setattr(
+        window, "_invalidate_source_resolution_viewport", lambda: calls.append("invalidate")
+    )
+    monkeypatch.setattr(
+        window, "_load_current_camera_frame", lambda *, access_hint="auto": calls.append("camera")
+    )
+    monkeypatch.setattr(window, "_sync_heatmap_truth_preview", lambda: (7, truth_frame))
+    monkeypatch.setattr(
+        window,
+        "_sync_export_overlay_preview",
+        lambda *, frame_idx, truth_frame: calls.append("overlay"),
+    )
+    monkeypatch.setattr(
+        window,
+        "_sync_viewport_preview",
+        lambda *, truth_frame, invalidate_source_resolution: calls.append("viewport"),
+    )
+    monkeypatch.setattr(window, "_initialize_default_export_overlay", lambda *, force: None)
+
+    window._set_export_overlay_visible(False)
+    window._set_export_overlay_preview_enabled(False)
+    window._set_export_overlay_drag_active(False)
+    window._reset_export_overlay()
+
+    assert calls == ["overlay", "overlay", "overlay", "overlay"]
+
+
 def test_explicit_timeline_range_reset_paths(
     tmp_path: Path,
     qapplication: QApplication,
