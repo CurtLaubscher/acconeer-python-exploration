@@ -89,7 +89,7 @@ idea is fixed, rejected, or superseded.
 
 - Keep `PreviewChange` / `PreviewSyncPlan` as the current bridge for targeted
   invalidation.
-- Treat the preview product/job dependency model as the likely prerequisite for
+- Treat the preview output/job dependency model as the likely prerequisite for
   the fully backed multi-resource system, not just a preview-performance cleanup.
 - Move toward that dependency model before splitting camera decode, viewport
   transform, and enhancement into separate execution stages.
@@ -548,8 +548,8 @@ Possible directions:
 - Keep low-quality frames available immediately as the fallback interaction path.
 - Consider consolidating source-resolution viewport rendering with the same job/request lifecycle used for resource loading, or a shared lightweight async request framework, so cancellation, stale-result discard, bounded execution, and shutdown handling are not maintained in separate systems.
 - Defer source-frame decode vs. viewport-transform separation until the broader
-  preview product/job dependency model exists, unless a concrete bug or measurement
-  makes a narrow interim split necessary. See **Preview product and job dependency
+  preview output/job dependency model exists, unless a concrete bug or measurement
+  makes a narrow interim split necessary. See **Preview output and job dependency
   model**.
 - **Partially implemented (`heatmap-preview-invalidation-fixes`):** viewport resize now
   keeps the current best viewport frame visible, supersedes stale source-resolution
@@ -598,7 +598,7 @@ This matters if camera/monitor movement becomes a real problem. It is not a curr
 
 ## Architecture And Data Model
 
-### Preview product and job dependency model
+### Preview output and job dependency model
 
 The current `PreviewChange` / `PreviewSyncPlan` layer is a bridge toward a more
 explicit dependency model. Keep using it for targeted invalidation fixes, but do
@@ -606,12 +606,12 @@ not expand it into a full framework through ad hoc flags.
 
 This model is the likely prerequisite for a fully backed multi-resource system.
 Before the workbench can comfortably support multiple optional sources, derived
-resources, and quality modes, it needs a clear way to name products, declare what
+resources, and quality modes, it needs a clear way to name outputs, declare what
 inputs make them fresh, and decide what happens to in-flight work when those
 inputs change. Without that layer, each new resource type is likely to add more
 one-off preview, cancellation, and stale-result paths.
 
-A future design should key preview products by their true inputs, for example:
+A future design should key preview outputs by their true inputs, for example:
 - `DecodedCameraFrame(path, time)`
 - `RectifiedViewport(decoded_frame_key, corners, output_size)`
 - `EnhancedViewport(rectified_viewport_key, visibility_settings)`
@@ -633,18 +633,18 @@ cancelled when practical. This would make resize handling, scrubbing, source
 replacement, shutdown cancellation, and future multi-resource previews easier to
 reason about than one broad `_sync_previews(...)` path.
 
-Each job/product should also declare lifecycle semantics. Some work can be
+Each job/output should also declare lifecycle semantics. Some work can be
 cancelled promptly and clean up partial output, some work can only be abandoned so
 late results are ignored, some close/quit paths may need to drain because
 interruption risks user-visible output, and long user-initiated work may need an
-explicit Cancel UI. Shutdown behavior should be part of the product/job contract,
+explicit Cancel UI. Shutdown behavior should be part of the output/job contract,
 including cancellation, stale-result discard, partial-output cleanup, and whether
 close/quit waits, abandons, or drains each job.
 
 The dependency model should also distinguish user-visible resources from derived
-preview products. A camera video, H5 recording, peak JSON, and Leg2 MAT file are
+preview outputs. A camera video, H5 recording, peak JSON, and Leg2 MAT file are
 resources the user loads or saves in a session; decoded frames, rectified
-viewports, rendered heatmaps, overlays, and plot arrays are derived products that
+viewports, rendered heatmaps, overlays, and plot arrays are derived outputs that
 can usually be recomputed. That distinction should guide persistence,
 replacement, cancellation, partial-output cleanup, and future cache invalidation.
 
@@ -656,9 +656,9 @@ standalone refactor:
   and output size.
 - Viewport visibility/enhancement should depend on the rectified viewport and
   visibility settings.
-- H5 readiness should refresh H5-derived products such as rendered heatmap,
+- H5 readiness should refresh H5-derived outputs such as rendered heatmap,
   hover/peak state, signals, and export overlay preview, but should not invalidate
-  camera decode or viewport products unless a real layout/viewport input changed.
+  camera decode or viewport outputs unless a real layout/viewport input changed.
 
 This keeps the current simple camera/H5 workflow intact while creating a path
 toward fully backed resources, multiple optional datasources, and job lifecycle
@@ -701,7 +701,7 @@ Possible directions:
 The current implementation is conceptually track-based but practically hard-coded for one camera video and one H5 heatmap source.
 
 Possible future directions:
-- Build on the preview product/job dependency model instead of introducing a
+- Build on the preview output/job dependency model instead of introducing a
   separate resource framework with duplicate freshness and lifecycle rules.
 - Add pluggable source adapters for additional data formats.
 - Allow additional video-like or signal-like tracks.

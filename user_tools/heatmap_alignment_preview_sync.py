@@ -25,6 +25,87 @@ class PreviewChange(Flag):
     LAYOUT = auto()
 
 
+class PreviewWork(Flag):
+    """Named work items that one preview sync may perform."""
+
+    INVALIDATE_SOURCE_RESOLUTION = auto()
+    CAMERA_FRAME = auto()
+    CAMERA_CORNERS = auto()
+    TIMELINE_FEEDBACK = auto()
+    SIGNAL_DATA = auto()
+    HEATMAP_TRUTH = auto()
+    EXPORT_OVERLAY = auto()
+    VIEWPORT = auto()
+
+
+def preview_work_for_changes(
+    changes: PreviewChange,
+    *,
+    refresh_signal_data: bool = True,
+) -> PreviewWork:
+    """Map high-level change reasons to the preview work they require."""
+    work = PreviewWork(0)
+
+    camera_frame_changes = (
+        PreviewChange.CAMERA_TIME | PreviewChange.CAMERA_SOURCE | PreviewChange.CAMERA_OFFSET
+    )
+    viewport_decode_changes = camera_frame_changes | PreviewChange.VIEWPORT_GEOMETRY
+    viewport_display_changes = (
+        viewport_decode_changes
+        | PreviewChange.VIEWPORT_OUTPUT_SIZE
+        | PreviewChange.VIEWPORT_VISIBILITY
+        | PreviewChange.LAYOUT
+    )
+    h5_frame_changes = (
+        PreviewChange.CAMERA_TIME | PreviewChange.H5_SOURCE | PreviewChange.H5_RENDER_SETTINGS
+    )
+    timeline_changes = (
+        PreviewChange.CAMERA_TIME
+        | PreviewChange.CAMERA_SOURCE
+        | PreviewChange.CAMERA_OFFSET
+        | PreviewChange.H5_SOURCE
+        | PreviewChange.SIGNALS_ONLY
+    )
+
+    if not changes:
+        work |= (
+            PreviewWork.INVALIDATE_SOURCE_RESOLUTION
+            | PreviewWork.CAMERA_FRAME
+            | PreviewWork.CAMERA_CORNERS
+            | PreviewWork.TIMELINE_FEEDBACK
+            | PreviewWork.HEATMAP_TRUTH
+            | PreviewWork.EXPORT_OVERLAY
+            | PreviewWork.VIEWPORT
+        )
+        if refresh_signal_data:
+            work |= PreviewWork.SIGNAL_DATA
+        return work
+
+    if changes & viewport_decode_changes:
+        work |= PreviewWork.INVALIDATE_SOURCE_RESOLUTION
+    if changes & camera_frame_changes:
+        work |= PreviewWork.CAMERA_FRAME
+    if changes & (PreviewChange.CAMERA_SOURCE | PreviewChange.VIEWPORT_GEOMETRY):
+        work |= PreviewWork.CAMERA_CORNERS
+    if changes & timeline_changes:
+        work |= PreviewWork.TIMELINE_FEEDBACK
+    if refresh_signal_data and changes & (PreviewChange.H5_SOURCE | PreviewChange.SIGNALS_ONLY):
+        work |= PreviewWork.SIGNAL_DATA
+    if changes & (h5_frame_changes | PreviewChange.EXPORT_OVERLAY):
+        work |= PreviewWork.HEATMAP_TRUTH
+    if changes & (
+        PreviewChange.CAMERA_TIME
+        | PreviewChange.H5_SOURCE
+        | PreviewChange.H5_RENDER_SETTINGS
+        | PreviewChange.EXPORT_OVERLAY
+    ):
+        work |= PreviewWork.EXPORT_OVERLAY
+    if changes & viewport_display_changes:
+        work |= PreviewWork.VIEWPORT
+
+    return work
+
+
 @dataclass(frozen=True)
 class PreviewSyncPlan:
     """Inputs controlling one full preview refresh pass."""
@@ -55,61 +136,22 @@ class PreviewSyncPlan:
 
         The mapping is intentionally conservative: direct ``PreviewSyncPlan``
         construction keeps the established full-sync behavior, while explicit
-        change reasons opt in to only the affected preview products.
+        change reasons opt in to only the affected preview outputs.
         """
-        if not changes:
-            return cls(
-                camera_access_hint=camera_access_hint,
-                timeline_visible_range_s=timeline_visible_range_s,
-                recompute_timeline_range=recompute_timeline_range,
-                refresh_signal_data=refresh_signal_data,
-            )
-
-        camera_frame_changes = (
-            PreviewChange.CAMERA_TIME | PreviewChange.CAMERA_SOURCE | PreviewChange.CAMERA_OFFSET
-        )
-        viewport_decode_changes = camera_frame_changes | PreviewChange.VIEWPORT_GEOMETRY
-        viewport_display_changes = (
-            viewport_decode_changes
-            | PreviewChange.VIEWPORT_OUTPUT_SIZE
-            | PreviewChange.VIEWPORT_VISIBILITY
-            | PreviewChange.LAYOUT
-        )
-        h5_frame_changes = (
-            PreviewChange.CAMERA_TIME | PreviewChange.H5_SOURCE | PreviewChange.H5_RENDER_SETTINGS
-        )
-        timeline_changes = (
-            PreviewChange.CAMERA_TIME
-            | PreviewChange.CAMERA_SOURCE
-            | PreviewChange.CAMERA_OFFSET
-            | PreviewChange.H5_SOURCE
-            | PreviewChange.SIGNALS_ONLY
-        )
+        work = preview_work_for_changes(changes, refresh_signal_data=refresh_signal_data)
 
         return cls(
             camera_access_hint=camera_access_hint,
-            invalidate_source_resolution=bool(changes & viewport_decode_changes),
+            invalidate_source_resolution=bool(work & PreviewWork.INVALIDATE_SOURCE_RESOLUTION),
             timeline_visible_range_s=timeline_visible_range_s,
             recompute_timeline_range=recompute_timeline_range,
-            refresh_signal_data=refresh_signal_data and bool(
-                changes & (PreviewChange.H5_SOURCE | PreviewChange.SIGNALS_ONLY)
-            ),
-            refresh_camera_frame=bool(changes & camera_frame_changes),
-            refresh_camera_corners=bool(
-                changes & (PreviewChange.CAMERA_SOURCE | PreviewChange.VIEWPORT_GEOMETRY)
-            ),
-            refresh_timeline_feedback=bool(changes & timeline_changes),
-            refresh_heatmap_truth=bool(changes & (h5_frame_changes | PreviewChange.EXPORT_OVERLAY)),
-            refresh_export_overlay=bool(
-                changes
-                & (
-                    PreviewChange.CAMERA_TIME
-                    | PreviewChange.H5_SOURCE
-                    | PreviewChange.H5_RENDER_SETTINGS
-                    | PreviewChange.EXPORT_OVERLAY
-                )
-            ),
-            refresh_viewport=bool(changes & viewport_display_changes),
+            refresh_signal_data=bool(work & PreviewWork.SIGNAL_DATA),
+            refresh_camera_frame=bool(work & PreviewWork.CAMERA_FRAME),
+            refresh_camera_corners=bool(work & PreviewWork.CAMERA_CORNERS),
+            refresh_timeline_feedback=bool(work & PreviewWork.TIMELINE_FEEDBACK),
+            refresh_heatmap_truth=bool(work & PreviewWork.HEATMAP_TRUTH),
+            refresh_export_overlay=bool(work & PreviewWork.EXPORT_OVERLAY),
+            refresh_viewport=bool(work & PreviewWork.VIEWPORT),
         )
 
 

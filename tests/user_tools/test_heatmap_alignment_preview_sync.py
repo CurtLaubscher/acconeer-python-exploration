@@ -11,7 +11,13 @@ if str(USER_TOOLS_PATH) not in sys.path:
 
 import numpy as np
 
-from heatmap_alignment_preview_sync import PreviewChange, PreviewSyncPlan, run_preview_sync  # noqa: E402
+from heatmap_alignment_preview_sync import (  # noqa: E402
+    PreviewChange,
+    PreviewSyncPlan,
+    PreviewWork,
+    preview_work_for_changes,
+    run_preview_sync,
+)
 
 
 def test_preview_sync_plan_defaults() -> None:
@@ -38,6 +44,52 @@ def test_preview_sync_plan_custom_values() -> None:
     assert plan.timeline_visible_range_s == (1.0, 2.0)
     assert plan.recompute_timeline_range is True
     assert plan.refresh_signal_data is False
+
+
+def test_preview_work_for_no_changes_matches_full_refresh() -> None:
+    assert preview_work_for_changes(PreviewChange(0)) == (
+        PreviewWork.INVALIDATE_SOURCE_RESOLUTION
+        | PreviewWork.CAMERA_FRAME
+        | PreviewWork.CAMERA_CORNERS
+        | PreviewWork.TIMELINE_FEEDBACK
+        | PreviewWork.SIGNAL_DATA
+        | PreviewWork.HEATMAP_TRUTH
+        | PreviewWork.EXPORT_OVERLAY
+        | PreviewWork.VIEWPORT
+    )
+
+
+def test_preview_work_for_signal_only_change() -> None:
+    assert preview_work_for_changes(PreviewChange.SIGNALS_ONLY) == (
+        PreviewWork.TIMELINE_FEEDBACK | PreviewWork.SIGNAL_DATA
+    )
+
+
+def test_preview_work_for_h5_source_change_does_not_touch_viewport() -> None:
+    assert preview_work_for_changes(PreviewChange.H5_SOURCE) == (
+        PreviewWork.TIMELINE_FEEDBACK
+        | PreviewWork.SIGNAL_DATA
+        | PreviewWork.HEATMAP_TRUTH
+        | PreviewWork.EXPORT_OVERLAY
+    )
+
+
+def test_preview_work_for_viewport_visibility_change() -> None:
+    assert preview_work_for_changes(PreviewChange.VIEWPORT_VISIBILITY) == PreviewWork.VIEWPORT
+
+
+def test_preview_work_for_camera_time_change() -> None:
+    assert preview_work_for_changes(
+        PreviewChange.CAMERA_TIME,
+        refresh_signal_data=False,
+    ) == (
+        PreviewWork.INVALIDATE_SOURCE_RESOLUTION
+        | PreviewWork.CAMERA_FRAME
+        | PreviewWork.TIMELINE_FEEDBACK
+        | PreviewWork.HEATMAP_TRUTH
+        | PreviewWork.EXPORT_OVERLAY
+        | PreviewWork.VIEWPORT
+    )
 
 
 def test_preview_sync_plan_from_signal_only_change() -> None:
