@@ -517,11 +517,12 @@ Possible directions:
   changes, export-overlay-only changes, layout-only changes), and a central policy should
   decide which preview products are stale. This keeps caller code from knowing low-level
   cache details such as whether a source-resolution viewport frame should be cleared.
-- For viewport resize, prefer keeping the current best viewport frame visible while the
-  user drags, then scheduling a settled refresh for the latest effective output size.
-  The ideal future path is to reuse the decoded camera source frame and only redo the
-  viewport transform during resize; until decode and transform are split, avoid clearing
-  a high-quality viewport frame immediately just because layout changed.
+- **Partially implemented (`heatmap-preview-invalidation-fixes`):** viewport resize now
+  keeps the current best viewport frame visible, supersedes stale source-resolution
+  requests, and schedules a debounced refresh for the latest effective output size. The
+  remaining future improvement is to reuse the decoded camera source frame and only redo
+  the viewport transform during resize; until decode and transform are split, the settled
+  refresh may still perform decode and transform together.
 
 This is related to async processing, but specifically targets viewport visual quality and not just responsiveness.
 

@@ -2333,6 +2333,11 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._pending_source_resolution_request = None
         self.viewport_source_resolution_timer.stop()
 
+    def _retarget_source_resolution_viewport(self) -> None:
+        self._source_resolution_request_token += 1
+        self._pending_source_resolution_request = None
+        self.viewport_source_resolution_timer.stop()
+
     def _source_resolution_request_payload(
         self,
         *,
@@ -2990,11 +2995,14 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
     def _viewport_preview_resized(self) -> None:
         if (
             self.current_camera_frame is None
-            or self.heatmap_source is None
             or not self.session.viewport.corners
         ):
             return
-        self._sync_previews(camera_access_hint="auto")
+        self._retarget_source_resolution_viewport()
+        self._sync_previews(changes=PreviewChange.LAYOUT)
+        self._schedule_source_resolution_viewport_refresh(
+            viewport_size=self._viewport_output_size(None)
+        )
 
     def _viewport_drag_finished(self) -> None:
         if self._viewport_drag_start_corners is not None:

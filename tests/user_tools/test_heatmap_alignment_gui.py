@@ -3927,6 +3927,37 @@ def test_viewport_preview_renders_without_h5_truth_frame(
     assert captured_frames[-1].shape == (2, 2, 3)
 
 
+def test_viewport_resize_keeps_hq_frame_and_schedules_settled_refresh(
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = HeatmapAlignmentWindow()
+    hq_frame = np.full((2, 2, 3), 128, dtype=np.uint8)
+    window.current_camera_frame = np.zeros((4, 4, 3), dtype=np.uint8)
+    window.session.viewport.corners = [[0.0, 0.0], [3.0, 0.0], [3.0, 3.0], [0.0, 3.0]]
+    window._source_resolution_viewport_frame = hq_frame
+    window._source_resolution_request_token = 12
+    scheduled_sizes: list[tuple[int, int]] = []
+
+    monkeypatch.setattr(window, "_viewport_output_size", lambda _truth_frame: (320, 180))
+    monkeypatch.setattr(
+        window,
+        "_display_viewport_corners",
+        lambda: np.asarray([[0.0, 0.0], [3.0, 0.0], [3.0, 3.0], [0.0, 3.0]], dtype=np.float32),
+    )
+    monkeypatch.setattr(
+        window,
+        "_schedule_source_resolution_viewport_refresh",
+        lambda *, viewport_size: scheduled_sizes.append(viewport_size),
+    )
+
+    window._viewport_preview_resized()
+
+    assert window._source_resolution_request_token == 13
+    assert window._source_resolution_viewport_frame is hq_frame
+    assert scheduled_sizes == [(320, 180)]
+
+
 def test_h5_job_completion_preserves_timeline_range(
     qapplication: QApplication,
     monkeypatch: pytest.MonkeyPatch,
