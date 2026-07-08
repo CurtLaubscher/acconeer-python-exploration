@@ -1702,6 +1702,37 @@ def test_resource_job_manager_abandon_releases_pending_h5_payload(
     assert manager.board().radar_h5.phase == "idle"
 
 
+def test_resource_job_manager_abandon_terminates_registered_proxy_process(
+    qapplication: QApplication,
+) -> None:
+    from heatmap_alignment_gui import ResourceJobManager
+    from heatmap_alignment_resource_job_state import begin_resource_job
+
+    manager = ResourceJobManager()
+    generation = begin_resource_job(
+        manager.board(),
+        "camera",
+        target_path=Path("/tmp/trial.mp4"),
+        replaces_active=False,
+    )
+
+    class _FakeProcess:
+        def __init__(self) -> None:
+            self.terminated = False
+
+        def terminate(self) -> None:
+            self.terminated = True
+
+    process = _FakeProcess()
+    manager._register_proxy_process(generation, process)
+
+    manager.abandon_all_jobs()
+
+    assert process.terminated is True
+    assert generation not in manager._proxy_processes
+    assert manager.board().camera.phase == "idle"
+
+
 def test_resource_job_manager_stale_success_releases_h5_payload(
     qapplication: QApplication,
 ) -> None:
