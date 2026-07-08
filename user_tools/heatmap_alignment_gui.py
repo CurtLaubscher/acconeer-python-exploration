@@ -219,6 +219,10 @@ from heatmap_alignment_viewport_widgets import (  # noqa: F401
 class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
     """Main window for the manual alignment workbench."""
 
+    _COLOR_LIMIT_MIN = 0.0
+    _COLOR_LIMIT_MAX = 1_000_000.0
+    _COLOR_LIMIT_GAP = 0.1
+
     source_resolution_viewport_render_requested = QtCore.Signal(object)
 
     def __init__(self) -> None:
@@ -262,6 +266,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._h5_replacement_backup: H5ResourceBackup | None = None
         self._inflight_h5_identity: H5SlotIdentity | None = None
         self._pending_peak_session_reload: bool = False
+        self._updating_color_limit_spins = False
 
         self.viewport_source_resolution_timer = QtCore.QTimer(self)
         self.viewport_source_resolution_timer.setSingleShot(True)
@@ -541,12 +546,18 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         rendered_heatmap_controls_layout.setContentsMargins(0, 0, 0, 0)
         rendered_heatmap_color_row = QtWidgets.QHBoxLayout()
         self.color_min_spin = QtWidgets.QDoubleSpinBox()
-        self.color_min_spin.setRange(0.0, 1_000_000.0)
+        self.color_min_spin.setRange(
+            self._COLOR_LIMIT_MIN,
+            self._COLOR_LIMIT_MAX - self._COLOR_LIMIT_GAP,
+        )
         self.color_min_spin.setValue(0.0)
         self.color_min_spin.setDecimals(1)
         self.color_min_spin.setSingleStep(100.0)
         self.color_max_spin = QtWidgets.QDoubleSpinBox()
-        self.color_max_spin.setRange(0.0, 1_000_000.0)
+        self.color_max_spin.setRange(
+            self._COLOR_LIMIT_MIN + self._COLOR_LIMIT_GAP,
+            self._COLOR_LIMIT_MAX,
+        )
         self.color_max_spin.setValue(3000.0)
         self.color_max_spin.setDecimals(1)
         self.color_max_spin.setSingleStep(100.0)
@@ -2038,17 +2049,106 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         with self._session_dirty_guard():
             self._populate_controls_from_session_impl()
 
+    def _normalized_color_limits(
+        self,
+        color_min: float,
+        color_max: float | None,
+    ) -> tuple[float, float]:
+        min_value = float(np.clip(color_min, self._COLOR_LIMIT_MIN, self._COLOR_LIMIT_MAX))
+        max_value = (
+            self._COLOR_LIMIT_MIN
+            if color_max is None
+            else float(np.clip(color_max, self._COLOR_LIMIT_MIN, self._COLOR_LIMIT_MAX))
+        )
+        if max_value <= min_value:
+            if min_value <= self._COLOR_LIMIT_MAX - self._COLOR_LIMIT_GAP:
+                max_value = min_value + self._COLOR_LIMIT_GAP
+            else:
+                max_value = self._COLOR_LIMIT_MAX
+                min_value = self._COLOR_LIMIT_MAX - self._COLOR_LIMIT_GAP
+        return min_value, max_value
+
+    def _sync_color_limit_spin_constraints(self) -> None:
+        min_value, max_value = self._normalized_color_limits(
+            self.color_min_spin.value(),
+            self.color_max_spin.value(),
+        )
+        self._updating_color_limit_spins = True
+        try:
+            self.color_min_spin.blockSignals(True)
+            self.color_max_spin.blockSignals(True)
+            self.color_min_spin.setRange(
+                self._COLOR_LIMIT_MIN,
+                self._COLOR_LIMIT_MAX,
+            )
+            self.color_max_spin.setRange(
+                self._COLOR_LIMIT_MIN,
+                self._COLOR_LIMIT_MAX,
+            )
+            self.color_min_spin.setValue(min_value)
+            self.color_max_spin.setValue(max_value)
+            self.color_min_spin.setRange(
+                self._COLOR_LIMIT_MIN,
+                max(self._COLOR_LIMIT_MIN, max_value - self._COLOR_LIMIT_GAP),
+            )
+            self.color_max_spin.setRange(
+                min(self._COLOR_LIMIT_MAX, min_value + self._COLOR_LIMIT_GAP),
+                self._COLOR_LIMIT_MAX,
+            )
+        finally:
+            self.color_min_spin.blockSignals(False)
+            self.color_max_spin.blockSignals(False)
+            self._updating_color_limit_spins = False
+
+    def _set_color_limit_spin_values(self, color_min: float, color_max: float) -> None:
+        self._updating_color_limit_spins = True
+        try:
+            self.color_min_spin.blockSignals(True)
+            self.color_max_spin.blockSignals(True)
+            self.color_min_spin.setRange(
+                self._COLOR_LIMIT_MIN,
+                self._COLOR_LIMIT_MAX,
+            )
+            self.color_max_spin.setRange(
+                self._COLOR_LIMIT_MIN,
+                self._COLOR_LIMIT_MAX,
+            )
+            self.color_min_spin.setValue(color_min)
+            self.color_max_spin.setValue(color_max)
+        finally:
+            self.color_min_spin.blockSignals(False)
+            self.color_max_spin.blockSignals(False)
+            self._updating_color_limit_spins = False
+        self._sync_color_limit_spin_constraints()
+
+    def _apply_render_settings_to_source(self) -> None:
+        if self.heatmap_source is None:
+            return
+        update_render_settings = getattr(self.heatmap_source, "update_render_settings", None)
+        if update_render_settings is None:
+            return
+        update_render_settings(
+            color_min=self.session.render.color_min,
+            color_max=self.session.render.color_max,
+            fixed_levels=True,
+        )
+        self._rebuild_overlay_plot_renderer()
+
     def _populate_controls_from_session_impl(self) -> None:
         self.offset_spin.blockSignals(True)
         self.offset_spin.setValue(self.session.timeline.offset_s)
         self.offset_spin.blockSignals(False)
-        self.color_min_spin.blockSignals(True)
-        self.color_max_spin.blockSignals(True)
         self.viewport_enhance_checkbox.blockSignals(True)
         self.viewport_map_to_viridis_checkbox.blockSignals(True)
         self.viewport_gamma_spin.blockSignals(True)
-        self.color_min_spin.setValue(self.session.render.color_min)
-        self.color_max_spin.setValue(self.session.render.color_max or 0.0)
+        color_min, color_max = self._normalized_color_limits(
+            self.session.render.color_min,
+            self.session.render.color_max,
+        )
+        self.session.render.color_min = color_min
+        self.session.render.color_max = color_max
+        self._set_color_limit_spin_values(color_min, color_max)
+        self._apply_render_settings_to_source()
         self.viewport_enhance_checkbox.setChecked(self.session.viewport_visibility.enabled)
         self.viewport_map_to_viridis_checkbox.setChecked(
             self.session.viewport_visibility.map_to_viridis
@@ -2059,8 +2159,6 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         )
         self.viewport_gamma_spin.setValue(self.session.viewport_visibility.gamma)
         self._update_viewport_visibility_labels()
-        self.color_min_spin.blockSignals(False)
-        self.color_max_spin.blockSignals(False)
         self.viewport_enhance_checkbox.blockSignals(False)
         self.viewport_map_to_viridis_checkbox.blockSignals(False)
         self.viewport_gamma_spin.blockSignals(False)
@@ -2258,16 +2356,13 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             self._set_playback_active(False)
 
     def _render_settings_changed(self) -> None:
+        if self._updating_color_limit_spins:
+            return
         self._mark_session_dirty()
+        self._sync_color_limit_spin_constraints()
         self.session.render.color_min = self.color_min_spin.value()
         self.session.render.color_max = self.color_max_spin.value()
-        if self.heatmap_source is not None:
-            self.heatmap_source.update_render_settings(
-                color_min=self.session.render.color_min,
-                color_max=self.session.render.color_max,
-                fixed_levels=True,
-            )
-            self._rebuild_overlay_plot_renderer()
+        self._apply_render_settings_to_source()
         self._sync_previews(changes=PreviewChange.H5_RENDER_SETTINGS)
 
     def _corners_changed(self, corners: list) -> None:

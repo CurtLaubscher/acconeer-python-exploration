@@ -919,6 +919,48 @@ def test_color_min_lower_bound_is_zero(qapplication: QApplication) -> None:
     assert window.color_min_spin.minimum() == pytest.approx(0.0)
 
 
+def test_color_min_max_spinboxes_keep_strict_range(qapplication: QApplication) -> None:
+    window = HeatmapAlignmentWindow()
+
+    window.color_max_spin.setValue(500.0)
+    window.color_min_spin.setValue(500.0)
+    assert window.color_min_spin.value() < window.color_max_spin.value()
+    assert window.color_min_spin.maximum() == pytest.approx(window.color_max_spin.value() - 0.1)
+
+    window.color_min_spin.setValue(900.0)
+    window.color_max_spin.setValue(900.0)
+    assert window.color_min_spin.value() < window.color_max_spin.value()
+    assert window.color_max_spin.minimum() == pytest.approx(window.color_min_spin.value() + 0.1)
+
+
+def test_populate_controls_applies_session_color_limits_to_loaded_h5(
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = HeatmapAlignmentWindow()
+    calls: list[tuple[float, float | None, bool]] = []
+
+    class _FakeHeatmapSource:
+        def update_render_settings(
+            self,
+            color_min: float,
+            color_max: float | None,
+            fixed_levels: bool,
+        ) -> None:
+            calls.append((color_min, color_max, fixed_levels))
+
+    window.heatmap_source = _FakeHeatmapSource()
+    monkeypatch.setattr(window, "_rebuild_overlay_plot_renderer", lambda: None)
+    window.session.render.color_min = 1200.0
+    window.session.render.color_max = 4200.0
+
+    window._populate_controls_from_session()
+
+    assert window.color_min_spin.value() == pytest.approx(1200.0)
+    assert window.color_max_spin.value() == pytest.approx(4200.0)
+    assert calls == [(1200.0, 4200.0, True)]
+
+
 def test_loaded_peak_overlay_is_available_by_default(qapplication: QApplication) -> None:
     from heatmap_peak_distance_resource import PeakSeriesResource
 
