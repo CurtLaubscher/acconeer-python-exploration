@@ -20,6 +20,12 @@ Use the repo-managed runtime and tooling defined in `pyproject.toml`.
 - If you must run a one-off module directly, first check whether `pyproject.toml` already defines a better command or environment for it.
 - When documenting launch commands in code or docs, keep the concrete command in `pyproject.toml` and avoid duplicating script inventories here.
 
+## Collaboration Rules
+
+- After exploratory discussion, planning, or proposing commit-sized work, wait for the user's explicit implementation green light before editing files, creating branches, or committing.
+- Treat clear confirmations such as "ok", "green light", "go ahead", or equivalent wording as permission to proceed with the agreed implementation scope.
+- Before moving from discussion into implementation, make the transition clear so the user can correct scope or sequencing first.
+
 ## OpenSpec Git Rules
 
 - Before creating or modifying OpenSpec change artifacts, check the current branch. If the work is for a new OpenSpec change and the current branch is `master` or otherwise unrelated, create or switch to `<user-account>/<openspec-change-name>` first.
