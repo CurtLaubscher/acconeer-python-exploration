@@ -38,6 +38,19 @@ class PreviewWork(Flag):
     VIEWPORT = auto()
 
 
+class PreviewOutput(Flag):
+    """Derived preview outputs affected by one sync."""
+
+    CAMERA_FRAME = auto()
+    CAMERA_CORNERS = auto()
+    TIMELINE_FEEDBACK = auto()
+    SIGNAL_DATA = auto()
+    HEATMAP_TRUTH = auto()
+    EXPORT_OVERLAY = auto()
+    VIEWPORT = auto()
+    SOURCE_RESOLUTION_VIEWPORT = auto()
+
+
 def preview_work_for_changes(
     changes: PreviewChange,
     *,
@@ -106,6 +119,28 @@ def preview_work_for_changes(
     return work
 
 
+def preview_outputs_for_work(work: PreviewWork) -> PreviewOutput:
+    """Map named preview work to the derived outputs it refreshes or invalidates."""
+    outputs = PreviewOutput(0)
+    if work & PreviewWork.CAMERA_FRAME:
+        outputs |= PreviewOutput.CAMERA_FRAME
+    if work & PreviewWork.CAMERA_CORNERS:
+        outputs |= PreviewOutput.CAMERA_CORNERS
+    if work & PreviewWork.TIMELINE_FEEDBACK:
+        outputs |= PreviewOutput.TIMELINE_FEEDBACK
+    if work & PreviewWork.SIGNAL_DATA:
+        outputs |= PreviewOutput.SIGNAL_DATA
+    if work & PreviewWork.HEATMAP_TRUTH:
+        outputs |= PreviewOutput.HEATMAP_TRUTH
+    if work & PreviewWork.EXPORT_OVERLAY:
+        outputs |= PreviewOutput.EXPORT_OVERLAY
+    if work & PreviewWork.VIEWPORT:
+        outputs |= PreviewOutput.VIEWPORT
+    if work & PreviewWork.INVALIDATE_SOURCE_RESOLUTION:
+        outputs |= PreviewOutput.SOURCE_RESOLUTION_VIEWPORT
+    return outputs
+
+
 @dataclass(frozen=True)
 class PreviewSyncPlan:
     """Inputs controlling one full preview refresh pass."""
@@ -143,6 +178,11 @@ class PreviewSyncPlan:
         if self.refresh_viewport:
             work |= PreviewWork.VIEWPORT
         return work
+
+    @property
+    def outputs(self) -> PreviewOutput:
+        """Derived preview outputs affected by this plan."""
+        return preview_outputs_for_work(self.work)
 
     @classmethod
     def from_changes(
