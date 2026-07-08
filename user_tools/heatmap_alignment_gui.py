@@ -1978,7 +1978,14 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
                     self._apply_h5_job_result(result)
                 self._set_resource_reload_error(kind, None)
                 self._update_controls_enabled_state()
-                self._sync_previews(camera_access_hint="auto")
+                if kind == "camera":
+                    self._sync_previews(camera_access_hint="auto")
+                else:
+                    self._sync_previews(
+                        camera_access_hint="auto",
+                        timeline_visible_range_s=self.timeline_range_model.visible_range_s(),
+                        changes=PreviewChange.H5_SOURCE,
+                    )
             elif slot.phase == "failed":
                 if kind == "camera":
                     self._discard_camera_replacement_backup()

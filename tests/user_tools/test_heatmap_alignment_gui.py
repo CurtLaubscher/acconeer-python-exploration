@@ -3965,16 +3965,28 @@ def test_h5_job_completion_preserves_timeline_range(
     window = HeatmapAlignmentWindow()
     _set_test_timeline_range(window)
     _stub_preview_refresh(window, monkeypatch)
+    calls: list[str] = []
 
     def _take_pending_result(kind: str, _generation: int) -> object | None:
         return object() if kind == "radar_h5" else None
 
     monkeypatch.setattr(window._resource_job_manager, "take_pending_result", _take_pending_result)
     monkeypatch.setattr(window, "_apply_h5_job_result", lambda _payload: None)
+    monkeypatch.setattr(
+        window,
+        "_invalidate_source_resolution_viewport",
+        lambda: calls.append("invalidate"),
+    )
+    monkeypatch.setattr(
+        window,
+        "_sync_viewport_preview",
+        lambda *, truth_frame, invalidate_source_resolution: calls.append("viewport"),
+    )
 
     window._handle_resource_job_state_changed()
 
     assert window.timeline_range_model.visible_range_s() == pytest.approx((2.0, 4.0))
+    assert calls == []
 
 
 def test_camera_job_completion_preserves_timeline_range(
