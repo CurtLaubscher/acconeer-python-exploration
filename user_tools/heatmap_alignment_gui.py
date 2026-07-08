@@ -71,27 +71,15 @@ from heatmap_alignment_core_signals import (
     visible_signal_y_range,
     visible_signal_y_range_for_series,
 )
-from heatmap_alignment_dialogs import (  # noqa: F401
-    RESOURCE_ACTION_LABELS,
-    RESOURCE_JOB_STATUS_LABELS,
-    RESOURCE_STATUS_LABELS,
-    RESOURCES_DETAILS_PATH_BLOCK_TOP_MARGIN_PX,
-    RESOURCES_DETAILS_SECTION_SPACING_PX,
-    RESOURCES_TABLE_RESOURCE_COLUMN_DEFAULT_WIDTH_PX,
-    RESOURCES_TABLE_STATUS_COLUMN_DEFAULT_WIDTH_PX,
-    ElidedPathItemDelegate,
-    GenerateDetectionSeriesDialog,
-    HeatmapDistanceHeader,
-    ResourceColorSwatchDelegate,
-    ResourcesWindow,
-)
 from heatmap_alignment_export import first_usable_frame, last_usable_frame
+from heatmap_alignment_generate_peak_dialog import GenerateDetectionSeriesDialog
 from heatmap_alignment_h5_resource_job import (
     LoadedH5ResourcePayload,
     build_h5_truth_source_from_payload,
     load_h5_resource_payload,
     release_resource_job_result,
 )
+from heatmap_alignment_heatmap_header import HeatmapDistanceHeader
 from heatmap_alignment_peak_import import import_peak_distance_json_for_heatmap
 from heatmap_alignment_peak_overlay import peak_overlay_for_frame
 from heatmap_alignment_preview_sync import PreviewSyncPlan, run_preview_sync
@@ -122,6 +110,18 @@ from heatmap_alignment_resource_summaries import (
     ResourceKind,
     ResourceSummary,
     build_alignment_resource_summaries,
+)
+from heatmap_alignment_resources_window import (  # noqa: F401
+    RESOURCE_ACTION_LABELS,
+    RESOURCE_JOB_STATUS_LABELS,
+    RESOURCE_STATUS_LABELS,
+    RESOURCES_DETAILS_PATH_BLOCK_TOP_MARGIN_PX,
+    RESOURCES_DETAILS_SECTION_SPACING_PX,
+    RESOURCES_TABLE_RESOURCE_COLUMN_DEFAULT_WIDTH_PX,
+    RESOURCES_TABLE_STATUS_COLUMN_DEFAULT_WIDTH_PX,
+    ElidedPathItemDelegate,
+    ResourceColorSwatchDelegate,
+    ResourcesWindow,
 )
 from heatmap_alignment_session_coordinator import (
     LoadedResourceState,

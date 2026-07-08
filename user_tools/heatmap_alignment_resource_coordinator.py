@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Protocol
 
-from heatmap_alignment_dialogs import ResourcesWindow
 from heatmap_alignment_resource_actions import containing_directory, resource_path_for_kind
 from heatmap_alignment_resource_model import ResourceAction, ResourceKind
 from heatmap_alignment_resource_summaries import (
@@ -13,6 +12,7 @@ from heatmap_alignment_resource_summaries import (
     ResourceSummary,
     build_alignment_resource_summaries,
 )
+from heatmap_alignment_resources_window import ResourcesWindow
 from heatmap_peak_distance_resource import peak_state_detected_counts
 
 from PySide6 import QtWidgets
