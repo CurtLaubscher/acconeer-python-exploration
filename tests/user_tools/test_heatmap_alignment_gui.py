@@ -400,6 +400,32 @@ def test_timeline_playhead_press_takes_priority_over_camera_bar(
     assert not widget._dragging_camera
 
 
+def test_timeline_playhead_hit_test_ignores_out_of_range_playhead(
+    qapplication: QApplication,
+) -> None:
+    range_model = TimelineRangeModel()
+    range_model.set_track_state(
+        camera_duration_s=5.0,
+        heatmap_duration_s=5.0,
+        camera_offset_s=0.0,
+    )
+    range_model.set_visible_range(0.0, 5.0)
+    widget = AlignmentTimelineWidget(range_model)
+    widget.resize(900, 124)
+    widget.show()
+    qapplication.processEvents()
+
+    widget.set_timeline_state(current_time_s=2.5)
+    visible_pos = QtCore.QPointF(widget._time_to_x(2.5), widget.height() / 2.0)
+    assert widget._playhead_in_visible_range()
+    assert widget._playhead_hit_test(visible_pos)
+
+    widget.set_timeline_state(current_time_s=8.0)
+    hidden_pos = QtCore.QPointF(widget._time_to_x(8.0), widget.height() / 2.0)
+    assert not widget._playhead_in_visible_range()
+    assert not widget._playhead_hit_test(hidden_pos)
+
+
 def test_timeline_h5_drag_shifts_camera_and_leg2_offsets_via_signal(
     qapplication: QApplication,
 ) -> None:
@@ -917,6 +943,48 @@ def test_color_min_max_spinboxes_step_by_100(qapplication: QApplication) -> None
 def test_color_min_lower_bound_is_zero(qapplication: QApplication) -> None:
     window = HeatmapAlignmentWindow()
     assert window.color_min_spin.minimum() == pytest.approx(0.0)
+
+
+def test_color_min_max_spinboxes_keep_strict_range(qapplication: QApplication) -> None:
+    window = HeatmapAlignmentWindow()
+
+    window.color_max_spin.setValue(500.0)
+    window.color_min_spin.setValue(500.0)
+    assert window.color_min_spin.value() < window.color_max_spin.value()
+    assert window.color_min_spin.maximum() == pytest.approx(window.color_max_spin.value() - 0.1)
+
+    window.color_min_spin.setValue(900.0)
+    window.color_max_spin.setValue(900.0)
+    assert window.color_min_spin.value() < window.color_max_spin.value()
+    assert window.color_max_spin.minimum() == pytest.approx(window.color_min_spin.value() + 0.1)
+
+
+def test_populate_controls_applies_session_color_limits_to_loaded_h5(
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = HeatmapAlignmentWindow()
+    calls: list[tuple[float, float | None, bool]] = []
+
+    class _FakeHeatmapSource:
+        def update_render_settings(
+            self,
+            color_min: float,
+            color_max: float | None,
+            fixed_levels: bool,
+        ) -> None:
+            calls.append((color_min, color_max, fixed_levels))
+
+    window.heatmap_source = _FakeHeatmapSource()
+    monkeypatch.setattr(window, "_rebuild_overlay_plot_renderer", lambda: None)
+    window.session.render.color_min = 1200.0
+    window.session.render.color_max = 4200.0
+
+    window._populate_controls_from_session()
+
+    assert window.color_min_spin.value() == pytest.approx(1200.0)
+    assert window.color_max_spin.value() == pytest.approx(4200.0)
+    assert calls == [(1200.0, 4200.0, True)]
 
 
 def test_loaded_peak_overlay_is_available_by_default(qapplication: QApplication) -> None:
@@ -1927,6 +1995,8 @@ def _make_session_file(
     subsweep_idx: int = 0,
     current_time_s: float = 0.0,
     offset_s: float = 0.0,
+    color_min: float = 0.0,
+    color_max: float | None = 3000.0,
 ) -> Path:
     session = AlignmentSession(
         camera_track=CameraTrack(path=camera_path),
@@ -1940,6 +2010,8 @@ def _make_session_file(
     )
     session.timeline.current_time_s = current_time_s
     session.timeline.offset_s = offset_s
+    session.render.color_min = color_min
+    session.render.color_max = color_max
     path = tmp_path / "session.json"
     save_alignment_session(session, path)
     return path
@@ -2101,6 +2173,39 @@ def test_reconcile_h5_load_when_identity_changes(
 
     assert len(load_h5_calls) == 1
     assert load_h5_calls[0] == new_h5
+
+
+def test_session_load_h5_job_uses_session_render_limits(
+    tmp_path: Path,
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    h5_file = tmp_path / "record.h5"
+    h5_file.write_bytes(b"")
+    session_path = _make_session_file(
+        tmp_path,
+        h5_path=str(h5_file),
+        color_min=0.0,
+        color_max=1000.0,
+    )
+    window = HeatmapAlignmentWindow()
+    window.color_min_spin.setValue(2500.0)
+    window.color_max_spin.setValue(5000.0)
+    captured_kwargs: list[dict[str, object]] = []
+
+    def _start_h5_job(path: Path, **kwargs: object) -> int:
+        captured_kwargs.append(dict(kwargs, path=path))
+        return 1
+
+    monkeypatch.setattr(window._resource_job_manager, "start_h5_job", _start_h5_job)
+    monkeypatch.setattr(window, "_sync_previews", lambda **kwargs: None)
+
+    window.load_session_from_path(session_path)
+
+    assert len(captured_kwargs) == 1
+    assert captured_kwargs[0]["path"] == h5_file
+    assert captured_kwargs[0]["color_min"] == pytest.approx(0.0)
+    assert captured_kwargs[0]["color_max"] == pytest.approx(1000.0)
 
 
 def test_load_h5_replacement_clears_old_source_before_job_finishes(
@@ -3965,16 +4070,28 @@ def test_h5_job_completion_preserves_timeline_range(
     window = HeatmapAlignmentWindow()
     _set_test_timeline_range(window)
     _stub_preview_refresh(window, monkeypatch)
+    calls: list[str] = []
 
     def _take_pending_result(kind: str, _generation: int) -> object | None:
         return object() if kind == "radar_h5" else None
 
     monkeypatch.setattr(window._resource_job_manager, "take_pending_result", _take_pending_result)
     monkeypatch.setattr(window, "_apply_h5_job_result", lambda _payload: None)
+    monkeypatch.setattr(
+        window,
+        "_invalidate_source_resolution_viewport",
+        lambda: calls.append("invalidate"),
+    )
+    monkeypatch.setattr(
+        window,
+        "_sync_viewport_preview",
+        lambda *, truth_frame, invalidate_source_resolution: calls.append("viewport"),
+    )
 
     window._handle_resource_job_state_changed()
 
     assert window.timeline_range_model.visible_range_s() == pytest.approx((2.0, 4.0))
+    assert calls == []
 
 
 def test_camera_job_completion_preserves_timeline_range(

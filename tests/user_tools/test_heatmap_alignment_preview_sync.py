@@ -64,6 +64,19 @@ def test_preview_sync_plan_from_export_overlay_change() -> None:
     assert plan.refresh_viewport is False
 
 
+def test_preview_sync_plan_from_h5_source_change_does_not_refresh_viewport() -> None:
+    plan = PreviewSyncPlan.from_changes(PreviewChange.H5_SOURCE)
+
+    assert plan.invalidate_source_resolution is False
+    assert plan.refresh_camera_frame is False
+    assert plan.refresh_camera_corners is False
+    assert plan.refresh_timeline_feedback is True
+    assert plan.refresh_signal_data is True
+    assert plan.refresh_heatmap_truth is True
+    assert plan.refresh_export_overlay is True
+    assert plan.refresh_viewport is False
+
+
 def test_preview_sync_plan_from_viewport_visibility_change() -> None:
     plan = PreviewSyncPlan.from_changes(PreviewChange.VIEWPORT_VISIBILITY)
 

@@ -38,7 +38,7 @@ Current architecture notes:
 - Export reopens the original-resolution camera video and composites a plotted H5 heatmap overlay into the scaled export rectangle.
 - Xcorr prototype code exists, but GUI xcorr is intentionally disabled for MVP due to performance and reliability concerns.
 
-Current priority signals:
+Background priority signals:
 - Basic viewport visibility transforms and source-resolution paused preview have been implemented, but the color match still does not feel right enough to call the enhancement algorithm solved.
 - A focused color-matching improvement is likely the next alignment-aid candidate if manual comparison remains difficult.
 - Export dialog settings and overlay plot formatting are plausible near-term changes because export is already useful and the output styling can be improved incrementally.
@@ -55,7 +55,56 @@ Useful implementation posture:
 - Avoid putting raw brainstorm items into the accepted spec; use this file for ideas and OpenSpec changes for committed work.
 - When delegating implementation to another agent, include direct links/paths to the relevant OpenSpec proposal, design, spec, tasks, and this ideas file in addition to conversational context.
 
-## Likely Next Candidates
+## Current Triage
+
+Use this section as a short map of likely next work. Keep detailed context in the
+themed sections below, and update or remove bullets here when the underlying
+idea is fixed, rejected, or superseded.
+
+### Confirmed bugs and stabilization
+
+- Rendered heatmap color limits: constrain Color Min / Color Max and ensure
+  session-load color-limit changes invalidate the rendered heatmap preview.
+  See **Render panel control layout cleanup**.
+- Timeline playhead: hide the in-range playhead line and disable its hit-test
+  when current time is outside the visible timeline range. See **Timeline polish**.
+- Viewport preview invalidation: avoid viewport quality drops or source-resolution
+  work when H5 loading finishes but no camera, viewport, visibility, or layout input
+  changed. See **Source-resolution viewport processing**.
+- Loading placeholders: consider showing loading H5/camera tracks in the timeline as
+  soon as a load starts, rather than only after metadata is ready. See
+  **Session load responsiveness**.
+- Shutdown/background cancellation: reproduce and then ensure close/quit cancels
+  or drains resource jobs, proxy writes, H5/camera loading, and queued preview work.
+  See **Background and async processing**.
+
+### High-priority workflow improvements
+
+- Viewport color matching remains the main alignment-aid candidate before xcorr
+  work.
+- Export dialog settings and overlay plot formatting are plausible incremental
+  improvements because export is already useful.
+- Timeline transport, zoom/pan, and Signals plot responsiveness should be driven
+  by concrete manual-review pain points.
+
+### Architecture direction
+
+- Keep `PreviewChange` / `PreviewSyncPlan` as the current bridge for targeted
+  invalidation.
+- Move toward a preview product/job dependency model before splitting camera
+  decode, viewport transform, and enhancement into separate execution stages.
+- Preserve the simple one-camera/one-H5 workflow while shaping resource and job
+  concepts so optional datasources do not keep adding one-off conditionals.
+
+### Refactoring and maintenance
+
+- Keep `ideas.md` current: remove shipped/archive notes once any deferred work has
+  been copied into active bullets, and keep confirmed bugs near this triage section.
+- Split `heatmap_alignment_gui.py` only when a focused extraction reduces real
+  coupling or review risk; avoid broad mechanical churn immediately after large
+  refactors.
+
+## Workbench Workflow And UI Ideas
 
 ### Viewport color matching
 
@@ -193,7 +242,11 @@ Opening a saved alignment session can freeze the GUI when the session references
 
 Observed bug candidate, needs reproduction: after the rendered heatmap coordinate-context work, loading at least one saved session froze the UI completely until the video appeared. In one observed sequence, some resources appeared not to load, possibly peak resources, and trying to load the same session again froze at that point. The freeze did not obviously look like a small label or tooltip cost. Current suspicion is an existing synchronous session-load segment rather than the coordinate header itself: possible culprits include camera/proxy readiness, synchronous peak JSON or Leg2 MAT validation, preview sync/frame access during restore, resource reconciliation after a partial/failed load, or a burst of UI refresh work before the background resource jobs have settled. Source-resolution/HQ viewport rendering is expected to run on its worker thread; if that path blocks the UI during session open, treat it as a bug. A future investigation should reproduce with a known session, add lightweight timing around session load/resource reconciliation/preview sync stages, and separate assertion-level GUI behavior from known Windows Qt teardown noise.
 
-Observed bug (UI overlay masking renders): after opening a session and then scrubbing, the heatmap (and possibly other resources) appears to still be rendering but is visually hidden "behind" a persistent loading text or overlay. The content is rendering but the loading indicator remains on top, blocking interactive visual feedback. This feels like a z-order or modal-loading-state bug and needs reproduction and a fix so previews are visible while work continues in the background.
+Current smoke-test status: stale loading overlays and old-resource-under-loading
+behavior were not reproduced after recent resource-load changes that clear the old
+resource while a replacement/session load is pending. If this regresses, capture the
+specific resource type and whether the ready content is dimmed, covered by loading
+text, or still showing stale data from the prior session.
 
 Possible directions:
 - Show the main window quickly with a clear loading/busy state before heavy resource work begins.
@@ -204,6 +257,10 @@ Possible directions:
 - Reuse or extend the same background job model considered for general resource loading rather than adding another one-off synchronous startup path.
 - Show timeline tracks and resource rows immediately in a placeholder but interactive state when a session opens: create the camera, H5, peak, and other track rows with a loading spinner/indicator and allow basic timeline interactions (selecting, dragging offsets, pinning) even while the underlying resource loads in the background. Apply user edits provisionally (marking them "pending") and reconcile them atomically when the resource becomes ready so users can start aligning without waiting for full file readiness.
 - Add explicit UI affordances and transient indicators for tracks that are still loading (e.g. dimmed thumbnail, spinner, "loading" badge) so users understand which interactions are provisional versus committed.
+- Bug/UX gap: loading an H5 resource does not appear to add the H5 track to the
+  timeline until the H5 job finishes and metadata is ready. If users need immediate
+  feedback that a track is pending, add a placeholder loading track without requiring
+  full duration metadata.
 - Bug: after a resource finishes loading (camera, H5, peak JSON, etc.), the timeline's current time or playhead sometimes jumps to zero. This unexpected reset disrupts user context when they are scrubbing or mid-review. Possible directions: preserve `timeline.current_time_s` across resource loads unless the session explicitly requests a change; ensure resource-load callbacks do not reset the global playhead; and add a test that loading/reloading resources preserves the current-time state.
 
 ### Peak-distance datasource and Calculate Peaks
@@ -319,7 +376,6 @@ Possible directions:
 - Keep common first-run actions discoverable if buttons are removed.
 - Use the same organization for future data sources so new imports do not keep expanding the main control row.
 - Add a custom Session Open dialog that previews session JSON contents without loading their resources: show which camera/H5/peak files a session references, mark missing or invalid paths, show brief metadata (durations, frame counts), and surface small thumbnails or textual summaries where available. This lets users scan many sessions in a directory and spot which ones are valid or which need relinking before opening, avoiding expensive per-session loads.
-- **Shipped (`dirty-session-prompts`, archived 2026-06-01):** single session dirty flag, `*` in the window title, Save / Don't Save / Cancel when dirty on open (before file dialog), close, and quit; clean quit silent; pristine close silent; clean non-pristine close uses Yes/No only; dirty marking at user-initiated entry points only (not async job completion after open); Save without requiring camera+H5 in memory; mark dirty after Clear All Resources. Deferred: unsaved tri-state on Clear All, playhead/`current_time_s` as dirty, timeline zoom persistence (below).
 - Make status-bar messages transient for one-shot actions such as loading or saving sessions/resources. Persistent state should live in the window title, Resources window, or resource rows; action confirmations should clear after a short timeout so stale "Saved session" or "Loaded session" text is not mistaken for current-state labeling.
 - Persist timeline **visible range / zoom** (today held only in `timeline_range_model`, not in session JSON) so save/reload restores the same timeline viewport.
 - Decide playhead policy for **`timeline.current_time_s`**: already in session JSON but excluded from v1 dirty tracking; consider whether scrubbing should mark dirty and whether reload should restore last playhead.
@@ -349,10 +405,6 @@ Related layout direction:
 - Move heatmap color minimum/maximum controls into a clearer rendered-heatmap control area.
 - Consider placing viewport-related controls and rendered heatmap controls on the right side beside the viewport and rendered heatmap previews.
 - Keep the viewport preview and rendered heatmap preview visually unobstructed during normal use.
-- **Fixed (`heatmap-preview-invalidation-fixes`):** the viewport no longer displays a
-  blocking H5 loading overlay or requires H5 truth-frame readiness before showing
-  camera-based viewport content. Camera preview and viewport interactions should remain
-  available when an H5 resource is missing or still loading.
 - When "Show Overlay Preview" is toggled off, also hide the overlay bounding box and disable bounding-box interaction (dragging, corner handles, and selection). Only show and enable the bounding box when the overlay preview is visible so users cannot accidentally move or edit it while the overlay is hidden.
 
 Follow-up after the Render panel is removed:
@@ -487,36 +539,19 @@ Possible directions:
 The current paused source-resolution viewport preview is a single-frame, latest-request-wins path. Future work could make this more proactive or cached if needed.
 
 Possible directions:
+- Confirmed bug: when an H5 load finishes after the camera and viewport are already
+  visible, the viewport can briefly drop to low quality and then return to high
+  quality even when the viewport panel size did not change. H5 readiness should
+  refresh H5-derived products, not invalidate or re-render viewport products.
 - Pre-warp original-resolution camera footage into a source-resolution viewport proxy.
 - Cache recently requested source-resolution viewport frames.
 - Render nearby paused frames after the user stops scrubbing or dragging.
 - Keep low-quality frames available immediately as the fallback interaction path.
 - Consider consolidating source-resolution viewport rendering with the same job/request lifecycle used for resource loading, or a shared lightweight async request framework, so cancellation, stale-result discard, bounded execution, and shutdown handling are not maintained in separate systems.
-- Separate source-frame decode from viewport transformation. Today the source-resolution
-  viewport worker opens the original camera video, seeks to the requested time, decodes
-  the source frame, and warps it to the requested viewport output size as one job. That
-  is simple, but it makes size-only or layout-only changes expensive: resizing the
-  viewport, H5 load completion establishing a better comparison size, or other display
-  changes can cause a full camera seek/decode even when the camera source frame at the
-  current time has not changed. A future pipeline should treat camera decode, viewport
-  rectification, viewport visibility/post-processing, and final widget display as
-  separate products so transform-only work can reuse the decoded source frame.
-- Move toward a preview product/job dependency model. A future design could key preview
-  products by their true inputs, such as `DecodedCameraFrame(path, time)`,
-  `RectifiedViewport(frame_key, corners, output_size)`,
-  `EnhancedViewport(rectified_key, visibility_settings)`, `H5TruthFrame(h5_identity,
-  time, render_settings)`, `RenderedHeatmap(frame_key)`, `OverlayPreview(...)`, and
-  signal plot products. Each background result would be applied only if its key still
-  matches the latest request; stale results would be discarded and expensive work could
-  be cancelled when practical. This would make resize handling, scrubbing, source
-  replacement, shutdown cancellation, and future multi-resource previews easier to reason
-  about than one broad "sync previews" path.
-- Use explicit preview invalidation reasons/plans as a bridge before a full product graph.
-  Callers should describe what changed (camera time, camera source, viewport geometry,
-  viewport output size, viewport visibility settings, H5 render settings, signal-only
-  changes, export-overlay-only changes, layout-only changes), and a central policy should
-  decide which preview products are stale. This keeps caller code from knowing low-level
-  cache details such as whether a source-resolution viewport frame should be cleared.
+- Defer source-frame decode vs. viewport-transform separation until the broader
+  preview product/job dependency model exists, unless a concrete bug or measurement
+  makes a narrow interim split necessary. See **Preview product and job dependency
+  model**.
 - **Partially implemented (`heatmap-preview-invalidation-fixes`):** viewport resize now
   keeps the current best viewport frame visible, supersedes stale source-resolution
   requests, and schedules a debounced refresh for the latest effective output size. The
@@ -563,6 +598,44 @@ Possible directions:
 This matters if camera/monitor movement becomes a real problem. It is not a current priority.
 
 ## Architecture And Data Model
+
+### Preview product and job dependency model
+
+The current `PreviewChange` / `PreviewSyncPlan` layer is a bridge toward a more
+explicit dependency model. Keep using it for targeted invalidation fixes, but do
+not expand it into a full framework through ad hoc flags.
+
+A future design should key preview products by their true inputs, for example:
+- `DecodedCameraFrame(path, time)`
+- `RectifiedViewport(decoded_frame_key, corners, output_size)`
+- `EnhancedViewport(rectified_viewport_key, visibility_settings)`
+- `H5TruthFrame(h5_identity, time, render_settings)`
+- `RenderedHeatmap(h5_truth_frame_key, plot_settings)`
+- `OverlayPreview(rendered_heatmap_key, overlay_geometry, presentation_settings)`
+- `SignalPlotData(resource_identities, signal_settings, visible_range)`
+
+Each background result should apply only if its key still matches the latest
+request. Stale results should be discarded, and expensive work should be
+cancelled when practical. This would make resize handling, scrubbing, source
+replacement, shutdown cancellation, and future multi-resource previews easier to
+reason about than one broad `_sync_previews(...)` path.
+
+Stage separation should follow this dependency model rather than precede it as a
+standalone refactor:
+- Camera decode should produce a reusable decoded frame keyed by source identity
+  and time.
+- Viewport rectification should depend on the decoded frame, viewport corners,
+  and output size.
+- Viewport visibility/enhancement should depend on the rectified viewport and
+  visibility settings.
+- H5 readiness should refresh H5-derived products such as rendered heatmap,
+  hover/peak state, signals, and export overlay preview, but should not invalidate
+  camera decode or viewport products unless a real layout/viewport input changed.
+
+This keeps the current simple camera/H5 workflow intact while creating a path
+toward fully backed resources, multiple optional datasources, and job lifecycle
+rules that handle cancellation, stale-result discard, partial outputs, and
+shutdown consistently.
 
 ### Internal session naming cleanup
 

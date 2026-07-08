@@ -194,12 +194,13 @@ class AlignmentTimelineWidget(QtWidgets.QWidget):
                     self._leg2_track_start_s(),
                 )
 
-            playhead_x = self._time_to_x(self._current_time_s)
-            painter.setPen(playhead_pen)
-            painter.drawLine(
-                QtCore.QPointF(playhead_x, axis_y - 6),
-                QtCore.QPointF(playhead_x, plot_rect.bottom()),
-            )
+            if self._playhead_in_visible_range():
+                playhead_x = self._time_to_x(self._current_time_s)
+                painter.setPen(playhead_pen)
+                painter.drawLine(
+                    QtCore.QPointF(playhead_x, axis_y - 6),
+                    QtCore.QPointF(playhead_x, plot_rect.bottom()),
+                )
 
             playhead_color_indicator = QtGui.QColor(TIMELINE_PLAYHEAD_COLOR_HEX)
             playhead_color_indicator.setAlpha(PLAYHEAD_ALPHA)
@@ -428,7 +429,13 @@ class AlignmentTimelineWidget(QtWidgets.QWidget):
             leg2_duration_s=self._range_model.leg2_duration_s,
         )
 
+    def _playhead_in_visible_range(self) -> bool:
+        range_start_s, range_end_s = self._range_model.visible_range_s()
+        return range_start_s <= self._current_time_s <= range_end_s
+
     def _playhead_hit_test(self, widget_pos: QtCore.QPointF) -> bool:
+        if not self._playhead_in_visible_range():
+            return False
         playhead_x = self._time_to_x(self._current_time_s)
         return abs(widget_pos.x() - playhead_x) <= self._playhead_hit_half_width_px
 
