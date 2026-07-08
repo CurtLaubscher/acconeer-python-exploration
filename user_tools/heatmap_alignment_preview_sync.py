@@ -122,6 +122,28 @@ class PreviewSyncPlan:
     refresh_export_overlay: bool = True
     refresh_viewport: bool = True
 
+    @property
+    def work(self) -> PreviewWork:
+        """Named work represented by this plan."""
+        work = PreviewWork(0)
+        if self.invalidate_source_resolution:
+            work |= PreviewWork.INVALIDATE_SOURCE_RESOLUTION
+        if self.refresh_camera_frame:
+            work |= PreviewWork.CAMERA_FRAME
+        if self.refresh_camera_corners:
+            work |= PreviewWork.CAMERA_CORNERS
+        if self.refresh_timeline_feedback:
+            work |= PreviewWork.TIMELINE_FEEDBACK
+            if self.refresh_signal_data:
+                work |= PreviewWork.SIGNAL_DATA
+        if self.refresh_heatmap_truth:
+            work |= PreviewWork.HEATMAP_TRUTH
+        if self.refresh_export_overlay:
+            work |= PreviewWork.EXPORT_OVERLAY
+        if self.refresh_viewport:
+            work |= PreviewWork.VIEWPORT
+        return work
+
     @classmethod
     def from_changes(
         cls,
@@ -191,26 +213,27 @@ class PreviewSyncHost(Protocol):
 
 def run_preview_sync(plan: PreviewSyncPlan, host: PreviewSyncHost) -> None:
     """Run preview stages in the workbench's established order."""
-    if plan.invalidate_source_resolution:
+    work = plan.work
+    if work & PreviewWork.INVALIDATE_SOURCE_RESOLUTION:
         host._invalidate_source_resolution_viewport()
-    if plan.refresh_camera_frame:
+    if work & PreviewWork.CAMERA_FRAME:
         host._load_current_camera_frame(access_hint=plan.camera_access_hint)
-    if plan.refresh_camera_corners:
+    if work & PreviewWork.CAMERA_CORNERS:
         host._refresh_camera_view_corners()
-    if plan.refresh_timeline_feedback:
+    if work & PreviewWork.TIMELINE_FEEDBACK:
         host._sync_timeline_feedback(
             timeline_visible_range_s=plan.timeline_visible_range_s,
             recompute_timeline_range=plan.recompute_timeline_range,
-            refresh_signal_data=plan.refresh_signal_data,
+            refresh_signal_data=bool(work & PreviewWork.SIGNAL_DATA),
         )
     frame_idx: int | None = None
     truth_frame: np.ndarray | None = None
-    if plan.refresh_heatmap_truth:
+    if work & PreviewWork.HEATMAP_TRUTH:
         frame_idx, truth_frame = host._sync_heatmap_truth_preview()
-    if plan.refresh_export_overlay:
+    if work & PreviewWork.EXPORT_OVERLAY:
         host._sync_export_overlay_preview(frame_idx=frame_idx, truth_frame=truth_frame)
-    if plan.refresh_viewport:
+    if work & PreviewWork.VIEWPORT:
         host._sync_viewport_preview(
             truth_frame=truth_frame,
-            invalidate_source_resolution=plan.invalidate_source_resolution,
+            invalidate_source_resolution=bool(work & PreviewWork.INVALIDATE_SOURCE_RESOLUTION),
         )

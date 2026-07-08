@@ -92,6 +92,33 @@ def test_preview_work_for_camera_time_change() -> None:
     )
 
 
+def test_preview_sync_plan_work_matches_direct_plan_flags() -> None:
+    plan = PreviewSyncPlan(
+        invalidate_source_resolution=False,
+        refresh_camera_frame=True,
+        refresh_camera_corners=False,
+        refresh_timeline_feedback=True,
+        refresh_signal_data=False,
+        refresh_heatmap_truth=True,
+        refresh_export_overlay=False,
+        refresh_viewport=True,
+    )
+
+    assert plan.work == (
+        PreviewWork.CAMERA_FRAME
+        | PreviewWork.TIMELINE_FEEDBACK
+        | PreviewWork.HEATMAP_TRUTH
+        | PreviewWork.VIEWPORT
+    )
+
+
+def test_preview_sync_plan_work_omits_signal_data_without_timeline_feedback() -> None:
+    plan = PreviewSyncPlan(refresh_timeline_feedback=False, refresh_signal_data=True)
+
+    assert PreviewWork.TIMELINE_FEEDBACK not in plan.work
+    assert PreviewWork.SIGNAL_DATA not in plan.work
+
+
 def test_preview_sync_plan_from_signal_only_change() -> None:
     plan = PreviewSyncPlan.from_changes(PreviewChange.SIGNALS_ONLY)
 
