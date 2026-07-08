@@ -1,33 +1,22 @@
 from __future__ import annotations
 
+
 """Resources-window presentation summaries for the heatmap alignment workbench."""
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
 
-from heatmap_alignment_core import (
-    CAMERA_TIMELINE_TRACK_COLOR_HEX,
-    H5_TIMELINE_TRACK_COLOR_HEX,
-    LEG2_TIMELINE_TRACK_COLOR_HEX,
-    AlignmentSession,
-)
+from heatmap_alignment_core_models import AlignmentSession
 from heatmap_alignment_resource_jobs import ResourceJobPhase
-
-ResourceKind = Literal["camera", "radar_h5", "radar_peak", "leg2_mat"]
-ResourceStatus = Literal["unloaded", "loaded", "missing", "invalid", "warning"]
-ResourceAction = Literal[
-    "load",
-    "replace",
-    "unload",
-    "reload",
-    "reveal",
-    "inspect",
-    "cancel",
-    "generate",
-    "save",
-    "save_as",
-]
+from heatmap_alignment_resource_model import (
+    CAMERA_RESOURCE,
+    LEG2_MAT_RESOURCE,
+    RADAR_H5_RESOURCE,
+    RADAR_PEAK_RESOURCE,
+    ResourceAction,
+    ResourceKind,
+    ResourceStatus,
+)
 
 
 @dataclass(frozen=True)
@@ -193,20 +182,32 @@ def build_alignment_resource_summaries(
 ) -> tuple[ResourceSummary, ...]:
     """Build fixed-slot resource summaries for the Resources window."""
 
-    summaries: list[ResourceSummary] = []
+    summaries = [
+        _build_camera_summary(session, runtime),
+        _build_h5_summary(session, runtime),
+    ]
+    summaries.extend(_build_peak_summaries(runtime, peak_series))
+    summaries.append(_build_leg2_summary(session, runtime))
+    return tuple(summaries)
 
-    camera_path = session.camera_track.path
+
+def _build_camera_summary(
+    session: AlignmentSession,
+    runtime: AlignmentResourceRuntime,
+) -> ResourceSummary:
+    descriptor = CAMERA_RESOURCE
+    path_text = session.camera_track.path
     camera_job = _resource_job_presentation("camera", runtime)
     camera_messages = _resource_messages("camera", runtime)
     camera_status = _resource_status(
-        path_text=camera_path,
+        path_text=path_text,
         loaded=runtime.camera_loaded,
         messages=camera_messages,
         job=camera_job,
     )
     camera_details = "No camera video loaded."
     if camera_job is not None and camera_job.phase not in ("idle", "superseded"):
-        target = camera_job.target_filename or Path(camera_path).name
+        target = camera_job.target_filename or Path(path_text).name
         if camera_job.phase == "building":
             camera_details = f"Building preview proxy for {target}..."
         elif camera_job.phase == "waiting":
@@ -223,45 +224,50 @@ def build_alignment_resource_summaries(
             f"{session.camera_track.fps:.3f} fps, "
             f"{session.camera_track.duration_s:.3f} s"
         )
-    elif camera_path:
+    elif path_text:
         camera_details = "Remembered camera path is not currently loaded."
-    summaries.append(
-        ResourceSummary(
-            kind="camera",
-            display_name="Camera Video",
-            role="Primary",
+
+    return ResourceSummary(
+        kind=descriptor.kind,
+        display_name=descriptor.display_name,
+        role=descriptor.role,
+        status=camera_status,
+        path=path_text,
+        color_hex=descriptor.color_hex,
+        color_muted=not runtime.camera_loaded,
+        details=camera_details,
+        messages=camera_messages,
+        actions=_resource_actions(
             status=camera_status,
-            path=camera_path,
-            color_hex=CAMERA_TIMELINE_TRACK_COLOR_HEX,
-            color_muted=not runtime.camera_loaded,
-            details=camera_details,
+            path_text=path_text,
+            can_unload=runtime.camera_loaded,
             messages=camera_messages,
-            actions=_resource_actions(
-                status=camera_status,
-                path_text=camera_path,
-                can_unload=runtime.camera_loaded,
-                messages=camera_messages,
-                job=camera_job,
-            ),
-            job_phase=camera_job.phase if camera_job is not None else "idle",
-            job_target_filename=camera_job.target_filename if camera_job is not None else "",
-            job_detail=camera_job.detail if camera_job is not None else "",
-            job_cancellable=camera_job.cancellable if camera_job is not None else False,
-        )
+            job=camera_job,
+        ),
+        job_phase=camera_job.phase if camera_job is not None else "idle",
+        job_target_filename=camera_job.target_filename if camera_job is not None else "",
+        job_detail=camera_job.detail if camera_job is not None else "",
+        job_cancellable=camera_job.cancellable if camera_job is not None else False,
     )
 
-    h5_path = session.heatmap_track.path
+
+def _build_h5_summary(
+    session: AlignmentSession,
+    runtime: AlignmentResourceRuntime,
+) -> ResourceSummary:
+    descriptor = RADAR_H5_RESOURCE
+    path_text = session.heatmap_track.path
     h5_job = _resource_job_presentation("radar_h5", runtime)
     h5_messages = _resource_messages("radar_h5", runtime)
     h5_status = _resource_status(
-        path_text=h5_path,
+        path_text=path_text,
         loaded=runtime.radar_h5_loaded,
         messages=h5_messages,
         job=h5_job,
     )
     h5_details = "No radar raw H5 recording loaded."
     if h5_job is not None and h5_job.phase not in ("idle", "superseded"):
-        target = h5_job.target_filename or Path(h5_path).name
+        target = h5_job.target_filename or Path(path_text).name
         if h5_job.phase == "cancelling":
             h5_details = f"Cancelling load for {target}..."
         elif h5_job.phase == "waiting":
@@ -289,36 +295,42 @@ def build_alignment_resource_summaries(
             bin_details.append(f"velocity bin {runtime.radar_velocity_bin_width_m_s:.6g} m/s")
         if bin_details:
             h5_details = f"{h5_details}\n{', '.join(bin_details)}"
-    elif h5_path:
+    elif path_text:
         h5_details = "Remembered H5 path is not currently loaded."
-    summaries.append(
-        ResourceSummary(
-            kind="radar_h5",
-            display_name="Radar Raw (H5)",
-            role="Primary",
+
+    return ResourceSummary(
+        kind=descriptor.kind,
+        display_name=descriptor.display_name,
+        role=descriptor.role,
+        status=h5_status,
+        path=path_text,
+        color_hex=descriptor.color_hex,
+        color_muted=not runtime.radar_h5_loaded,
+        details=h5_details,
+        messages=h5_messages,
+        actions=_resource_actions(
             status=h5_status,
-            path=h5_path,
-            color_hex=H5_TIMELINE_TRACK_COLOR_HEX,
-            color_muted=not runtime.radar_h5_loaded,
-            details=h5_details,
+            path_text=path_text,
+            can_unload=runtime.radar_h5_loaded,
             messages=h5_messages,
-            actions=_resource_actions(
-                status=h5_status,
-                path_text=h5_path,
-                can_unload=runtime.radar_h5_loaded,
-                messages=h5_messages,
-                job=h5_job,
-            ),
-            job_phase=h5_job.phase if h5_job is not None else "idle",
-            job_target_filename=h5_job.target_filename if h5_job is not None else "",
-            job_detail=h5_job.detail if h5_job is not None else "",
-            job_cancellable=h5_job.cancellable if h5_job is not None else False,
-        )
+            job=h5_job,
+        ),
+        job_phase=h5_job.phase if h5_job is not None else "idle",
+        job_target_filename=h5_job.target_filename if h5_job is not None else "",
+        job_detail=h5_job.detail if h5_job is not None else "",
+        job_cancellable=h5_job.cancellable if h5_job is not None else False,
     )
 
+
+def _build_peak_summaries(
+    runtime: AlignmentResourceRuntime,
+    peak_series: list | None,
+) -> list[ResourceSummary]:
+    descriptor = RADAR_PEAK_RESOURCE
     peak_messages = _resource_messages("radar_peak", runtime)
     if peak_series:
         # Emit one ResourceSummary per peak series resource.
+        summaries: list[ResourceSummary] = []
         for ps in peak_series:
             ps_actions: list[ResourceAction] = []
             if ps.unsaved:
@@ -338,7 +350,7 @@ def build_alignment_resource_summaries(
                 ps_details = f"{detected}/{total} detected frames"
             summaries.append(
                 ResourceSummary(
-                    kind="radar_peak",
+                    kind=descriptor.kind,
                     display_name=ps.display_name,
                     role="Generated" if ps.provenance == "generated" else "Imported",
                     status="loaded",
@@ -352,6 +364,7 @@ def build_alignment_resource_summaries(
                     series_id=ps.series_id,
                 )
             )
+        return summaries
     else:
         # Fallback: one aggregate row for tests and the empty-list state.
         peak_actions: list[ResourceAction] = ["load"]
@@ -370,26 +383,32 @@ def build_alignment_resource_summaries(
             if runtime.peaks_dirty:
                 peak_status_label = "Generated (unsaved)"
                 peak_details += " (unsaved)"
-        summaries.append(
+        return [
             ResourceSummary(
-                kind="radar_peak",
-                display_name="Radar Peak Distances",
-                role="Optional signal",
+                kind=descriptor.kind,
+                display_name=descriptor.display_name,
+                role=descriptor.role,
                 status="loaded" if runtime.radar_peak_loaded else "unloaded",
                 path="",
-                color_hex=None,
+                color_hex=descriptor.color_hex,
                 color_muted=not runtime.radar_peak_loaded,
                 details=peak_details,
                 messages=peak_messages,
                 actions=tuple(peak_actions),
                 status_label=peak_status_label,
             )
-        )
+        ]
 
-    leg2_path = session.leg2_ultrasonic_datasource.path
+
+def _build_leg2_summary(
+    session: AlignmentSession,
+    runtime: AlignmentResourceRuntime,
+) -> ResourceSummary:
+    descriptor = LEG2_MAT_RESOURCE
+    path_text = session.leg2_ultrasonic_datasource.path
     leg2_messages = _resource_messages("leg2_mat", runtime)
     leg2_status = _resource_status(
-        path_text=leg2_path,
+        path_text=path_text,
         loaded=runtime.leg2_loaded,
         messages=leg2_messages,
     )
@@ -398,26 +417,23 @@ def build_alignment_resource_summaries(
         valid = runtime.leg2_valid_segment_count or 0
         total = runtime.leg2_sample_count
         leg2_details = f"{total} samples, {valid}/{total} reliable segments"
-    elif leg2_path:
+    elif path_text:
         leg2_details = "Remembered Leg2 MAT path is not currently loaded."
-    summaries.append(
-        ResourceSummary(
-            kind="leg2_mat",
-            display_name="Leg2 MAT",
-            role="Optional signal",
-            status=leg2_status,
-            path=leg2_path,
-            color_hex=LEG2_TIMELINE_TRACK_COLOR_HEX,
-            color_muted=not runtime.leg2_loaded,
-            details=leg2_details,
-            messages=leg2_messages,
-            actions=_resource_actions(
-                status=leg2_status,
-                path_text=leg2_path,
-                can_unload=runtime.leg2_loaded or bool(leg2_path),
-                messages=leg2_messages,
-            ),
-        )
-    )
 
-    return tuple(summaries)
+    return ResourceSummary(
+        kind=descriptor.kind,
+        display_name=descriptor.display_name,
+        role=descriptor.role,
+        status=leg2_status,
+        path=path_text,
+        color_hex=descriptor.color_hex,
+        color_muted=not runtime.leg2_loaded,
+        details=leg2_details,
+        messages=leg2_messages,
+        actions=_resource_actions(
+            status=leg2_status,
+            path_text=path_text,
+            can_unload=runtime.leg2_loaded or bool(path_text),
+            messages=leg2_messages,
+        ),
+    )
