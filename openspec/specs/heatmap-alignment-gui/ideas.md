@@ -63,20 +63,18 @@ idea is fixed, rejected, or superseded.
 
 ### Confirmed bugs and stabilization
 
-- Rendered heatmap color limits: constrain Color Min / Color Max and ensure
-  session-load color-limit changes invalidate the rendered heatmap preview.
-  See **Render panel control layout cleanup**.
-- Timeline playhead: hide the in-range playhead line and disable its hit-test
-  when current time is outside the visible timeline range. See **Timeline polish**.
-- Viewport preview invalidation: avoid viewport quality drops or source-resolution
-  work when H5 loading finishes but no camera, viewport, visibility, or layout input
-  changed. See **Source-resolution viewport processing**.
 - Loading placeholders: consider showing loading H5/camera tracks in the timeline as
   soon as a load starts, rather than only after metadata is ready. See
   **Session load responsiveness**.
-- Shutdown/background cancellation: reproduce and then ensure close/quit cancels
-  or drains resource jobs, proxy writes, H5/camera loading, and queued preview work.
-  See **Background and async processing**.
+- Session load responsiveness: continue investigating freezes, stale status
+  messaging, and current-time preservation during resource loads. See
+  **Session load responsiveness** and **Status and feedback polish**.
+- Signals plot responsiveness and state preservation: large H5-derived series and
+  resize-triggered redraws can still make review sluggish or reset hidden traces.
+  See **Timeline polish** and **Signals plot context menu polish**.
+- Rendered heatmap marker and hover alignment: reproduce and correct pixel-center,
+  strip-alignment, and orientation issues. See **Peak-distance datasource and
+  Calculate Peaks**.
 
 ### High-priority workflow improvements
 
@@ -171,7 +169,6 @@ Possible directions:
 - Keep Timeline zoom/pan synchronized with the Signals plot when x-axis Timeline mode is active so scrubbing and alignment review stay visually aligned.
 - Add off-screen indicators for timeline tracks that are completely outside the current visible x-range. Camera, H5, and Leg2 track bars could show small left/right edge arrows colored to match their track bars, so users can tell that a loaded or replaced resource exists outside the current view after preserving zoom.
 - Make off-screen track indicators clickable, similar to the existing off-screen playhead indicator, so clicking one pans the shared x-range to bring that track into view while preserving the current zoom span.
-- Bug: the timeline playhead vertical line can remain visible and hoverable when the playhead time is outside the visible x-range, even though the Signals playhead is correctly not shown. The timeline should hide the out-of-range playhead line and disable its hover/drag hit-test, leaving only the off-screen playhead indicator interactive.
 - Add optional overlap shading if users still find the two-track relationship confusing.
 - Improve tick density and labels as zoom changes.
 - Clean up the timeline time-axis presentation: move tick labels farther from vertical grid lines so decimal points remain legible, remove the horizontal time-axis line if the grid already communicates scale, and remove the redundant "Time" label.
@@ -189,8 +186,6 @@ Possible directions:
 - Avoid rebuilding or refreshing signal plot data on current-time-only updates; moving the current-time indicator should be enough unless plotted data or x/y range state changed.
 - Investigate and optimize major Signals plot performance issues with large H5-derived series, especially when many points are visible after generating peaks. One concrete repro is loading `L:\Member Folders\Curt Laubscher\Data\260626 Radar stairs parallel sensor\sync2.json`, waiting for resources to load, generating peaks with the `dist normalized` algorithm and default params, then panning/zooming the linked x-axis; the `sum v` algorithm with the default `650` threshold is also slow, though less severe. Possible directions: downsample plotted series by visible x-range, use level-of-detail curves, decimate no-detection/candidate segments, avoid rebuilding unchanged curves, and add plot-stage timing before choosing an implementation.
 - Consider a fast interactive preview path plus a higher-quality settled path, similar to the source-resolution viewport preview direction.
-- Bug: changing the Leg2 ultrasonic signal kind between raw and filtered currently makes the viewport drop to low quality and then return to high quality. Viewport quality invalidation should only be triggered by changes that affect the camera/viewport/heatmap preview; choosing which ultrasonic signal to plot in Signals should not invalidate or refresh viewport quality.
-- Bug: resizing splitter handles can sometimes make the viewport preview refresh, drop to low quality, or otherwise behave like viewport-relevant state changed. Layout-only resizing should not invalidate viewport quality or trigger unnecessary source-resolution viewport work unless the displayed preview size genuinely requires a repaint.
 - Review discrete H5 frame selection semantics for current-time mapping. Users likely expect a nearest-frame relationship: for H5 frame timestamp `t` and frame interval `dt`, the heatmap for that frame should be shown when the playhead is within roughly `t - dt / 2` to `t + dt / 2`. If the current implementation effectively floors to the nearest frame at or before the playhead, that can make the rendered heatmap feel one frame behind the H5 peak plot.
 - Preserve the simple H5-fixed, camera-draggable model unless a broader timeline model is explicitly needed.
 - Move toward a neutral/global timeline reference where H5 has its own offset instead of being the implicit zero-time ground truth. H5 probably should become an offset-bearing track like the other sources so the timeline model does not privilege one loaded resource as the permanent coordinate origin.
@@ -410,8 +405,6 @@ Related layout direction:
 Follow-up after the Render panel is removed:
 - Keep disabled xcorr/preprocess controls such as blur, downscale, lag window, and sample count out of the main workflow until xcorr or another diagnostic feature is intentionally reintroduced.
 - If xcorr returns, give it a clearly named diagnostic or advanced alignment-assistance surface rather than placing disabled or experimental controls in the primary alignment workflow.
-- Color Min should be constrained to be strictly less than Color Max. Today the spinboxes are independent; entering a Color Min ≥ Color Max produces a degenerate color range. Add a validator or cross-constraint so the user cannot commit a value that inverts or collapses the range (e.g. clamp or warn when Color Min would meet or exceed Color Max). This requires additional change logic and is deferred.
-- Bug: when loading a session, the Color Min / Color Max UI controls update but the rendered heatmap continues to use color range values from the previous session until a manual refresh or other action forces re-render. This suggests the render pipeline or cached rendered-heatmap preview is not being invalidated when session color limits change during session load. Possible directions: ensure session load applies color-range changes to the rendering model immediately, invalidate and schedule a re-render of the rendered heatmap preview (clear any cached heatmap render), and centralize color-limit state so UI control updates and renderer config remain in sync. Also add a lightweight visual feedback (e.g. transient "applying color limits" badge) while the render invalidation completes. Note: LQ/HQ proxy concepts are specific to video previews; this bug concerns the rendered heatmap preview.
 
 
 ## Useful But Lower Priority
@@ -442,11 +435,11 @@ Possible directions:
 - Render higher-quality paused previews after interaction settles.
 - Use a configurable RAM budget to decide how much decoded preview/full-res data to keep.
 - Detect and guard against slow or blocking filesystem I/O (for example when files live on a network drive under transfer). Prefer asynchronous file access or worker-thread-based file probes, add sensible timeouts and retry/fallback behavior, and surface a clear "slow filesystem" warning. Consider an adaptive fallback that reduces probing frequency and coalesces I/O when an unusually slow backend is detected so the UI stays responsive even while file operations are degraded.
-- Bug candidate: after exiting the app while resources are still loading or background work is active, the process may continue writing in the background. This needs reproduction and shutdown instrumentation. Future cleanup should ensure app exit cancels or drains resource jobs, proxy writes, H5/camera loading, and any queued preview work deterministically; partial files should be finalized or removed, and background workers should not continue writing after the user believes the app has closed.
-- Near-term shutdown hardening should improve the current job lifecycle without
-  prematurely implementing the full preview product/job dependency model. Any
-  local cancellation or drain behavior added now should be reusable by that future
-  model or clearly isolated as an interim guard.
+- Current shutdown hardening abandons active resource jobs, terminates registered
+  proxy processes, and stales pending source-resolution viewport work before the
+  source-resolution worker thread is drained on close. Future lifecycle work
+  should formalize these semantics in the broader job model instead of adding
+  more one-off shutdown paths.
 - Preview proxy generation already writes to a `.partial` path and promotes it to
   the reusable cache path only after success; startup cleanup removes stale partial
   proxy files before rebuilding. Treat broader proxy/cache UX as separate from
@@ -547,10 +540,6 @@ Possible directions:
 The current paused source-resolution viewport preview is a single-frame, latest-request-wins path. Future work could make this more proactive or cached if needed.
 
 Possible directions:
-- Confirmed bug: when an H5 load finishes after the camera and viewport are already
-  visible, the viewport can briefly drop to low quality and then return to high
-  quality even when the viewport panel size did not change. H5 readiness should
-  refresh H5-derived products, not invalidate or re-render viewport products.
 - Pre-warp original-resolution camera footage into a source-resolution viewport proxy.
 - Cache recently requested source-resolution viewport frames.
 - Render nearby paused frames after the user stops scrubbing or dragging.
