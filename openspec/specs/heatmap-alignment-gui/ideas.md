@@ -38,7 +38,7 @@ Current architecture notes:
 - Export reopens the original-resolution camera video and composites a plotted H5 heatmap overlay into the scaled export rectangle.
 - Xcorr prototype code exists, but GUI xcorr is intentionally disabled for MVP due to performance and reliability concerns.
 
-Current priority signals:
+Background priority signals:
 - Basic viewport visibility transforms and source-resolution paused preview have been implemented, but the color match still does not feel right enough to call the enhancement algorithm solved.
 - A focused color-matching improvement is likely the next alignment-aid candidate if manual comparison remains difficult.
 - Export dialog settings and overlay plot formatting are plausible near-term changes because export is already useful and the output styling can be improved incrementally.
@@ -55,7 +55,53 @@ Useful implementation posture:
 - Avoid putting raw brainstorm items into the accepted spec; use this file for ideas and OpenSpec changes for committed work.
 - When delegating implementation to another agent, include direct links/paths to the relevant OpenSpec proposal, design, spec, tasks, and this ideas file in addition to conversational context.
 
-## Likely Next Candidates
+## Current Triage
+
+Use this section as a short map of likely next work. Keep detailed context in the
+themed sections below, and update or remove bullets here when the underlying
+idea is fixed, rejected, or superseded.
+
+### Confirmed bugs and stabilization
+
+- Rendered heatmap color limits: constrain Color Min / Color Max and ensure
+  session-load color-limit changes invalidate the rendered heatmap preview.
+  See **Render panel control layout cleanup**.
+- Timeline playhead: hide the in-range playhead line and disable its hit-test
+  when current time is outside the visible timeline range. See **Timeline polish**.
+- Viewport preview invalidation: avoid viewport quality drops or source-resolution
+  work when H5 loading finishes but no camera, viewport, visibility, or layout input
+  changed. See **Source-resolution viewport processing**.
+- Shutdown/background cancellation: reproduce and then ensure close/quit cancels
+  or drains resource jobs, proxy writes, H5/camera loading, and queued preview work.
+  See **Background and async processing**.
+
+### High-priority workflow improvements
+
+- Viewport color matching remains the main alignment-aid candidate before xcorr
+  work.
+- Export dialog settings and overlay plot formatting are plausible incremental
+  improvements because export is already useful.
+- Timeline transport, zoom/pan, and Signals plot responsiveness should be driven
+  by concrete manual-review pain points.
+
+### Architecture direction
+
+- Keep `PreviewChange` / `PreviewSyncPlan` as the current bridge for targeted
+  invalidation.
+- Move toward a preview product/job dependency model before splitting camera
+  decode, viewport transform, and enhancement into separate execution stages.
+- Preserve the simple one-camera/one-H5 workflow while shaping resource and job
+  concepts so optional datasources do not keep adding one-off conditionals.
+
+### Refactoring and maintenance
+
+- Keep `ideas.md` current: remove shipped/archive notes once any deferred work has
+  been copied into active bullets, and keep confirmed bugs near this triage section.
+- Split `heatmap_alignment_gui.py` only when a focused extraction reduces real
+  coupling or review risk; avoid broad mechanical churn immediately after large
+  refactors.
+
+## Workbench Workflow And UI Ideas
 
 ### Viewport color matching
 
@@ -319,7 +365,6 @@ Possible directions:
 - Keep common first-run actions discoverable if buttons are removed.
 - Use the same organization for future data sources so new imports do not keep expanding the main control row.
 - Add a custom Session Open dialog that previews session JSON contents without loading their resources: show which camera/H5/peak files a session references, mark missing or invalid paths, show brief metadata (durations, frame counts), and surface small thumbnails or textual summaries where available. This lets users scan many sessions in a directory and spot which ones are valid or which need relinking before opening, avoiding expensive per-session loads.
-- **Shipped (`dirty-session-prompts`, archived 2026-06-01):** single session dirty flag, `*` in the window title, Save / Don't Save / Cancel when dirty on open (before file dialog), close, and quit; clean quit silent; pristine close silent; clean non-pristine close uses Yes/No only; dirty marking at user-initiated entry points only (not async job completion after open); Save without requiring camera+H5 in memory; mark dirty after Clear All Resources. Deferred: unsaved tri-state on Clear All, playhead/`current_time_s` as dirty, timeline zoom persistence (below).
 - Make status-bar messages transient for one-shot actions such as loading or saving sessions/resources. Persistent state should live in the window title, Resources window, or resource rows; action confirmations should clear after a short timeout so stale "Saved session" or "Loaded session" text is not mistaken for current-state labeling.
 - Persist timeline **visible range / zoom** (today held only in `timeline_range_model`, not in session JSON) so save/reload restores the same timeline viewport.
 - Decide playhead policy for **`timeline.current_time_s`**: already in session JSON but excluded from v1 dirty tracking; consider whether scrubbing should mark dirty and whether reload should restore last playhead.
