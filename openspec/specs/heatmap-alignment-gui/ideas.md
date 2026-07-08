@@ -89,8 +89,10 @@ idea is fixed, rejected, or superseded.
 
 - Keep `PreviewChange` / `PreviewSyncPlan` as the current bridge for targeted
   invalidation.
-- Move toward a preview product/job dependency model before splitting camera
-  decode, viewport transform, and enhancement into separate execution stages.
+- Treat the preview product/job dependency model as the likely prerequisite for
+  the fully backed multi-resource system, not just a preview-performance cleanup.
+- Move toward that dependency model before splitting camera decode, viewport
+  transform, and enhancement into separate execution stages.
 - Preserve the simple one-camera/one-H5 workflow while shaping resource and job
   concepts so optional datasources do not keep adding one-off conditionals.
 
@@ -602,6 +604,13 @@ The current `PreviewChange` / `PreviewSyncPlan` layer is a bridge toward a more
 explicit dependency model. Keep using it for targeted invalidation fixes, but do
 not expand it into a full framework through ad hoc flags.
 
+This model is the likely prerequisite for a fully backed multi-resource system.
+Before the workbench can comfortably support multiple optional sources, derived
+resources, and quality modes, it needs a clear way to name products, declare what
+inputs make them fresh, and decide what happens to in-flight work when those
+inputs change. Without that layer, each new resource type is likely to add more
+one-off preview, cancellation, and stale-result paths.
+
 A future design should key preview products by their true inputs, for example:
 - `DecodedCameraFrame(path, time)`
 - `RectifiedViewport(decoded_frame_key, corners, output_size)`
@@ -610,6 +619,13 @@ A future design should key preview products by their true inputs, for example:
 - `RenderedHeatmap(h5_truth_frame_key, plot_settings)`
 - `OverlayPreview(rendered_heatmap_key, overlay_geometry, presentation_settings)`
 - `SignalPlotData(resource_identities, signal_settings, visible_range)`
+
+Resource identities should be stable enough to distinguish the active source from
+old or replacement sources even when paths, UI controls, or pending jobs overlap.
+For example, a future identity may need to combine source path, normalized load
+options, file metadata, selected dataset/channel, derived-resource parameters,
+and generation/version information. The exact shape can stay narrow at first, but
+jobs should not rely on mutable GUI widget state as their freshness contract.
 
 Each background result should apply only if its key still matches the latest
 request. Stale results should be discarded, and expensive work should be
@@ -624,6 +640,13 @@ interruption risks user-visible output, and long user-initiated work may need an
 explicit Cancel UI. Shutdown behavior should be part of the product/job contract,
 including cancellation, stale-result discard, partial-output cleanup, and whether
 close/quit waits, abandons, or drains each job.
+
+The dependency model should also distinguish user-visible resources from derived
+preview products. A camera video, H5 recording, peak JSON, and Leg2 MAT file are
+resources the user loads or saves in a session; decoded frames, rectified
+viewports, rendered heatmaps, overlays, and plot arrays are derived products that
+can usually be recomputed. That distinction should guide persistence,
+replacement, cancellation, partial-output cleanup, and future cache invalidation.
 
 Stage separation should follow this dependency model rather than precede it as a
 standalone refactor:
@@ -678,6 +701,8 @@ Possible directions:
 The current implementation is conceptually track-based but practically hard-coded for one camera video and one H5 heatmap source.
 
 Possible future directions:
+- Build on the preview product/job dependency model instead of introducing a
+  separate resource framework with duplicate freshness and lifecycle rules.
 - Add pluggable source adapters for additional data formats.
 - Allow additional video-like or signal-like tracks.
 - Add a generic track/resource color assignment layer for arbitrary data sources, including automatic palette assignment, stable persisted colors, and readable light/dark theme variants derived from each resource's base color.
