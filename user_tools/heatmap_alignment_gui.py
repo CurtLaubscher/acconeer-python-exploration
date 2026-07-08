@@ -919,6 +919,12 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             entry_idx=entry_idx,
             subsweep_idx=subsweep_idx,
         )
+        color_min, color_max = self._normalized_color_limits(
+            self.session.render.color_min,
+            self.session.render.color_max,
+        )
+        self.session.render.color_min = color_min
+        self.session.render.color_max = color_max
         self._resource_job_manager.start_h5_job(
             h5_path,
             replaces_active=replaces_active,
@@ -926,8 +932,8 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             group_idx=group_idx,
             entry_idx=entry_idx,
             subsweep_idx=subsweep_idx,
-            color_min=self.color_min_spin.value(),
-            color_max=self.color_max_spin.value(),
+            color_min=color_min,
+            color_max=color_max,
             fixed_levels=True,
         )
         self._update_controls_enabled_state()

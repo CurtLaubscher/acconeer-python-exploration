@@ -1995,6 +1995,8 @@ def _make_session_file(
     subsweep_idx: int = 0,
     current_time_s: float = 0.0,
     offset_s: float = 0.0,
+    color_min: float = 0.0,
+    color_max: float | None = 3000.0,
 ) -> Path:
     session = AlignmentSession(
         camera_track=CameraTrack(path=camera_path),
@@ -2008,6 +2010,8 @@ def _make_session_file(
     )
     session.timeline.current_time_s = current_time_s
     session.timeline.offset_s = offset_s
+    session.render.color_min = color_min
+    session.render.color_max = color_max
     path = tmp_path / "session.json"
     save_alignment_session(session, path)
     return path
@@ -2169,6 +2173,39 @@ def test_reconcile_h5_load_when_identity_changes(
 
     assert len(load_h5_calls) == 1
     assert load_h5_calls[0] == new_h5
+
+
+def test_session_load_h5_job_uses_session_render_limits(
+    tmp_path: Path,
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    h5_file = tmp_path / "record.h5"
+    h5_file.write_bytes(b"")
+    session_path = _make_session_file(
+        tmp_path,
+        h5_path=str(h5_file),
+        color_min=0.0,
+        color_max=1000.0,
+    )
+    window = HeatmapAlignmentWindow()
+    window.color_min_spin.setValue(2500.0)
+    window.color_max_spin.setValue(5000.0)
+    captured_kwargs: list[dict[str, object]] = []
+
+    def _start_h5_job(path: Path, **kwargs: object) -> int:
+        captured_kwargs.append(dict(kwargs, path=path))
+        return 1
+
+    monkeypatch.setattr(window._resource_job_manager, "start_h5_job", _start_h5_job)
+    monkeypatch.setattr(window, "_sync_previews", lambda **kwargs: None)
+
+    window.load_session_from_path(session_path)
+
+    assert len(captured_kwargs) == 1
+    assert captured_kwargs[0]["path"] == h5_file
+    assert captured_kwargs[0]["color_min"] == pytest.approx(0.0)
+    assert captured_kwargs[0]["color_max"] == pytest.approx(1000.0)
 
 
 def test_load_h5_replacement_clears_old_source_before_job_finishes(
