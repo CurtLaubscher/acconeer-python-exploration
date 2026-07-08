@@ -443,6 +443,14 @@ Possible directions:
 - Use a configurable RAM budget to decide how much decoded preview/full-res data to keep.
 - Detect and guard against slow or blocking filesystem I/O (for example when files live on a network drive under transfer). Prefer asynchronous file access or worker-thread-based file probes, add sensible timeouts and retry/fallback behavior, and surface a clear "slow filesystem" warning. Consider an adaptive fallback that reduces probing frequency and coalesces I/O when an unusually slow backend is detected so the UI stays responsive even while file operations are degraded.
 - Bug candidate: after exiting the app while resources are still loading or background work is active, the process may continue writing in the background. This needs reproduction and shutdown instrumentation. Future cleanup should ensure app exit cancels or drains resource jobs, proxy writes, H5/camera loading, and any queued preview work deterministically; partial files should be finalized or removed, and background workers should not continue writing after the user believes the app has closed.
+- Near-term shutdown hardening should improve the current job lifecycle without
+  prematurely implementing the full preview product/job dependency model. Any
+  local cancellation or drain behavior added now should be reusable by that future
+  model or clearly isolated as an interim guard.
+- Preview proxy generation already writes to a `.partial` path and promotes it to
+  the reusable cache path only after success; startup cleanup removes stale partial
+  proxy files before rebuilding. Treat broader proxy/cache UX as separate from
+  close-time lifecycle hardening unless a concrete partial-output bug is reproduced.
 
 This is attractive architecturally, but not critical for the current small manual trial count.
 
@@ -619,6 +627,14 @@ request. Stale results should be discarded, and expensive work should be
 cancelled when practical. This would make resize handling, scrubbing, source
 replacement, shutdown cancellation, and future multi-resource previews easier to
 reason about than one broad `_sync_previews(...)` path.
+
+Each job/product should also declare lifecycle semantics. Some work can be
+cancelled promptly and clean up partial output, some work can only be abandoned so
+late results are ignored, some close/quit paths may need to drain because
+interruption risks user-visible output, and long user-initiated work may need an
+explicit Cancel UI. Shutdown behavior should be part of the product/job contract,
+including cancellation, stale-result discard, partial-output cleanup, and whether
+close/quit waits, abandons, or drains each job.
 
 Stage separation should follow this dependency model rather than precede it as a
 standalone refactor:
