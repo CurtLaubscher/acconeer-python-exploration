@@ -1,14 +1,14 @@
 from __future__ import annotations
 
+
 """Basic preview widgets for the heatmap alignment workbench."""
 
 from typing import Literal
 
 import numpy as np
+from heatmap_alignment_rendering import detection_ratio_strip_rgb
 
 from PySide6 import QtCore, QtGui, QtWidgets
-
-from heatmap_alignment_core import detection_ratio_strip_rgb
 
 
 def rgb_to_qpixmap(frame_rgb: np.ndarray) -> QtGui.QPixmap:

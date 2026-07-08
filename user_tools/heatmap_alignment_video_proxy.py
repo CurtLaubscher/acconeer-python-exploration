@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+
 """Video probing and preview proxy helpers for heatmap alignment."""
 
 import os
@@ -96,7 +97,7 @@ def prepare_proxy_video(
             state="proxy_reused",
         )
 
-    from heatmap_alignment_resource_jobs import build_preview_proxy_video
+    from heatmap_alignment_camera_resource_job import build_preview_proxy_video
 
     return build_preview_proxy_video(
         source_path,

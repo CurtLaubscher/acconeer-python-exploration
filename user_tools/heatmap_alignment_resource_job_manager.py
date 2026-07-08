@@ -1,13 +1,21 @@
 from __future__ import annotations
 
+
 """Resource job scheduling for the heatmap alignment workbench."""
 
 import threading
 from pathlib import Path
 
-from heatmap_alignment_resource_jobs import (
+from heatmap_alignment_camera_resource_job import (
     CameraResourceJobResult,
+    run_camera_resource_job,
+)
+from heatmap_alignment_h5_resource_job import (
     LoadedH5ResourcePayload,
+    load_h5_resource_payload,
+    release_resource_job_result,
+)
+from heatmap_alignment_resource_job_state import (
     ResourceJobBoard,
     ResourceJobError,
     ResourceJobKind,
@@ -15,12 +23,9 @@ from heatmap_alignment_resource_jobs import (
     begin_resource_job,
     clear_resource_job,
     complete_resource_job,
-    load_h5_resource_payload,
     mark_resource_job_phase,
-    release_resource_job_result,
     request_cancel_resource_job,
     resource_job_blocks_export,
-    run_camera_resource_job,
     should_apply_job_result,
 )
 
@@ -136,7 +141,9 @@ class ResourceJobManager(QtCore.QObject):
             if "Internal C++ object" not in str(exc):
                 raise
 
-    def _acquire_worker_slot(self, kind: ResourceJobKind, generation: int, waiting_message: str) -> None:
+    def _acquire_worker_slot(
+        self, kind: ResourceJobKind, generation: int, waiting_message: str
+    ) -> None:
         waiting_reported = False
         while True:
             with self._worker_state_lock:

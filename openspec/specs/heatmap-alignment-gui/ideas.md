@@ -7,8 +7,30 @@ This is a living idea list for the heatmap alignment workbench. Items here are n
 The current MVP is accepted and archived. The durable behavior contract is `openspec/specs/heatmap-alignment-gui/spec.md`; this file is only a parking lot for ideas. Do not treat any item here as approved scope without first proposing a new OpenSpec change.
 
 Current architecture notes:
-- The GUI is a PySide6 tool in `user_tools/heatmap_alignment_gui.py`.
-- Core session/video/heatmap logic lives in `user_tools/heatmap_alignment_core.py`.
+- The PySide6 workbench entrypoint and orchestration shell is
+  `user_tools/heatmap_alignment_gui.py`.
+- `user_tools/heatmap_alignment_core.py` is retained as a compatibility facade
+  for older imports and a few monkeypatch-oriented tests; new code should import
+  from the focused owner modules instead.
+- Session dataclasses and JSON load/save/validation live in
+  `user_tools/heatmap_alignment_core_models.py`.
+- Camera/H5 source adapters live in `user_tools/heatmap_alignment_sources.py`,
+  heatmap rendering in `user_tools/heatmap_alignment_rendering.py`, signal
+  series transforms in `user_tools/heatmap_alignment_core_signals.py`, viewport
+  processing in `user_tools/heatmap_alignment_viewport_processing.py`, and
+  session/resource reconcile helpers in `user_tools/heatmap_alignment_reconcile.py`.
+- Timeline and signal widgets are split across
+  `user_tools/heatmap_alignment_timeline_model.py`,
+  `user_tools/heatmap_alignment_timeline_widget.py`, and
+  `user_tools/heatmap_alignment_signal_plot.py`.
+- Resource concepts live in `user_tools/heatmap_alignment_resource_model.py`,
+  summaries in `user_tools/heatmap_alignment_resource_summaries.py`, UI/action
+  coordination in `user_tools/heatmap_alignment_resource_coordinator.py`, and
+  background resource jobs in the `heatmap_alignment_*_resource_job*.py` modules.
+- Resource-facing dialogs/widgets are split into
+  `user_tools/heatmap_alignment_resources_window.py`,
+  `user_tools/heatmap_alignment_generate_peak_dialog.py`, and
+  `user_tools/heatmap_alignment_heatmap_header.py`.
 - Shared Sparse IQ heatmap rendering helpers live in `user_tools/sparse_iq_heatmap_common.py`.
 - The GUI uses a disposable local preview proxy for responsive camera playback, while sessions store the original camera video path.
 - Viewport geometry is now intended to be stored in original camera video coordinates; preview/proxy drawing maps it into display coordinates.
