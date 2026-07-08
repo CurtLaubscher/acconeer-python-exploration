@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
-from heatmap_alignment_resource_actions import resource_path_for_kind
 from heatmap_alignment_resource_model import (
     CAMERA_RESOURCE,
     LEG2_MAT_RESOURCE,
@@ -440,11 +439,10 @@ class RadarPeakResourceAdapter(_BaseResourceAdapter):
     descriptor = RADAR_PEAK_RESOURCE
 
     def path_text(self, host: Any) -> str:
-        return resource_path_for_kind(
-            host.session,
-            self.kind,
-            peak_series=host._peak_series_list,
-        )
+        for series in host._peak_series_list:
+            if series.json_path is not None:
+                return str(series.json_path)
+        return ""
 
     def has_path(self, host: Any) -> bool:
         return bool(host._peak_series_list) or bool(
