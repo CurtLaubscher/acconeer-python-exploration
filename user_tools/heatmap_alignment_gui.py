@@ -975,7 +975,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._heatmap_peak_selector_id = None
         self._set_resource_reload_error("radar_peak", None)
         self._set_resource_warnings("radar_peak", ())
-        self._sync_previews(camera_access_hint="auto")
+        self._sync_previews(changes=PreviewChange.SIGNALS_ONLY | PreviewChange.H5_RENDER_SETTINGS)
         self._refresh_resources_ui()
         self.statusBar().showMessage("Peak series cleared.")
 
@@ -2095,20 +2095,14 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         )
         self.session.viewport_visibility.gamma = self.viewport_gamma_spin.value()
         self._update_viewport_visibility_controls_enabled()
-        self._sync_previews(
-            camera_access_hint="auto",
-            invalidate_source_resolution=False,
-        )
+        self._sync_previews(changes=PreviewChange.VIEWPORT_VISIBILITY)
 
     def _viewport_visibility_range_changed(self, low: float, high: float) -> None:
         self._mark_session_dirty()
         self.session.viewport_visibility.low = low
         self.session.viewport_visibility.high = high
         self._update_viewport_visibility_labels()
-        self._sync_previews(
-            camera_access_hint="auto",
-            invalidate_source_resolution=False,
-        )
+        self._sync_previews(changes=PreviewChange.VIEWPORT_VISIBILITY)
 
     def _update_viewport_visibility_labels(self) -> None:
         self.viewport_low_label.setText(f"Low {self.session.viewport_visibility.low:.2f}")
@@ -2267,7 +2261,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
                 fixed_levels=True,
             )
             self._rebuild_overlay_plot_renderer()
-        self._sync_previews(camera_access_hint="auto")
+        self._sync_previews(changes=PreviewChange.H5_RENDER_SETTINGS)
 
     def _corners_changed(self, corners: list) -> None:
         self._mark_session_dirty()
