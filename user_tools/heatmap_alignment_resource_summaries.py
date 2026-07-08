@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from heatmap_alignment_core_models import AlignmentSession
-from heatmap_alignment_resource_jobs import ResourceJobPhase
+from heatmap_alignment_resource_job_state import ResourceJobPhase
 from heatmap_alignment_resource_model import (
     CAMERA_RESOURCE,
     LEG2_MAT_RESOURCE,

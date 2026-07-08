@@ -12,24 +12,28 @@ USER_TOOLS_PATH = REPO_ROOT / "user_tools"
 if str(USER_TOOLS_PATH) not in sys.path:
     sys.path.insert(0, str(USER_TOOLS_PATH))
 
-from heatmap_alignment_resource_jobs import (  # noqa: E402
-    LoadedH5ResourcePayload,
+from heatmap_alignment_camera_resource_job import (  # noqa: E402
     ProxyBuildError,
-    ResourceJobBoard,
-    begin_resource_job,
-    build_h5_truth_source_from_payload,
     build_preview_proxy_video,
-    complete_resource_job,
-    release_resource_job_result,
     replacement_viewport_needs_default_reset,
-    request_cancel_resource_job,
     resolve_replacement_viewport_corners,
-    resource_job_blocks_export,
-    should_apply_job_result,
 )
 from heatmap_alignment_core import (  # noqa: E402
     HeatmapTrack,
     HeatmapTruthSource,
+)
+from heatmap_alignment_h5_resource_job import (  # noqa: E402
+    LoadedH5ResourcePayload,
+    build_h5_truth_source_from_payload,
+    release_resource_job_result,
+)
+from heatmap_alignment_resource_job_state import (  # noqa: E402
+    ResourceJobBoard,
+    begin_resource_job,
+    complete_resource_job,
+    request_cancel_resource_job,
+    resource_job_blocks_export,
+    should_apply_job_result,
 )
 from heatmap_alignment_video_proxy import (  # noqa: E402
     VideoProbe,
@@ -137,7 +141,7 @@ def test_load_h5_resource_payload_closes_record_when_render_fails(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    from heatmap_alignment_resource_jobs import load_h5_resource_payload
+    from heatmap_alignment_h5_resource_job import load_h5_resource_payload
 
     class _FakeRecord:
         def __init__(self) -> None:
@@ -164,6 +168,7 @@ def test_load_h5_resource_payload_closes_record_when_render_fails(
         "sparse_iq_heatmap_common.load_heatmap_record",
         lambda *args: record,
     )
+
     def _heatmap_frame_rgb_failure(*args: object, **kwargs: object) -> None:
         raise RuntimeError("render failed")
 
@@ -222,7 +227,7 @@ def test_build_preview_proxy_promotes_only_after_success(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    import heatmap_alignment_resource_jobs as jobs
+    import heatmap_alignment_camera_resource_job as camera_jobs
 
     source_path = tmp_path / "large.mp4"
     source_path.write_bytes(b"source")
@@ -241,10 +246,10 @@ def test_build_preview_proxy_promotes_only_after_success(
         cache_root=tmp_path,
     )
 
-    monkeypatch.setattr(jobs, "probe_video", lambda path: probe)
-    monkeypatch.setattr(jobs, "find_ffmpeg", lambda: "ffmpeg")
+    monkeypatch.setattr(camera_jobs, "probe_video", lambda path: probe)
+    monkeypatch.setattr(camera_jobs, "find_ffmpeg", lambda: "ffmpeg")
     monkeypatch.setattr(
-        jobs,
+        camera_jobs,
         "proxy_cache_path",
         lambda source_path, source_probe, max_dimension, cache_root: proxy_path,
     )
@@ -254,25 +259,25 @@ def test_build_preview_proxy_promotes_only_after_success(
             self.returncode = 0
 
         def communicate(self) -> tuple[str, str]:
-            temp_path = jobs._proxy_temp_path(proxy_path)
+            temp_path = camera_jobs._proxy_temp_path(proxy_path)
             temp_path.parent.mkdir(parents=True, exist_ok=True)
             temp_path.write_bytes(b"partial")
             return "", ""
 
-    monkeypatch.setattr(jobs.subprocess, "Popen", _FakeProcess)
+    monkeypatch.setattr(camera_jobs.subprocess, "Popen", _FakeProcess)
 
     result = build_preview_proxy_video(source_path, cache_root=tmp_path)
 
     assert result.display_path == proxy_path
     assert proxy_path.exists()
-    assert not jobs._proxy_temp_path(proxy_path).exists()
+    assert not camera_jobs._proxy_temp_path(proxy_path).exists()
 
 
 def test_build_preview_proxy_does_not_leave_final_cache_on_failure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    import heatmap_alignment_resource_jobs as jobs
+    import heatmap_alignment_camera_resource_job as camera_jobs
 
     source_path = tmp_path / "large.mp4"
     source_path.write_bytes(b"source")
@@ -291,10 +296,10 @@ def test_build_preview_proxy_does_not_leave_final_cache_on_failure(
         cache_root=tmp_path,
     )
 
-    monkeypatch.setattr(jobs, "probe_video", lambda path: probe)
-    monkeypatch.setattr(jobs, "find_ffmpeg", lambda: "ffmpeg")
+    monkeypatch.setattr(camera_jobs, "probe_video", lambda path: probe)
+    monkeypatch.setattr(camera_jobs, "find_ffmpeg", lambda: "ffmpeg")
     monkeypatch.setattr(
-        jobs,
+        camera_jobs,
         "proxy_cache_path",
         lambda source_path, source_probe, max_dimension, cache_root: proxy_path,
     )
@@ -304,18 +309,18 @@ def test_build_preview_proxy_does_not_leave_final_cache_on_failure(
             self.returncode = 1
 
         def communicate(self) -> tuple[str, str]:
-            temp_path = jobs._proxy_temp_path(proxy_path)
+            temp_path = camera_jobs._proxy_temp_path(proxy_path)
             temp_path.parent.mkdir(parents=True, exist_ok=True)
             temp_path.write_bytes(b"partial")
             return "", "ffmpeg failed"
 
-    monkeypatch.setattr(jobs.subprocess, "Popen", _FailingProcess)
+    monkeypatch.setattr(camera_jobs.subprocess, "Popen", _FailingProcess)
 
     with pytest.raises(ProxyBuildError):
         build_preview_proxy_video(source_path, cache_root=tmp_path)
 
     assert not proxy_path.exists()
-    assert not jobs._proxy_temp_path(proxy_path).exists()
+    assert not camera_jobs._proxy_temp_path(proxy_path).exists()
 
 
 def test_cancel_request_marks_job_cancelling() -> None:
@@ -472,7 +477,7 @@ def test_build_preview_proxy_passes_explicit_mp4_format(
     tmp_path: Path,
 ) -> None:
     """ffmpeg argv must contain -f mp4 immediately before the temp output path."""
-    import heatmap_alignment_resource_jobs as jobs
+    import heatmap_alignment_camera_resource_job as camera_jobs
 
     source_path = tmp_path / "large.mp4"
     source_path.write_bytes(b"source")
@@ -491,10 +496,10 @@ def test_build_preview_proxy_passes_explicit_mp4_format(
         cache_root=tmp_path,
     )
 
-    monkeypatch.setattr(jobs, "probe_video", lambda path: probe)
-    monkeypatch.setattr(jobs, "find_ffmpeg", lambda: "ffmpeg")
+    monkeypatch.setattr(camera_jobs, "probe_video", lambda path: probe)
+    monkeypatch.setattr(camera_jobs, "find_ffmpeg", lambda: "ffmpeg")
     monkeypatch.setattr(
-        jobs,
+        camera_jobs,
         "proxy_cache_path",
         lambda source_path, source_probe, max_dimension, cache_root: proxy_path,
     )
@@ -507,14 +512,14 @@ def test_build_preview_proxy_passes_explicit_mp4_format(
             self.returncode = 0
 
         def communicate(self) -> tuple[str, str]:
-            temp_path = jobs._proxy_temp_path(proxy_path)
+            temp_path = camera_jobs._proxy_temp_path(proxy_path)
             temp_path.parent.mkdir(parents=True, exist_ok=True)
             temp_path.write_bytes(b"partial")
             return "", ""
 
-    monkeypatch.setattr(jobs.subprocess, "Popen", _CapturingProcess)
+    monkeypatch.setattr(camera_jobs.subprocess, "Popen", _CapturingProcess)
 
     build_preview_proxy_video(source_path, cache_root=tmp_path)
 
-    expected_temp_path = jobs._proxy_temp_path(proxy_path)
+    expected_temp_path = camera_jobs._proxy_temp_path(proxy_path)
     assert captured_argv[-3:] == ["-f", "mp4", str(expected_temp_path)]
