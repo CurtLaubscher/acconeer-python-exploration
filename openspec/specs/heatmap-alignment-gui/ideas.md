@@ -349,7 +349,10 @@ Related layout direction:
 - Move heatmap color minimum/maximum controls into a clearer rendered-heatmap control area.
 - Consider placing viewport-related controls and rendered heatmap controls on the right side beside the viewport and rendered heatmap previews.
 - Keep the viewport preview and rendered heatmap preview visually unobstructed during normal use.
-- Bug: the viewport sometimes displays a "Loading H5" state or otherwise depends on H5 readiness before showing camera-based viewport content. The viewport should not be gated on H5 presence or H5 load state — camera preview and viewport interactions should remain available even if an H5 resource is missing or still loading. When H5 overlays are not ready, show a lightweight overlay-specific loading indicator rather than blocking viewport content or interactivity.
+- **Fixed (`heatmap-preview-invalidation-fixes`):** the viewport no longer displays a
+  blocking H5 loading overlay or requires H5 truth-frame readiness before showing
+  camera-based viewport content. Camera preview and viewport interactions should remain
+  available when an H5 resource is missing or still loading.
 - When "Show Overlay Preview" is toggled off, also hide the overlay bounding box and disable bounding-box interaction (dragging, corner handles, and selection). Only show and enable the bounding box when the overlay preview is visible so users cannot accidentally move or edit it while the overlay is hidden.
 
 Follow-up after the Render panel is removed:

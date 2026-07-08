@@ -2015,16 +2015,13 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             self.truth_view.set_loading_overlay(False)
 
         camera_active = resource_job_slot_is_active(camera_slot)
-        h5_active = resource_job_slot_is_active(h5_slot)
-        if camera_active or h5_active:
-            overlay_slot = camera_slot if camera_active else h5_slot
+        if camera_active:
             self.viewport_view.set_loading_overlay(
                 True,
-                resource_job_loading_overlay_message(overlay_slot),
+                resource_job_loading_overlay_message(camera_slot),
                 dim_content=(
                     self.viewport_view._pixmap is not None
                     or self.camera_source is not None
-                    or self.heatmap_source is not None
                 ),
             )
         else:
@@ -2895,11 +2892,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
     ) -> None:
         viewport_frame = None
         low_resolution_viewport_frame = None
-        if (
-            self.current_camera_frame is not None
-            and truth_frame is not None
-            and self.session.viewport.corners
-        ):
+        if self.current_camera_frame is not None and self.session.viewport.corners:
             viewport_size = self._viewport_output_size(truth_frame)
             display_corners = self._display_viewport_corners()
             try:

@@ -1311,6 +1311,27 @@ def test_resource_loading_overlays_include_viewport_for_active_jobs(
     assert "replacement.mp4" in window.viewport_view._loading_overlay_message
 
 
+def test_h5_loading_overlay_does_not_block_viewport(
+    qapplication: QApplication,
+) -> None:
+    from heatmap_alignment_resource_job_state import begin_resource_job
+
+    window = HeatmapAlignmentWindow()
+    begin_resource_job(
+        window._resource_job_manager.board(),
+        "radar_h5",
+        target_path=Path("/tmp/trial13.h5"),
+        replaces_active=True,
+        message="Loading trial13.h5...",
+    )
+
+    window._update_resource_loading_overlays()
+
+    assert window.truth_view._loading_overlay_active is True
+    assert "trial13.h5" in window.truth_view._loading_overlay_message
+    assert window.viewport_view._loading_overlay_active is False
+
+
 def test_resource_job_manager_cancel_completes_to_idle(
     qapplication: QApplication,
 ) -> None:
@@ -3879,6 +3900,31 @@ def test_source_resolution_result_preserves_timeline_range(
     )
 
     assert window.timeline_range_model.visible_range_s() == pytest.approx((2.0, 4.0))
+
+
+def test_viewport_preview_renders_without_h5_truth_frame(
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = HeatmapAlignmentWindow()
+    window.current_camera_frame = np.zeros((4, 4, 3), dtype=np.uint8)
+    window.current_camera_frame[:, :, 0] = 255
+    window.session.viewport.corners = [[0.0, 0.0], [3.0, 0.0], [3.0, 3.0], [0.0, 3.0]]
+    captured_frames: list[np.ndarray | None] = []
+
+    monkeypatch.setattr(window, "_viewport_output_size", lambda _truth_frame: (2, 2))
+    monkeypatch.setattr(
+        window,
+        "_display_viewport_corners",
+        lambda: np.asarray([[0.0, 0.0], [3.0, 0.0], [3.0, 3.0], [0.0, 3.0]], dtype=np.float32),
+    )
+    monkeypatch.setattr(window.viewport_view, "set_frame", captured_frames.append)
+
+    window._sync_viewport_preview(truth_frame=None, invalidate_source_resolution=False)
+
+    assert captured_frames
+    assert captured_frames[-1] is not None
+    assert captured_frames[-1].shape == (2, 2, 3)
 
 
 def test_h5_job_completion_preserves_timeline_range(
