@@ -80,8 +80,9 @@ For every phase:
 
 ## Deferred Follow-ups
 
-- Keep `heatmap_alignment_core.py` and `heatmap_alignment_timeline_widgets.py` as compatibility
-  facades for now. They still protect tests, ad hoc scripts, and older user workflows during the
-  first modularization pass.
+- Keep `heatmap_alignment_core.py` as the remaining compatibility facade for older imports and
+  monkeypatch-oriented tests.
+- The later resource cleanup deleted pure facades such as `heatmap_alignment_timeline_widgets.py`;
+  new code should import from the focused owner modules directly.
 - `HeatmapAlignmentWindow` remains large. A later pass can move more coupled workflow methods into
   narrow service modules once the current flat module boundaries have settled.
