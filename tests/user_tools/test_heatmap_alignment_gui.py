@@ -1702,6 +1702,37 @@ def test_resource_job_manager_abandon_releases_pending_h5_payload(
     assert manager.board().radar_h5.phase == "idle"
 
 
+def test_resource_job_manager_abandon_terminates_registered_proxy_process(
+    qapplication: QApplication,
+) -> None:
+    from heatmap_alignment_gui import ResourceJobManager
+    from heatmap_alignment_resource_job_state import begin_resource_job
+
+    manager = ResourceJobManager()
+    generation = begin_resource_job(
+        manager.board(),
+        "camera",
+        target_path=Path("/tmp/trial.mp4"),
+        replaces_active=False,
+    )
+
+    class _FakeProcess:
+        def __init__(self) -> None:
+            self.terminated = False
+
+        def terminate(self) -> None:
+            self.terminated = True
+
+    process = _FakeProcess()
+    manager._register_proxy_process(generation, process)
+
+    manager.abandon_all_jobs()
+
+    assert process.terminated is True
+    assert generation not in manager._proxy_processes
+    assert manager.board().camera.phase == "idle"
+
+
 def test_resource_job_manager_stale_success_releases_h5_payload(
     qapplication: QApplication,
 ) -> None:
@@ -3043,6 +3074,120 @@ def test_cancel_on_quit_leaves_session_dirty(
     assert window._session_lifecycle.dirty is True
 
 
+def test_cancel_on_quit_does_not_shutdown_jobs_or_source_resolution(
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = HeatmapAlignmentWindow()
+    window._mark_session_dirty()
+    calls: list[str] = []
+
+    monkeypatch.setattr(window, "_prompt_save_discard_cancel", lambda action: "cancel")
+    monkeypatch.setattr(
+        window.viewport_source_resolution_timer,
+        "stop",
+        lambda: calls.append("timer"),
+    )
+    monkeypatch.setattr(
+        window._source_resolution_thread,
+        "quit",
+        lambda: calls.append("thread-quit"),
+    )
+    monkeypatch.setattr(
+        window._source_resolution_thread,
+        "wait",
+        lambda: calls.append("thread-wait"),
+    )
+    monkeypatch.setattr(window, "_close_sources", lambda: calls.append("close-sources"))
+
+    event = QtGui.QCloseEvent()
+    window.closeEvent(event)
+
+    assert event.isAccepted() is False
+    assert calls == []
+
+
+def test_accepted_quit_abandons_active_resource_jobs(
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from heatmap_alignment_resource_job_state import begin_resource_job
+
+    window = HeatmapAlignmentWindow()
+    begin_resource_job(
+        window._resource_job_manager.board(),
+        "radar_h5",
+        target_path=Path("/tmp/trial.h5"),
+        replaces_active=False,
+    )
+    monkeypatch.setattr(
+        window.viewport_source_resolution_timer,
+        "stop",
+        lambda: None,
+    )
+    monkeypatch.setattr(window._source_resolution_thread, "quit", lambda: None)
+    monkeypatch.setattr(window._source_resolution_thread, "wait", lambda: None)
+
+    event = QtGui.QCloseEvent()
+    window.closeEvent(event)
+
+    assert event.isAccepted() is True
+    assert window._resource_job_manager._abandoned is True
+    assert window._resource_job_manager.board().radar_h5.phase == "idle"
+
+
+def test_accepted_quit_abandons_source_resolution_before_thread_wait(
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = HeatmapAlignmentWindow()
+    window._source_resolution_request_token = 7
+    window._source_resolution_worker_busy = True
+    window._pending_source_resolution_request = {"token": 7}
+    window._source_resolution_viewport_frame = np.zeros((1, 1, 3), dtype=np.uint8)
+    observed: dict[str, object] = {}
+
+    monkeypatch.setattr(window._source_resolution_thread, "quit", lambda: None)
+
+    def wait_for_worker() -> bool:
+        observed["token"] = window._source_resolution_request_token
+        observed["pending"] = window._pending_source_resolution_request
+        observed["busy"] = window._source_resolution_worker_busy
+        observed["frame"] = window._source_resolution_viewport_frame
+        return True
+
+    monkeypatch.setattr(window._source_resolution_thread, "wait", wait_for_worker)
+    monkeypatch.setattr(window, "_close_sources", lambda: None)
+
+    event = QtGui.QCloseEvent()
+    window.closeEvent(event)
+
+    assert event.isAccepted() is True
+    assert observed == {
+        "token": 8,
+        "pending": None,
+        "busy": False,
+        "frame": None,
+    }
+
+
+def test_close_sources_keeps_active_source_resolution_worker_busy_flag(
+    qapplication: QApplication,
+) -> None:
+    window = HeatmapAlignmentWindow()
+    window._source_resolution_request_token = 11
+    window._source_resolution_worker_busy = True
+    window._pending_source_resolution_request = {"token": 11}
+    window._source_resolution_viewport_frame = np.zeros((1, 1, 3), dtype=np.uint8)
+
+    window._close_sources()
+
+    assert window._source_resolution_request_token == 12
+    assert window._pending_source_resolution_request is None
+    assert window._source_resolution_viewport_frame is None
+    assert window._source_resolution_worker_busy is True
+
+
 def test_dont_save_then_open_proceeds(
     tmp_path: Path,
     qapplication: QApplication,
@@ -4005,6 +4150,29 @@ def test_source_resolution_result_preserves_timeline_range(
     )
 
     assert window.timeline_range_model.visible_range_s() == pytest.approx((2.0, 4.0))
+
+
+def test_source_resolution_result_after_abandon_is_ignored(
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = HeatmapAlignmentWindow()
+    window._source_resolution_request_token = 3
+    sync_calls: list[dict[str, object]] = []
+
+    monkeypatch.setattr(
+        window,
+        "_sync_previews_preserving_timeline_range",
+        lambda **kwargs: sync_calls.append(kwargs),
+    )
+
+    window._abandon_source_resolution_viewport()
+    window._handle_source_resolution_viewport_result(
+        {"token": 3, "frame": np.ones((2, 2, 3), dtype=np.uint8)}
+    )
+
+    assert window._source_resolution_viewport_frame is None
+    assert sync_calls == []
 
 
 def test_viewport_preview_renders_without_h5_truth_frame(

@@ -310,7 +310,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         if not self._handle_session_transition_guard("quit"):
             event.ignore()
             return
-        self.viewport_source_resolution_timer.stop()
+        self._abandon_source_resolution_viewport(clear_worker_busy=True)
         self._source_resolution_thread.quit()
         self._source_resolution_thread.wait()
         self._close_sources()
@@ -786,10 +786,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
     def _close_sources(self) -> None:
         self._abandon_resource_jobs()
         self._set_playback_active(False, refresh_viewport=False)
-        self.viewport_source_resolution_timer.stop()
-        self._source_resolution_request_token += 1
-        self._source_resolution_viewport_frame = None
-        self._pending_source_resolution_request = None
+        self._abandon_source_resolution_viewport()
         if self.camera_source is not None:
             self.camera_source.close()
             self.camera_source = None
@@ -805,6 +802,14 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.camera_view.set_export_overlay_preview_frame(None)
         self.camera_view.set_corners(None)
         self.viewport_view.set_frame(None)
+
+    def _abandon_source_resolution_viewport(self, *, clear_worker_busy: bool = False) -> None:
+        self.viewport_source_resolution_timer.stop()
+        self._source_resolution_request_token += 1
+        self._source_resolution_viewport_frame = None
+        self._pending_source_resolution_request = None
+        if clear_worker_busy:
+            self._source_resolution_worker_busy = False
 
     def _clear_active_camera_resource(self) -> None:
         self._set_playback_active(False, refresh_viewport=False)
