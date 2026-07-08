@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Protocol
 
 from heatmap_alignment_resource_actions import containing_directory, resource_path_for_kind
+from heatmap_alignment_resource_adapters import resource_adapter
 from heatmap_alignment_resource_job_state import resource_job_target_filename
 from heatmap_alignment_resource_model import ResourceAction, ResourceKind
 from heatmap_alignment_resource_summaries import (
@@ -137,22 +138,19 @@ class ResourceCoordinator:
             )
             self.resources_window.import_peak_series_button.setEnabled(True)
 
-        has_camera_path = bool(host.session.camera_track.path)
-        has_h5_path = bool(host.session.heatmap_track.path)
-        has_peak_path = bool(host._peak_series_list) or bool(
-            any(entry.path for entry in host.session.peak_series)
-        )
-        leg2_adapter = host._leg2_adapter()
-        has_leg2_path = leg2_adapter.has_path()
+        camera_adapter = resource_adapter("camera")
+        h5_adapter = resource_adapter("radar_h5")
+        peak_adapter = resource_adapter("radar_peak")
+        leg2_adapter = resource_adapter("leg2_mat")
 
-        host.unload_camera_action.setEnabled(host.camera_source is not None)
-        host.unload_h5_action.setEnabled(host.heatmap_source is not None)
-        host.unload_peak_action.setEnabled(host._has_peaks_in_memory() or has_peak_path)
-        host.unload_leg2_action.setEnabled(leg2_adapter.can_unload())
-        host.reload_camera_action.setEnabled(has_camera_path)
-        host.reload_h5_action.setEnabled(has_h5_path)
-        host.reload_peak_action.setEnabled(has_peak_path)
-        host.reload_leg2_action.setEnabled(has_leg2_path)
+        host.unload_camera_action.setEnabled(camera_adapter.can_unload(host))
+        host.unload_h5_action.setEnabled(h5_adapter.can_unload(host))
+        host.unload_peak_action.setEnabled(peak_adapter.can_unload(host))
+        host.unload_leg2_action.setEnabled(leg2_adapter.can_unload(host))
+        host.reload_camera_action.setEnabled(camera_adapter.has_path(host))
+        host.reload_h5_action.setEnabled(h5_adapter.has_path(host))
+        host.reload_peak_action.setEnabled(peak_adapter.has_path(host))
+        host.reload_leg2_action.setEnabled(leg2_adapter.has_path(host))
 
         host.export_synced_action.setEnabled(
             host.camera_source is not None
