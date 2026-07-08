@@ -400,6 +400,32 @@ def test_timeline_playhead_press_takes_priority_over_camera_bar(
     assert not widget._dragging_camera
 
 
+def test_timeline_playhead_hit_test_ignores_out_of_range_playhead(
+    qapplication: QApplication,
+) -> None:
+    range_model = TimelineRangeModel()
+    range_model.set_track_state(
+        camera_duration_s=5.0,
+        heatmap_duration_s=5.0,
+        camera_offset_s=0.0,
+    )
+    range_model.set_visible_range(0.0, 5.0)
+    widget = AlignmentTimelineWidget(range_model)
+    widget.resize(900, 124)
+    widget.show()
+    qapplication.processEvents()
+
+    widget.set_timeline_state(current_time_s=2.5)
+    visible_pos = QtCore.QPointF(widget._time_to_x(2.5), widget.height() / 2.0)
+    assert widget._playhead_in_visible_range()
+    assert widget._playhead_hit_test(visible_pos)
+
+    widget.set_timeline_state(current_time_s=8.0)
+    hidden_pos = QtCore.QPointF(widget._time_to_x(8.0), widget.height() / 2.0)
+    assert not widget._playhead_in_visible_range()
+    assert not widget._playhead_hit_test(hidden_pos)
+
+
 def test_timeline_h5_drag_shifts_camera_and_leg2_offsets_via_signal(
     qapplication: QApplication,
 ) -> None:
