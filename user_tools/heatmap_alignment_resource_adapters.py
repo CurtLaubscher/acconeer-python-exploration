@@ -36,6 +36,15 @@ class ResourceAdapter(Protocol):
     def has_path(self, host: Any) -> bool: ...
     def is_loaded(self, host: Any) -> bool: ...
     def can_unload(self, host: Any) -> bool: ...
+    def reveal_path_text(self, host: Any, *, series_id: str = "") -> str: ...
+    def invoke_action(
+        self,
+        coordinator: Any,
+        host: Any,
+        action: ResourceAction,
+        *,
+        series_id: str = "",
+    ) -> bool: ...
     def build_summaries(
         self,
         host: Any,
@@ -55,6 +64,51 @@ class _BaseResourceAdapter:
 
     def can_unload(self, host: Any) -> bool:
         return self.is_loaded(host)
+
+    def reveal_path_text(self, host: Any, *, series_id: str = "") -> str:
+        del series_id
+        return self.path_text(host)
+
+    def invoke_action(
+        self,
+        coordinator: Any,
+        host: Any,
+        action: ResourceAction,
+        *,
+        series_id: str = "",
+    ) -> bool:
+        del series_id
+        if action in ("load", "replace"):
+            self.load(host)
+            return True
+        if action == "unload":
+            self.unload(host)
+            return True
+        if action == "reload":
+            self.reload(coordinator, host)
+            return True
+        return False
+
+    def load(self, host: Any) -> None:
+        del host
+
+    def unload(self, host: Any) -> None:
+        del host
+
+    def reload(self, coordinator: Any, host: Any) -> None:
+        path_text = self.path_text(host)
+        if not path_text:
+            return
+        path = Path(path_text)
+        if not path.exists():
+            coordinator.set_reload_error(self.kind, f"File not found: {path}")
+            coordinator.refresh_resources_ui()
+            return
+        coordinator.set_reload_error(self.kind, None)
+        self.load_from_path(host, path)
+
+    def load_from_path(self, host: Any, path: Path) -> None:
+        del host, path
 
     def build_summaries(
         self,
@@ -179,6 +233,29 @@ class CameraResourceAdapter(_BaseResourceAdapter):
     def is_loaded(self, host: Any) -> bool:
         return host.camera_source is not None
 
+    def invoke_action(
+        self,
+        coordinator: Any,
+        host: Any,
+        action: ResourceAction,
+        *,
+        series_id: str = "",
+    ) -> bool:
+        if action == "cancel":
+            if host._resource_job_manager.cancel_job(self.kind):
+                host._handle_resource_job_state_changed()
+            return True
+        return super().invoke_action(coordinator, host, action, series_id=series_id)
+
+    def load(self, host: Any) -> None:
+        host._load_camera_video()
+
+    def unload(self, host: Any) -> None:
+        host.unload_camera_video()
+
+    def load_from_path(self, host: Any, path: Path) -> None:
+        host.load_camera_from_path(path)
+
     def build_summaries(
         self,
         host: Any,
@@ -252,6 +329,29 @@ class RadarH5ResourceAdapter(_BaseResourceAdapter):
 
     def is_loaded(self, host: Any) -> bool:
         return host.heatmap_source is not None
+
+    def invoke_action(
+        self,
+        coordinator: Any,
+        host: Any,
+        action: ResourceAction,
+        *,
+        series_id: str = "",
+    ) -> bool:
+        if action == "cancel":
+            if host._resource_job_manager.cancel_job(self.kind):
+                host._handle_resource_job_state_changed()
+            return True
+        return super().invoke_action(coordinator, host, action, series_id=series_id)
+
+    def load(self, host: Any) -> None:
+        host._load_h5_recording()
+
+    def unload(self, host: Any) -> None:
+        host.unload_h5_recording()
+
+    def load_from_path(self, host: Any, path: Path) -> None:
+        host.load_h5_from_path(path)
 
     def build_summaries(
         self,
@@ -357,6 +457,74 @@ class RadarPeakResourceAdapter(_BaseResourceAdapter):
     def can_unload(self, host: Any) -> bool:
         return self.is_loaded(host) or self.has_path(host)
 
+    def reveal_path_text(self, host: Any, *, series_id: str = "") -> str:
+        if series_id:
+            peak_series = host._resolve_peak_series_target(
+                series_id,
+                fallback_active=False,
+                fallback_last=False,
+            )
+            if peak_series and peak_series.json_path:
+                return str(peak_series.json_path)
+            return ""
+        return self.path_text(host)
+
+    def invoke_action(
+        self,
+        coordinator: Any,
+        host: Any,
+        action: ResourceAction,
+        *,
+        series_id: str = "",
+    ) -> bool:
+        if action == "generate":
+            host._generate_peak_series()
+            return True
+        if action == "save":
+            target = host._resolve_peak_series_target(series_id, prefer_unsaved=True)
+            if target is not None:
+                host._save_peak_series(target.series_id)
+            return True
+        if action == "save_as":
+            target = host._resolve_peak_series_target(series_id, fallback_last=True)
+            if target is not None:
+                host._save_peak_series_as(target.series_id)
+            return True
+        if action in ("load", "replace"):
+            host._import_peak_series()
+            return True
+        if action == "unload":
+            target = host._resolve_peak_series_target(series_id, fallback_last=True)
+            if target is not None:
+                host._unload_peak_series(target.series_id)
+            return True
+        if action == "reload":
+            if series_id:
+                host._reload_peak_series(series_id)
+            else:
+                self.reload(coordinator, host)
+            return True
+        return False
+
+    def reload(self, coordinator: Any, host: Any) -> None:
+        path_text = self.path_text(host)
+        if not path_text:
+            return
+        path = Path(path_text)
+        if not path.exists():
+            coordinator.set_reload_error(self.kind, f"File not found: {path}")
+            coordinator.refresh_resources_ui()
+            return
+        coordinator.set_reload_error(self.kind, None)
+        if host._any_peaks_unsaved() and not host._confirm_action_dialog(
+            title="Reload peak series",
+            question="Reload saved peak series from disk?",
+            informative="Unsaved generated peak data will be lost.",
+            accept_label="Reload",
+        ):
+            return
+        host._reload_peak_series_from_session()
+
     def build_summaries(
         self,
         host: Any,
@@ -453,6 +621,15 @@ class Leg2MatResourceAdapter(_BaseResourceAdapter):
 
     def can_unload(self, host: Any) -> bool:
         return host._leg2_adapter().can_unload()
+
+    def load(self, host: Any) -> None:
+        host._import_leg2_mat()
+
+    def unload(self, host: Any) -> None:
+        host._clear_leg2_ultrasonic_datasource()
+
+    def load_from_path(self, host: Any, path: Path) -> None:
+        host.load_leg2_mat_from_path(path, show_dialogs=True)
 
     def build_summaries(
         self,

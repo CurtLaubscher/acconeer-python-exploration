@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Protocol
 
-from heatmap_alignment_resource_actions import containing_directory, resource_path_for_kind
+from heatmap_alignment_resource_actions import containing_directory
 from heatmap_alignment_resource_adapters import resource_adapter
 from heatmap_alignment_resource_job_state import resource_job_target_filename
 from heatmap_alignment_resource_model import ResourceAction, ResourceKind
@@ -191,117 +191,19 @@ class ResourceCoordinator:
         *,
         series_id: str = "",
     ) -> None:
-        host = self._host
-        if action == "cancel":
-            if kind in ("camera", "radar_h5"):
-                if host._resource_job_manager.cancel_job(kind):
-                    host._handle_resource_job_state_changed()
-            return
-        if action == "generate":
-            if kind == "radar_peak":
-                host._generate_peak_series()
-            return
-        if action == "save":
-            if kind == "radar_peak":
-                target = host._resolve_peak_series_target(series_id, prefer_unsaved=True)
-                if target is not None:
-                    host._save_peak_series(target.series_id)
-            return
-        if action == "save_as":
-            if kind == "radar_peak":
-                target = host._resolve_peak_series_target(series_id, fallback_last=True)
-                if target is not None:
-                    host._save_peak_series_as(target.series_id)
-            return
-        if action == "load":
-            self._load_resource(kind)
-            return
-        if action == "replace":
-            self.invoke_resource_action(kind, "load", series_id=series_id)
-            return
-        if action == "unload":
-            self._unload_resource(kind, series_id=series_id)
-            return
-        if action == "reload":
-            if kind == "radar_peak" and series_id:
-                host._reload_peak_series(series_id)
-            else:
-                self.reload_resource(kind)
-            return
         if action == "reveal":
-            if kind == "radar_peak" and series_id:
-                peak_series = host._resolve_peak_series_target(
-                    series_id,
-                    fallback_active=False,
-                    fallback_last=False,
-                )
-                if peak_series and peak_series.json_path:
-                    self.reveal_path(peak_series.json_path)
-            else:
-                self.reveal_resource_path(kind)
+            self.reveal_resource_path(kind, series_id=series_id)
             return
         if action == "inspect":
             self.inspect_resource_messages(kind)
-
-    def _load_resource(self, kind: ResourceKind) -> None:
-        host = self._host
-        if kind == "camera":
-            host._load_camera_video()
-        elif kind == "radar_h5":
-            host._load_h5_recording()
-        elif kind == "radar_peak":
-            host._import_peak_series()
-        elif kind == "leg2_mat":
-            host._import_leg2_mat()
-
-    def _unload_resource(self, kind: ResourceKind, *, series_id: str = "") -> None:
-        host = self._host
-        if kind == "camera":
-            host.unload_camera_video()
-        elif kind == "radar_h5":
-            host.unload_h5_recording()
-        elif kind == "radar_peak":
-            target = host._resolve_peak_series_target(series_id, fallback_last=True)
-            if target is not None:
-                host._unload_peak_series(target.series_id)
-        elif kind == "leg2_mat":
-            host._clear_leg2_ultrasonic_datasource()
+            return
+        resource_adapter(kind).invoke_action(self, self._host, action, series_id=series_id)
 
     def resource_path_for_kind(self, kind: ResourceKind) -> str:
-        host = self._host
-        return resource_path_for_kind(
-            host.session,
-            kind,
-            peak_series=host._peak_series_list,
-            leg2_path_text=host._leg2_adapter().path_text(),
-        )
+        return resource_adapter(kind).path_text(self._host)
 
     def reload_resource(self, kind: ResourceKind) -> None:
-        host = self._host
-        path_text = self.resource_path_for_kind(kind)
-        if not path_text:
-            return
-        path = Path(path_text)
-        if not path.exists():
-            self.set_reload_error(kind, f"File not found: {path}")
-            self.refresh_resources_ui()
-            return
-        self.set_reload_error(kind, None)
-        if kind == "camera":
-            host.load_camera_from_path(path)
-        elif kind == "radar_h5":
-            host.load_h5_from_path(path)
-        elif kind == "radar_peak":
-            if host._any_peaks_unsaved() and not host._confirm_action_dialog(
-                title="Reload peak series",
-                question="Reload saved peak series from disk?",
-                informative="Unsaved generated peak data will be lost.",
-                accept_label="Reload",
-            ):
-                return
-            host._reload_peak_series_from_session()
-        elif kind == "leg2_mat":
-            host.load_leg2_mat_from_path(path, show_dialogs=True)
+        resource_adapter(kind).reload(self, self._host)
 
     def reveal_path(self, path: Path) -> None:
         target = containing_directory(path)
@@ -314,8 +216,8 @@ class ResourceCoordinator:
             return
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(target.resolve())))
 
-    def reveal_resource_path(self, kind: ResourceKind) -> None:
-        path_text = self.resource_path_for_kind(kind)
+    def reveal_resource_path(self, kind: ResourceKind, *, series_id: str = "") -> None:
+        path_text = resource_adapter(kind).reveal_path_text(self._host, series_id=series_id)
         if not path_text:
             return
         path = Path(path_text)
