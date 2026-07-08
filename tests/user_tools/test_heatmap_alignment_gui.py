@@ -1311,6 +1311,27 @@ def test_resource_loading_overlays_include_viewport_for_active_jobs(
     assert "replacement.mp4" in window.viewport_view._loading_overlay_message
 
 
+def test_h5_loading_overlay_does_not_block_viewport(
+    qapplication: QApplication,
+) -> None:
+    from heatmap_alignment_resource_job_state import begin_resource_job
+
+    window = HeatmapAlignmentWindow()
+    begin_resource_job(
+        window._resource_job_manager.board(),
+        "radar_h5",
+        target_path=Path("/tmp/trial13.h5"),
+        replaces_active=True,
+        message="Loading trial13.h5...",
+    )
+
+    window._update_resource_loading_overlays()
+
+    assert window.truth_view._loading_overlay_active is True
+    assert "trial13.h5" in window.truth_view._loading_overlay_message
+    assert window.viewport_view._loading_overlay_active is False
+
+
 def test_resource_job_manager_cancel_completes_to_idle(
     qapplication: QApplication,
 ) -> None:
@@ -3881,6 +3902,62 @@ def test_source_resolution_result_preserves_timeline_range(
     assert window.timeline_range_model.visible_range_s() == pytest.approx((2.0, 4.0))
 
 
+def test_viewport_preview_renders_without_h5_truth_frame(
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = HeatmapAlignmentWindow()
+    window.current_camera_frame = np.zeros((4, 4, 3), dtype=np.uint8)
+    window.current_camera_frame[:, :, 0] = 255
+    window.session.viewport.corners = [[0.0, 0.0], [3.0, 0.0], [3.0, 3.0], [0.0, 3.0]]
+    captured_frames: list[np.ndarray | None] = []
+
+    monkeypatch.setattr(window, "_viewport_output_size", lambda _truth_frame: (2, 2))
+    monkeypatch.setattr(
+        window,
+        "_display_viewport_corners",
+        lambda: np.asarray([[0.0, 0.0], [3.0, 0.0], [3.0, 3.0], [0.0, 3.0]], dtype=np.float32),
+    )
+    monkeypatch.setattr(window.viewport_view, "set_frame", captured_frames.append)
+
+    window._sync_viewport_preview(truth_frame=None, invalidate_source_resolution=False)
+
+    assert captured_frames
+    assert captured_frames[-1] is not None
+    assert captured_frames[-1].shape == (2, 2, 3)
+
+
+def test_viewport_resize_keeps_hq_frame_and_schedules_settled_refresh(
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = HeatmapAlignmentWindow()
+    hq_frame = np.full((2, 2, 3), 128, dtype=np.uint8)
+    window.current_camera_frame = np.zeros((4, 4, 3), dtype=np.uint8)
+    window.session.viewport.corners = [[0.0, 0.0], [3.0, 0.0], [3.0, 3.0], [0.0, 3.0]]
+    window._source_resolution_viewport_frame = hq_frame
+    window._source_resolution_request_token = 12
+    scheduled_sizes: list[tuple[int, int]] = []
+
+    monkeypatch.setattr(window, "_viewport_output_size", lambda _truth_frame: (320, 180))
+    monkeypatch.setattr(
+        window,
+        "_display_viewport_corners",
+        lambda: np.asarray([[0.0, 0.0], [3.0, 0.0], [3.0, 3.0], [0.0, 3.0]], dtype=np.float32),
+    )
+    monkeypatch.setattr(
+        window,
+        "_schedule_source_resolution_viewport_refresh",
+        lambda *, viewport_size: scheduled_sizes.append(viewport_size),
+    )
+
+    window._viewport_preview_resized()
+
+    assert window._source_resolution_request_token == 13
+    assert window._source_resolution_viewport_frame is hq_frame
+    assert scheduled_sizes == [(320, 180)]
+
+
 def test_h5_job_completion_preserves_timeline_range(
     qapplication: QApplication,
     monkeypatch: pytest.MonkeyPatch,
@@ -3961,6 +4038,111 @@ def test_display_only_refresh_preserves_timeline_range(
 
     window._on_heatmap_peak_combo_changed(0)
     assert window.timeline_range_model.visible_range_s() == pytest.approx((2.0, 4.0))
+
+
+def test_leg2_signal_changes_do_not_invalidate_viewport_quality(
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = HeatmapAlignmentWindow()
+    calls: list[str] = []
+
+    monkeypatch.setattr(window.leg2_signal_kind_combo, "currentData", lambda: "filtered")
+    monkeypatch.setattr(
+        window, "_invalidate_source_resolution_viewport", lambda: calls.append("invalidate")
+    )
+    monkeypatch.setattr(
+        window, "_load_current_camera_frame", lambda *, access_hint="auto": calls.append("camera")
+    )
+    monkeypatch.setattr(window, "_sync_heatmap_truth_preview", lambda: calls.append("truth"))
+    monkeypatch.setattr(
+        window,
+        "_sync_export_overlay_preview",
+        lambda *, frame_idx, truth_frame: calls.append("overlay"),
+    )
+    monkeypatch.setattr(
+        window,
+        "_sync_viewport_preview",
+        lambda *, truth_frame, invalidate_source_resolution: calls.append("viewport"),
+    )
+
+    window._leg2_signal_kind_changed(1)
+    window._timeline_leg2_offset_changed(1.25)
+
+    assert window.session.leg2_ultrasonic_datasource.signal_kind == "filtered"
+    assert window.session.leg2_ultrasonic_datasource.offset_s == pytest.approx(1.25)
+    assert calls == []
+
+
+def test_export_overlay_changes_do_not_invalidate_viewport_quality(
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = HeatmapAlignmentWindow()
+    calls: list[str] = []
+    truth_frame = np.zeros((2, 2, 3), dtype=np.uint8)
+
+    monkeypatch.setattr(
+        window, "_invalidate_source_resolution_viewport", lambda: calls.append("invalidate")
+    )
+    monkeypatch.setattr(
+        window, "_load_current_camera_frame", lambda *, access_hint="auto": calls.append("camera")
+    )
+    monkeypatch.setattr(window, "_sync_heatmap_truth_preview", lambda: (7, truth_frame))
+    monkeypatch.setattr(
+        window,
+        "_sync_export_overlay_preview",
+        lambda *, frame_idx, truth_frame: calls.append("overlay"),
+    )
+    monkeypatch.setattr(
+        window,
+        "_sync_viewport_preview",
+        lambda *, truth_frame, invalidate_source_resolution: calls.append("viewport"),
+    )
+    monkeypatch.setattr(window, "_initialize_default_export_overlay", lambda *, force: None)
+
+    window._set_export_overlay_visible(False)
+    window._set_export_overlay_preview_enabled(False)
+    window._set_export_overlay_drag_active(False)
+    window._reset_export_overlay()
+
+    assert calls == ["overlay", "overlay", "overlay", "overlay"]
+
+
+def test_display_setting_changes_use_targeted_preview_work(
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = HeatmapAlignmentWindow()
+    calls: list[str] = []
+    truth_frame = np.zeros((2, 2, 3), dtype=np.uint8)
+
+    monkeypatch.setattr(
+        window, "_invalidate_source_resolution_viewport", lambda: calls.append("invalidate")
+    )
+    monkeypatch.setattr(
+        window, "_load_current_camera_frame", lambda *, access_hint="auto": calls.append("camera")
+    )
+    monkeypatch.setattr(window, "_sync_heatmap_truth_preview", lambda: (7, truth_frame))
+    monkeypatch.setattr(
+        window,
+        "_sync_export_overlay_preview",
+        lambda *, frame_idx, truth_frame: calls.append("overlay"),
+    )
+    monkeypatch.setattr(
+        window,
+        "_sync_viewport_preview",
+        lambda *, truth_frame, invalidate_source_resolution: calls.append("viewport"),
+    )
+
+    window._viewport_visibility_changed()
+    window._viewport_visibility_range_changed(0.2, 0.8)
+    window._render_settings_changed()
+    window._clear_peak_series(confirm=False)
+
+    assert "invalidate" not in calls
+    assert "camera" not in calls
+    assert calls == ["viewport", "viewport", "overlay", "overlay"]
 
 
 def test_explicit_timeline_range_reset_paths(

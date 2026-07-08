@@ -82,7 +82,7 @@ from heatmap_alignment_h5_resource_job import (
 from heatmap_alignment_heatmap_header import HeatmapDistanceHeader
 from heatmap_alignment_peak_import import import_peak_distance_json_for_heatmap
 from heatmap_alignment_peak_overlay import peak_overlay_for_frame
-from heatmap_alignment_preview_sync import PreviewSyncPlan, run_preview_sync
+from heatmap_alignment_preview_sync import PreviewChange, PreviewSyncPlan, run_preview_sync
 from heatmap_alignment_recent_sessions import RecentSessionStore
 from heatmap_alignment_reconcile import H5SlotIdentity, desired_h5_identity, elide_path_middle
 from heatmap_alignment_rendering import HeatmapPlotRenderer
@@ -975,7 +975,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._heatmap_peak_selector_id = None
         self._set_resource_reload_error("radar_peak", None)
         self._set_resource_warnings("radar_peak", ())
-        self._sync_previews(camera_access_hint="auto")
+        self._sync_previews(changes=PreviewChange.SIGNALS_ONLY | PreviewChange.H5_RENDER_SETTINGS)
         self._refresh_resources_ui()
         self.statusBar().showMessage("Peak series cleared.")
 
@@ -1020,7 +1020,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._set_resource_reload_error("leg2_mat", None)
         self._set_resource_warnings("leg2_mat", ())
         self._update_leg2_datasource_controls()
-        self._sync_previews(camera_access_hint="auto")
+        self._sync_previews(changes=PreviewChange.SIGNALS_ONLY)
         self._refresh_resources_ui()
         self.statusBar().showMessage(f"Loaded Leg2 MAT: {mat_path.name}")
         return True
@@ -1044,7 +1044,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._set_resource_reload_error("leg2_mat", None)
         self._set_resource_warnings("leg2_mat", ())
         self._update_leg2_datasource_controls()
-        self._sync_previews(camera_access_hint="auto")
+        self._sync_previews(changes=PreviewChange.SIGNALS_ONLY)
         self._refresh_resources_ui()
         self.statusBar().showMessage("Cleared Leg2 MAT ultrasonic datasource.")
 
@@ -1077,7 +1077,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             return
         self._mark_session_dirty()
         self.session.leg2_ultrasonic_datasource.signal_kind = signal_kind
-        self._sync_previews(camera_access_hint="auto")
+        self._sync_previews(changes=PreviewChange.SIGNALS_ONLY)
 
     def _update_leg2_datasource_controls(self) -> None:
         self.leg2_signal_kind_combo.setEnabled(self._leg2_adapter().is_loaded())
@@ -2015,16 +2015,13 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             self.truth_view.set_loading_overlay(False)
 
         camera_active = resource_job_slot_is_active(camera_slot)
-        h5_active = resource_job_slot_is_active(h5_slot)
-        if camera_active or h5_active:
-            overlay_slot = camera_slot if camera_active else h5_slot
+        if camera_active:
             self.viewport_view.set_loading_overlay(
                 True,
-                resource_job_loading_overlay_message(overlay_slot),
+                resource_job_loading_overlay_message(camera_slot),
                 dim_content=(
                     self.viewport_view._pixmap is not None
                     or self.camera_source is not None
-                    or self.heatmap_source is not None
                 ),
             )
         else:
@@ -2098,20 +2095,14 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         )
         self.session.viewport_visibility.gamma = self.viewport_gamma_spin.value()
         self._update_viewport_visibility_controls_enabled()
-        self._sync_previews(
-            camera_access_hint="auto",
-            invalidate_source_resolution=False,
-        )
+        self._sync_previews(changes=PreviewChange.VIEWPORT_VISIBILITY)
 
     def _viewport_visibility_range_changed(self, low: float, high: float) -> None:
         self._mark_session_dirty()
         self.session.viewport_visibility.low = low
         self.session.viewport_visibility.high = high
         self._update_viewport_visibility_labels()
-        self._sync_previews(
-            camera_access_hint="auto",
-            invalidate_source_resolution=False,
-        )
+        self._sync_previews(changes=PreviewChange.VIEWPORT_VISIBILITY)
 
     def _update_viewport_visibility_labels(self) -> None:
         self.viewport_low_label.setText(f"Low {self.session.viewport_visibility.low:.2f}")
@@ -2181,7 +2172,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
     def _timeline_leg2_offset_changed(self, offset_s: float) -> None:
         self._mark_session_dirty()
         self.session.leg2_ultrasonic_datasource.offset_s = offset_s
-        self._sync_previews(camera_access_hint="auto")
+        self._sync_previews(changes=PreviewChange.SIGNALS_ONLY)
 
     def _timeline_h5_alignment_drag_changed(
         self,
@@ -2270,7 +2261,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
                 fixed_levels=True,
             )
             self._rebuild_overlay_plot_renderer()
-        self._sync_previews(camera_access_hint="auto")
+        self._sync_previews(changes=PreviewChange.H5_RENDER_SETTINGS)
 
     def _corners_changed(self, corners: list) -> None:
         self._mark_session_dirty()
@@ -2294,24 +2285,24 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._mark_session_dirty()
         self.session.export_overlay.visible = visible
         self.camera_view.set_export_overlay(self.session.export_overlay)
-        self._sync_previews(camera_access_hint="auto")
+        self._sync_previews(changes=PreviewChange.EXPORT_OVERLAY)
 
     def _set_export_overlay_preview_enabled(self, enabled: bool) -> None:
         self._mark_session_dirty()
         self.session.export_overlay.preview_enabled = enabled
         self.camera_view.set_export_overlay(self.session.export_overlay)
-        self._sync_previews(camera_access_hint="auto")
+        self._sync_previews(changes=PreviewChange.EXPORT_OVERLAY)
 
     def _set_export_overlay_drag_active(self, active: bool) -> None:
         self._freeze_export_overlay_preview = active
         if not active:
-            self._sync_previews(camera_access_hint="auto")
+            self._sync_previews(changes=PreviewChange.EXPORT_OVERLAY)
 
     def _reset_export_overlay(self) -> None:
         self._mark_session_dirty()
         self._initialize_default_export_overlay(force=True)
         self.camera_view.set_export_overlay(self.session.export_overlay)
-        self._sync_previews(camera_access_hint="auto")
+        self._sync_previews(changes=PreviewChange.EXPORT_OVERLAY)
 
     def _load_current_camera_frame(self, *, access_hint: str = "auto") -> None:
         if self.camera_source is None:
@@ -2333,6 +2324,11 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
     def _invalidate_source_resolution_viewport(self) -> None:
         self._source_resolution_request_token += 1
         self._source_resolution_viewport_frame = None
+        self._pending_source_resolution_request = None
+        self.viewport_source_resolution_timer.stop()
+
+    def _retarget_source_resolution_viewport(self) -> None:
+        self._source_resolution_request_token += 1
         self._pending_source_resolution_request = None
         self.viewport_source_resolution_timer.stop()
 
@@ -2783,14 +2779,24 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         timeline_visible_range_s: tuple[float, float] | None = None,
         recompute_timeline_range: bool = False,
         refresh_signal_data: bool = True,
+        changes: PreviewChange | None = None,
     ) -> None:
-        plan = PreviewSyncPlan(
-            camera_access_hint=camera_access_hint,
-            invalidate_source_resolution=invalidate_source_resolution,
-            timeline_visible_range_s=timeline_visible_range_s,
-            recompute_timeline_range=recompute_timeline_range,
-            refresh_signal_data=refresh_signal_data,
-        )
+        if changes is None:
+            plan = PreviewSyncPlan(
+                camera_access_hint=camera_access_hint,
+                invalidate_source_resolution=invalidate_source_resolution,
+                timeline_visible_range_s=timeline_visible_range_s,
+                recompute_timeline_range=recompute_timeline_range,
+                refresh_signal_data=refresh_signal_data,
+            )
+        else:
+            plan = PreviewSyncPlan.from_changes(
+                changes,
+                camera_access_hint=camera_access_hint,
+                timeline_visible_range_s=timeline_visible_range_s,
+                recompute_timeline_range=recompute_timeline_range,
+                refresh_signal_data=refresh_signal_data,
+            )
         run_preview_sync(plan, self)
 
     def _sync_previews_preserving_timeline_range(
@@ -2895,11 +2901,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
     ) -> None:
         viewport_frame = None
         low_resolution_viewport_frame = None
-        if (
-            self.current_camera_frame is not None
-            and truth_frame is not None
-            and self.session.viewport.corners
-        ):
+        if self.current_camera_frame is not None and self.session.viewport.corners:
             viewport_size = self._viewport_output_size(truth_frame)
             display_corners = self._display_viewport_corners()
             try:
@@ -2987,11 +2989,14 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
     def _viewport_preview_resized(self) -> None:
         if (
             self.current_camera_frame is None
-            or self.heatmap_source is None
             or not self.session.viewport.corners
         ):
             return
-        self._sync_previews(camera_access_hint="auto")
+        self._retarget_source_resolution_viewport()
+        self._sync_previews(changes=PreviewChange.LAYOUT)
+        self._schedule_source_resolution_viewport_refresh(
+            viewport_size=self._viewport_output_size(None)
+        )
 
     def _viewport_drag_finished(self) -> None:
         if self._viewport_drag_start_corners is not None:
