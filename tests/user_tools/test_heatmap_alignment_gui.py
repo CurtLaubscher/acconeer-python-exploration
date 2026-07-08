@@ -3043,6 +3043,68 @@ def test_cancel_on_quit_leaves_session_dirty(
     assert window._session_lifecycle.dirty is True
 
 
+def test_cancel_on_quit_does_not_shutdown_jobs_or_source_resolution(
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = HeatmapAlignmentWindow()
+    window._mark_session_dirty()
+    calls: list[str] = []
+
+    monkeypatch.setattr(window, "_prompt_save_discard_cancel", lambda action: "cancel")
+    monkeypatch.setattr(
+        window.viewport_source_resolution_timer,
+        "stop",
+        lambda: calls.append("timer"),
+    )
+    monkeypatch.setattr(
+        window._source_resolution_thread,
+        "quit",
+        lambda: calls.append("thread-quit"),
+    )
+    monkeypatch.setattr(
+        window._source_resolution_thread,
+        "wait",
+        lambda: calls.append("thread-wait"),
+    )
+    monkeypatch.setattr(window, "_close_sources", lambda: calls.append("close-sources"))
+
+    event = QtGui.QCloseEvent()
+    window.closeEvent(event)
+
+    assert event.isAccepted() is False
+    assert calls == []
+
+
+def test_accepted_quit_abandons_active_resource_jobs(
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from heatmap_alignment_resource_job_state import begin_resource_job
+
+    window = HeatmapAlignmentWindow()
+    begin_resource_job(
+        window._resource_job_manager.board(),
+        "radar_h5",
+        target_path=Path("/tmp/trial.h5"),
+        replaces_active=False,
+    )
+    monkeypatch.setattr(
+        window.viewport_source_resolution_timer,
+        "stop",
+        lambda: None,
+    )
+    monkeypatch.setattr(window._source_resolution_thread, "quit", lambda: None)
+    monkeypatch.setattr(window._source_resolution_thread, "wait", lambda: None)
+
+    event = QtGui.QCloseEvent()
+    window.closeEvent(event)
+
+    assert event.isAccepted() is True
+    assert window._resource_job_manager._abandoned is True
+    assert window._resource_job_manager.board().radar_h5.phase == "idle"
+
+
 def test_dont_save_then_open_proceeds(
     tmp_path: Path,
     qapplication: QApplication,
