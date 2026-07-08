@@ -16,6 +16,22 @@ USER_TOOLS_PATH = REPO_ROOT / "user_tools"
 if str(USER_TOOLS_PATH) not in sys.path:
     sys.path.insert(0, str(USER_TOOLS_PATH))
 
+from heatmap_alignment_core_models import (  # noqa: E402
+    AlignmentSession,
+    CameraTrack,
+    ExportOverlaySettings,
+    HeatmapTrack,
+    Leg2StanceIntervals,
+    Leg2UltrasonicDatasourceSettings,
+    Leg2UltrasonicSignalSeries,
+    PeakDistanceSignalSeries,
+    PeakSeriesSessionEntry,
+    SignalPlotViewSettings,
+    TimelineH5DragSnapshot,
+    save_alignment_session,
+    session_equivalent_for_pristine,
+    validate_alignment_session,
+)
 from heatmap_alignment_gui import (  # noqa: E402
     RESOURCE_ACTION_LABELS,
     AlignmentTimelineWidget,
@@ -27,43 +43,27 @@ from heatmap_alignment_gui import (  # noqa: E402
     ResourcesWindow,
     SignalPlotWidget,
     TimelineRangeModel,
-    _H5ResourceBackup,
     _CameraResourceBackup,
+    _H5ResourceBackup,
     build_argument_parser,
     format_track_offset_label,
     track_offset_label_rect,
     track_offset_label_should_show,
 )
-from heatmap_alignment_core import (  # noqa: E402
-    TimelineH5DragSnapshot,
-    AlignmentSession,
-    CameraTrack,
-    ExportOverlaySettings,
-    HeatmapPlotRenderer,
-    HeatmapTrack,
-    Leg2StanceIntervals,
-    Leg2UltrasonicDatasourceSettings,
-    Leg2UltrasonicSignalSeries,
-    PeakDistanceSignalSeries,
-    PeakSeriesSessionEntry,
-    SignalPlotViewSettings,
-    save_alignment_session,
-    session_equivalent_for_pristine,
-    validate_alignment_session,
-)
+from heatmap_alignment_rendering import HeatmapPlotRenderer  # noqa: E402
 from heatmap_alignment_resource_summaries import (  # noqa: E402
     AlignmentResourceRuntime,
     ResourceJobPresentation,
     build_alignment_resource_summaries,
 )
+from heatmap_alignment_session_coordinator import LoadSessionPlan  # noqa: E402
+from scipy.io import savemat
+from sparse_iq_heatmap_common import HeatmapAxes  # noqa: E402
 from sparse_iq_peak_distance_core import (  # noqa: E402
     STATUS_DETECTED,
     FramePeakMeasurement,
     PeakDistanceMetadata,
 )
-from sparse_iq_heatmap_common import HeatmapAxes  # noqa: E402
-from heatmap_alignment_session_coordinator import LoadSessionPlan  # noqa: E402
-from scipy.io import savemat
 
 
 class _FakeSettings:
@@ -1148,7 +1148,7 @@ def test_export_disabled_while_resource_jobs_block(qapplication: QApplication) -
     window._refresh_resources_ui()
     assert window.export_synced_action.isEnabled() is True
 
-    from heatmap_alignment_resource_jobs import begin_resource_job
+    from heatmap_alignment_resource_job_state import begin_resource_job
 
     begin_resource_job(
         window._resource_job_manager.board(),
@@ -1294,7 +1294,7 @@ def test_image_preview_loading_overlay_suppresses_placeholder_title(
 def test_resource_loading_overlays_include_viewport_for_active_jobs(
     qapplication: QApplication,
 ) -> None:
-    from heatmap_alignment_resource_jobs import begin_resource_job
+    from heatmap_alignment_resource_job_state import begin_resource_job
 
     window = HeatmapAlignmentWindow()
     begin_resource_job(
@@ -1315,7 +1315,7 @@ def test_resource_job_manager_cancel_completes_to_idle(
     qapplication: QApplication,
 ) -> None:
     from heatmap_alignment_gui import ResourceJobManager
-    from heatmap_alignment_resource_jobs import begin_resource_job
+    from heatmap_alignment_resource_job_state import begin_resource_job
 
     manager = ResourceJobManager()
     begin_resource_job(
@@ -1334,7 +1334,8 @@ def test_resource_job_manager_cancel_before_success_discards_payload(
     qapplication: QApplication,
 ) -> None:
     from heatmap_alignment_gui import ResourceJobManager
-    from heatmap_alignment_resource_jobs import LoadedH5ResourcePayload, begin_resource_job
+    from heatmap_alignment_h5_resource_job import LoadedH5ResourcePayload
+    from heatmap_alignment_resource_job_state import begin_resource_job
 
     manager = ResourceJobManager()
     generation = begin_resource_job(
@@ -1372,7 +1373,7 @@ def test_resource_job_manager_progress_updates_job_board(
     qapplication: QApplication,
 ) -> None:
     from heatmap_alignment_gui import ResourceJobManager
-    from heatmap_alignment_resource_jobs import begin_resource_job
+    from heatmap_alignment_resource_job_state import begin_resource_job
 
     manager = ResourceJobManager()
     generation = begin_resource_job(
@@ -1397,7 +1398,7 @@ def test_resource_job_manager_progress_signal_updates_job_board(
     qapplication: QApplication,
 ) -> None:
     from heatmap_alignment_gui import ResourceJobManager
-    from heatmap_alignment_resource_jobs import begin_resource_job
+    from heatmap_alignment_resource_job_state import begin_resource_job
 
     manager = ResourceJobManager()
     generation = begin_resource_job(
@@ -1423,7 +1424,7 @@ def test_resource_job_manager_ignores_late_progress_after_cancel(
     qapplication: QApplication,
 ) -> None:
     from heatmap_alignment_gui import ResourceJobManager
-    from heatmap_alignment_resource_jobs import begin_resource_job
+    from heatmap_alignment_resource_job_state import begin_resource_job
 
     manager = ResourceJobManager()
     generation = begin_resource_job(
@@ -1449,7 +1450,7 @@ def test_resource_job_manager_ignores_late_progress_after_abandon(
     qapplication: QApplication,
 ) -> None:
     from heatmap_alignment_gui import ResourceJobManager
-    from heatmap_alignment_resource_jobs import begin_resource_job
+    from heatmap_alignment_resource_job_state import begin_resource_job
 
     manager = ResourceJobManager()
     generation = begin_resource_job(
@@ -1475,7 +1476,7 @@ def test_resource_job_manager_abandon_rejects_late_dispatch(
     qapplication: QApplication,
 ) -> None:
     from heatmap_alignment_gui import ResourceJobManager
-    from heatmap_alignment_resource_jobs import LoadedH5ResourcePayload
+    from heatmap_alignment_h5_resource_job import LoadedH5ResourcePayload
 
     manager = ResourceJobManager()
 
@@ -1533,7 +1534,7 @@ def test_resource_job_runnable_skips_dispatch_when_abandoned(
     qapplication: QApplication,
 ) -> None:
     from heatmap_alignment_gui import ResourceJobManager, _ResourceJobRunnable
-    from heatmap_alignment_resource_jobs import LoadedH5ResourcePayload
+    from heatmap_alignment_h5_resource_job import LoadedH5ResourcePayload
 
     manager = ResourceJobManager()
 
@@ -1585,7 +1586,7 @@ def test_resource_job_manager_abandon_releases_pending_h5_payload(
     qapplication: QApplication,
 ) -> None:
     from heatmap_alignment_gui import ResourceJobManager
-    from heatmap_alignment_resource_jobs import LoadedH5ResourcePayload
+    from heatmap_alignment_h5_resource_job import LoadedH5ResourcePayload
 
     manager = ResourceJobManager()
 
@@ -1616,7 +1617,8 @@ def test_resource_job_manager_stale_success_releases_h5_payload(
     qapplication: QApplication,
 ) -> None:
     from heatmap_alignment_gui import ResourceJobManager
-    from heatmap_alignment_resource_jobs import LoadedH5ResourcePayload, begin_resource_job
+    from heatmap_alignment_h5_resource_job import LoadedH5ResourcePayload
+    from heatmap_alignment_resource_job_state import begin_resource_job
 
     manager = ResourceJobManager()
     old_generation = begin_resource_job(
@@ -1658,7 +1660,7 @@ def test_apply_h5_job_result_preserves_peak_series_for_different_replacement(
     qapplication: QApplication,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from heatmap_alignment_resource_jobs import LoadedH5ResourcePayload
+    from heatmap_alignment_h5_resource_job import LoadedH5ResourcePayload
     from heatmap_peak_distance_resource import PeakSeriesResource
 
     window = HeatmapAlignmentWindow()
@@ -1769,8 +1771,8 @@ def test_apply_camera_job_result_resets_incompatible_viewport(
     qapplication: QApplication,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from heatmap_alignment_core import ProxyVideoResult, VideoProbe
-    from heatmap_alignment_resource_jobs import CameraResourceJobResult
+    from heatmap_alignment_camera_resource_job import CameraResourceJobResult
+    from heatmap_alignment_video_proxy import ProxyVideoResult, VideoProbe
 
     window = HeatmapAlignmentWindow()
     incompatible_corners = [[100.0, 50.0], [900.0, 50.0], [900.0, 550.0], [100.0, 550.0]]
@@ -1842,8 +1844,8 @@ def test_apply_camera_job_result_preserves_timeline_state(
     qapplication: QApplication,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from heatmap_alignment_core import ProxyVideoResult, VideoProbe
-    from heatmap_alignment_resource_jobs import CameraResourceJobResult
+    from heatmap_alignment_camera_resource_job import CameraResourceJobResult
+    from heatmap_alignment_video_proxy import ProxyVideoResult, VideoProbe
 
     window = HeatmapAlignmentWindow()
     window.session.timeline.current_time_s = 12.345
@@ -1928,7 +1930,7 @@ def test_reconcile_camera_keep_does_not_abandon_inflight_job(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Task 4.1: same camera identity → keep; in-flight job is not abandoned."""
-    from heatmap_alignment_resource_jobs import begin_resource_job
+    from heatmap_alignment_resource_job_state import begin_resource_job
 
     camera_file = tmp_path / "video.mp4"
     camera_file.write_bytes(b"")
@@ -2007,8 +2009,8 @@ def test_reconcile_h5_keep_does_not_abandon_inflight_job(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Task 4.1: same H5 identity → keep; in-flight job is not abandoned."""
-    from heatmap_alignment_core import H5SlotIdentity
-    from heatmap_alignment_resource_jobs import begin_resource_job
+    from heatmap_alignment_reconcile import H5SlotIdentity
+    from heatmap_alignment_resource_job_state import begin_resource_job
 
     h5_file = tmp_path / "record.h5"
     h5_file.write_bytes(b"")
@@ -2085,7 +2087,7 @@ def test_load_h5_replacement_clears_old_source_before_job_finishes(
     qapplication: QApplication,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from heatmap_alignment_resource_jobs import begin_resource_job
+    from heatmap_alignment_resource_job_state import begin_resource_job
 
     old_h5 = tmp_path / "old.h5"
     new_h5 = tmp_path / "new.h5"
@@ -2144,7 +2146,7 @@ def test_generate_peak_series_unavailable_while_h5_replacement_pending(
     qapplication: QApplication,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from heatmap_alignment_resource_jobs import begin_resource_job
+    from heatmap_alignment_resource_job_state import begin_resource_job
 
     old_h5 = tmp_path / "old.h5"
     new_h5 = tmp_path / "new.h5"
@@ -2191,7 +2193,7 @@ def test_session_open_changed_h5_clears_old_source_before_new_load(
     qapplication: QApplication,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from heatmap_alignment_resource_jobs import begin_resource_job
+    from heatmap_alignment_resource_job_state import begin_resource_job
 
     old_h5 = tmp_path / "old.h5"
     new_h5 = tmp_path / "new.h5"
@@ -2240,7 +2242,7 @@ def test_failed_h5_replacement_does_not_restore_old_source(
     qapplication: QApplication,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from heatmap_alignment_resource_jobs import begin_resource_job, complete_resource_job
+    from heatmap_alignment_resource_job_state import begin_resource_job, complete_resource_job
 
     old_h5 = tmp_path / "old.h5"
     new_h5 = tmp_path / "new.h5"
@@ -2298,7 +2300,7 @@ def test_load_camera_replacement_clears_old_preview_before_job_finishes(
     qapplication: QApplication,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from heatmap_alignment_resource_jobs import begin_resource_job
+    from heatmap_alignment_resource_job_state import begin_resource_job
 
     old_camera = tmp_path / "old.mp4"
     new_camera = tmp_path / "new.mp4"
@@ -2705,8 +2707,8 @@ def test_reconcile_deferred_peak_reload_fires_after_h5_replacement(
     _apply_h5_job_result must honour the deferred flag and call
     _reload_peak_series_from_session even for the replacement (different-path) branch.
     """
-    from heatmap_alignment_resource_jobs import LoadedH5ResourcePayload
-    from heatmap_alignment_core import PeakSeriesSessionEntry
+    from heatmap_alignment_core_models import PeakSeriesSessionEntry
+    from heatmap_alignment_h5_resource_job import LoadedH5ResourcePayload
 
     old_h5 = tmp_path / "old.h5"
     new_h5 = tmp_path / "new.h5"
@@ -2804,7 +2806,7 @@ def test_reconcile_deferred_peak_reload_cleared_on_h5_cancel(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Deferred peak reload flag is cleared when an H5 replacement job is cancelled/rolled back."""
-    from heatmap_alignment_core import PeakSeriesSessionEntry
+    from heatmap_alignment_core_models import PeakSeriesSessionEntry
 
     new_h5 = tmp_path / "new.h5"
     new_h5.write_bytes(b"")
@@ -3119,8 +3121,8 @@ def test_no_dirty_after_camera_job_completion_on_session_open(
     qapplication: QApplication,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from heatmap_alignment_resource_jobs import CameraResourceJobResult, ProxyVideoResult
-    from heatmap_alignment_core import VideoProbe
+    from heatmap_alignment_camera_resource_job import CameraResourceJobResult
+    from heatmap_alignment_video_proxy import ProxyVideoResult, VideoProbe
 
     camera_file = tmp_path / "video.mp4"
     camera_file.write_bytes(b"")
@@ -3533,15 +3535,16 @@ def test_save_peak_series_writes_json_and_clears_unsaved(
     tmp_path: Path,
 ) -> None:
     """_write_peak_series_to_path writes canonical JSON and marks the series as saved."""
+    import json as _json
+
     from heatmap_peak_distance_resource import PeakSeriesResource
     from sparse_iq_peak_distance_core import (
+        PEAK_DISTANCE_FORMAT,
+        PEAK_EXTRACTION_METHOD_SUM_VELOCITY,
+        STATUS_DETECTED,
         FramePeakMeasurement,
         PeakDistanceMetadata,
-        STATUS_DETECTED,
-        PEAK_EXTRACTION_METHOD_SUM_VELOCITY,
-        PEAK_DISTANCE_FORMAT,
     )
-    import json as _json
 
     metadata = PeakDistanceMetadata(
         source_path="x.h5",
@@ -3617,7 +3620,7 @@ def test_peak_series_preserve_after_h5_replacement(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Task 3.7: replacing H5 with a different file preserves peak series."""
-    from heatmap_alignment_resource_jobs import LoadedH5ResourcePayload
+    from heatmap_alignment_h5_resource_job import LoadedH5ResourcePayload
     from heatmap_peak_distance_resource import PeakSeriesResource
 
     window = HeatmapAlignmentWindow()
@@ -4004,9 +4007,9 @@ def test_generate_appends_without_replacing_existing_series(
     """Req 1: a second Generate appends a new series, existing series unchanged."""
     from heatmap_peak_distance_resource import PeakSeriesResource
     from sparse_iq_peak_distance_core import (
-        FramePeakMeasurement,
-        STATUS_DETECTED,
         PEAK_EXTRACTION_METHOD_SUM_VELOCITY,
+        STATUS_DETECTED,
+        FramePeakMeasurement,
         PeakDistanceExportResult,
         PeakDistanceMetadata,
     )
@@ -4311,7 +4314,7 @@ def test_resolve_peak_series_target_can_require_explicit_id(qapplication: QAppli
 def test_refresh_signal_plot_passes_all_visible_series(qapplication: QApplication) -> None:
     """Req 3: visible peak series all go to set_plotted_signals; invisible are excluded."""
     from heatmap_peak_distance_resource import PeakSeriesResource
-    from sparse_iq_peak_distance_core import FramePeakMeasurement, STATUS_DETECTED
+    from sparse_iq_peak_distance_core import STATUS_DETECTED, FramePeakMeasurement
 
     meas = (FramePeakMeasurement(0, 0, 0.0, None, STATUS_DETECTED, 1.2, 1.2, 700.0),)
     window = HeatmapAlignmentWindow()
@@ -4603,11 +4606,11 @@ def test_import_peak_series_from_path_appends(
     """Req 5/6: _import_peak_series_from_path appends without replacing existing series."""
     from heatmap_peak_distance_resource import PeakSeriesResource
     from sparse_iq_peak_distance_core import (
+        PEAK_EXTRACTION_METHOD_SUM_VELOCITY,
+        STATUS_DETECTED,
+        FramePeakMeasurement,
         PeakDistanceExportResult,
         PeakDistanceMetadata,
-        FramePeakMeasurement,
-        STATUS_DETECTED,
-        PEAK_EXTRACTION_METHOD_SUM_VELOCITY,
         write_peak_distance_json,
     )
 
@@ -5382,8 +5385,8 @@ def test_truth_view_rendered_image_rect_narrow_width(
 
 def _make_minimal_plot_renderer() -> HeatmapPlotRenderer:
     """Return a HeatmapPlotRenderer with a live matplotlib axes, bypassing H5 loading."""
-    from matplotlib.figure import Figure
     from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from matplotlib.figure import Figure
 
     renderer = object.__new__(HeatmapPlotRenderer)
     # Minimal attributes expected by _rebuild_canvas / _draw_peak_marker

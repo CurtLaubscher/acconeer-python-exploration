@@ -9,7 +9,7 @@ USER_TOOLS_PATH = REPO_ROOT / "user_tools"
 if str(USER_TOOLS_PATH) not in sys.path:
     sys.path.insert(0, str(USER_TOOLS_PATH))
 
-from heatmap_alignment_core import AlignmentSession, CameraTrack, HeatmapTrack  # noqa: E402
+from heatmap_alignment_core_models import AlignmentSession, CameraTrack, HeatmapTrack  # noqa: E402
 from heatmap_alignment_resource_summaries import (  # noqa: E402
     AlignmentResourceRuntime,
     ResourceJobPresentation,

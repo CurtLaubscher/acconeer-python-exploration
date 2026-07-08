@@ -28,13 +28,13 @@ focused owner modules, then delete pure re-export modules where practical.
 
 ## Phases
 
-### Phase 0 - Plan Artifact - In Progress
+### Phase 0 - Plan Artifact - Completed
 
 - Add this plan.
 - Review the plan artifact.
 - Commit before moving code.
 
-### Phase 1 - Resource Model and Summaries
+### Phase 1 - Resource Model and Summaries - Completed
 
 - Add `heatmap_alignment_resource_model.py` with resource kinds, actions,
   statuses, and fixed resource descriptors.
@@ -42,7 +42,7 @@ focused owner modules, then delete pure re-export modules where practical.
   builders.
 - Preserve existing `ResourceSummary` output.
 
-### Phase 2 - Resource Coordinator
+### Phase 2 - Resource Coordinator - Completed
 
 - Add a small `ResourceCoordinator` and host protocol.
 - Move Resources window lifecycle, reload errors/warnings, summaries, menu/action
@@ -51,33 +51,47 @@ focused owner modules, then delete pure re-export modules where practical.
 - Keep actual load, unload, save, generate, and reload mutation methods on the
   window.
 
-### Phase 3 - Resource Job Split
+### Phase 3 - Resource Job Split - Completed
 
 - Split resource job state and board transitions from camera and H5 job
   execution.
 - Preserve cancellation, superseded-job, replacement, proxy, and H5 handoff
   behavior.
 
-### Phase 4 - Dialog Split
+### Phase 4 - Dialog Split - Completed
 
 - Split Resources window/delegates, Generate Peak Series dialog, and Heatmap
   distance header out of `heatmap_alignment_dialogs.py`.
 - Preserve labels, layout, signals, and test seams.
 
-### Phase 5 - GUI Ownership Cleanup
+### Phase 5 - GUI Ownership Cleanup - Completed
 
 - Move remaining resource-specific helper methods out of `HeatmapAlignmentWindow`
   where ownership is now clear.
 - Keep playback, timeline, and preview methods on the window unless resource
   extraction creates an obvious owner.
 
-### Phase 6 - Facade and Import Cleanup
+### Phase 6 - Facade and Import Cleanup - Completed
 
 - Migrate repo code and tests to focused modules.
 - Delete pure compatibility facade modules where practical.
 - Remove compatibility aliases from `heatmap_alignment_gui.py` unless a real
   monkeypatch seam should remain.
 - Update this plan with completed phases and deferred follow-ups.
+
+## Completed Cleanup
+
+- Deleted the pure compatibility facades `heatmap_alignment_timeline_widgets.py`,
+  `heatmap_alignment_resource_jobs.py`, and `heatmap_alignment_dialogs.py`.
+- Migrated runtime code away from `heatmap_alignment_core.py` to the focused
+  owner modules.
+- Migrated resource-job and non-core test imports to focused owner modules.
+
+## Deferred Follow-ups
+
+- `heatmap_alignment_core.py` remains intentionally because it is not a pure
+  facade: it preserves compatibility wrapper behavior for peak-distance import
+  monkeypatch seams still covered by `test_heatmap_alignment_core.py`.
 
 ## Phase Gate
 
@@ -90,4 +104,3 @@ For every phase:
 - Fix required or major review findings before proceeding.
 - Add tests when moved behavior lacks meaningful coverage.
 - Commit the phase separately.
-

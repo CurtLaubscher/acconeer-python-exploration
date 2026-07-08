@@ -18,10 +18,7 @@ from heatmap_alignment_camera_resource_job import (  # noqa: E402
     replacement_viewport_needs_default_reset,
     resolve_replacement_viewport_corners,
 )
-from heatmap_alignment_core import (  # noqa: E402
-    HeatmapTrack,
-    HeatmapTruthSource,
-)
+from heatmap_alignment_core_models import HeatmapTrack  # noqa: E402
 from heatmap_alignment_h5_resource_job import (  # noqa: E402
     LoadedH5ResourcePayload,
     build_h5_truth_source_from_payload,
@@ -35,6 +32,7 @@ from heatmap_alignment_resource_job_state import (  # noqa: E402
     resource_job_blocks_export,
     should_apply_job_result,
 )
+from heatmap_alignment_sources import HeatmapTruthSource  # noqa: E402
 from heatmap_alignment_video_proxy import (  # noqa: E402
     VideoProbe,
     prepare_proxy_video,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+
 """UI-neutral session flow plans and outcomes for the alignment workbench.
 
 Orchestration boundary (refactor track):
@@ -14,8 +15,8 @@ returning objects from this module. Do not import PySide6 or GUI modules here.
 from dataclasses import dataclass
 from pathlib import Path
 
-from heatmap_alignment_core import (
-    AlignmentSession,
+from heatmap_alignment_core_models import AlignmentSession
+from heatmap_alignment_reconcile import (
     H5SlotIdentity,
     ReconcileAction,
     desired_camera_identity,
@@ -27,6 +28,7 @@ from heatmap_alignment_core import (
     reconcile_sync_slot_action,
 )
 from heatmap_alignment_session_lifecycle import ClosedSessionReset
+
 
 __all__ = [
     "ClosedSessionReset",

@@ -16,7 +16,7 @@ USER_TOOLS_PATH = REPO_ROOT / "user_tools"
 if str(USER_TOOLS_PATH) not in sys.path:
     sys.path.insert(0, str(USER_TOOLS_PATH))
 
-from heatmap_alignment_core import AlignmentSession  # noqa: E402
+from heatmap_alignment_core_models import AlignmentSession  # noqa: E402
 from heatmap_alignment_resource_summaries import (  # noqa: E402
     AlignmentResourceRuntime,
     build_alignment_resource_summaries,
@@ -693,8 +693,8 @@ class TestPeakSeriesHelpers:
     def test_assign_color_wraps_around_palette(self):
         """When all palette colors are used, assignment wraps back to first."""
         from heatmap_peak_distance_resource import (
-            PeakSeriesResource,
             PEAK_SERIES_PALETTE,
+            PeakSeriesResource,
             assign_peak_series_color,
         )
 
@@ -734,8 +734,8 @@ class TestPeakSeriesHelpers:
 def test_peak_series_resource_color_assignment_is_stable():
     """assign_peak_series_color returns palette colors deterministically."""
     from heatmap_peak_distance_resource import (
-        PeakSeriesResource,
         PEAK_SERIES_PALETTE,
+        PeakSeriesResource,
         assign_peak_series_color,
     )
 

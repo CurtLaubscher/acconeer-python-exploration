@@ -7,12 +7,12 @@ display.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from collections.abc import Sequence
 from uuid import uuid4
 
-from heatmap_alignment_core import PeakSeriesSessionEntry
+from heatmap_alignment_core_models import PeakSeriesSessionEntry
 from sparse_iq_peak_distance_core import (
     DEFAULT_DIST_NORM_REFERENCE_DISTANCE_M,
     DEFAULT_DIST_NORM_THRESHOLD_MAX,
@@ -21,15 +21,16 @@ from sparse_iq_peak_distance_core import (
     PEAK_ALGORITHM_REGISTRY,
     PEAK_EXTRACTION_METHOD_DISTANCE_NORMALIZED,
     PEAK_EXTRACTION_METHOD_SUM_VELOCITY,
-    PEAK_SELECTION_METHOD_STRONGEST_PEAK,
     PEAK_SELECTION_METHOD_REGISTRY,
+    PEAK_SELECTION_METHOD_STRONGEST_PEAK,
     STATUS_DETECTED,
+    DetectionExportResult,
     FrameDetectionMeasurement,
     LoadedPeakDistanceDatasource,
-    DetectionExportResult,
     analyze_heatmap_record,
     write_peak_distance_json,
 )
+
 
 PeakDistanceResourceState = DetectionExportResult | LoadedPeakDistanceDatasource
 

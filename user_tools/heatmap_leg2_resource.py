@@ -1,13 +1,13 @@
 from __future__ import annotations
 
+
 """Qt-free helper for the fixed Leg2 MAT resource slot."""
 
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
-
-from heatmap_alignment_core import (
+from heatmap_alignment_core_models import (
     Leg2UltrasonicDatasourceSettings,
     LoadedLeg2UltrasonicDatasource,
 )

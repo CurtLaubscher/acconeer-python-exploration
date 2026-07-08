@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+
 """Viewport and corner-editor widgets for the heatmap alignment workbench."""
 
 import math
 
 import numpy as np
-from heatmap_alignment_core import ExportOverlaySettings
+from heatmap_alignment_core_models import ExportOverlaySettings
 from heatmap_alignment_widgets import ImagePreview, rgb_to_qpixmap
 
 from PySide6 import QtCore, QtGui, QtWidgets

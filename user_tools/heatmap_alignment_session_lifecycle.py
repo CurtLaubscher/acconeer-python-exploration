@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+
 """Session lifecycle state helpers for the heatmap alignment workbench."""
 
 from contextlib import contextmanager
@@ -7,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator, Literal
 
-from heatmap_alignment_core import (
+from heatmap_alignment_core_models import (
     AlignmentSession,
     PeakSeriesSessionEntry,
     load_alignment_session,
