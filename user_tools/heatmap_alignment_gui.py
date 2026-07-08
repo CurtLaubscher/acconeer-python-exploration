@@ -82,7 +82,7 @@ from heatmap_alignment_h5_resource_job import (
 from heatmap_alignment_heatmap_header import HeatmapDistanceHeader
 from heatmap_alignment_peak_import import import_peak_distance_json_for_heatmap
 from heatmap_alignment_peak_overlay import peak_overlay_for_frame
-from heatmap_alignment_preview_sync import PreviewSyncPlan, run_preview_sync
+from heatmap_alignment_preview_sync import PreviewChange, PreviewSyncPlan, run_preview_sync
 from heatmap_alignment_recent_sessions import RecentSessionStore
 from heatmap_alignment_reconcile import H5SlotIdentity, desired_h5_identity, elide_path_middle
 from heatmap_alignment_rendering import HeatmapPlotRenderer
@@ -1020,7 +1020,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._set_resource_reload_error("leg2_mat", None)
         self._set_resource_warnings("leg2_mat", ())
         self._update_leg2_datasource_controls()
-        self._sync_previews(camera_access_hint="auto")
+        self._sync_previews(changes=PreviewChange.SIGNALS_ONLY)
         self._refresh_resources_ui()
         self.statusBar().showMessage(f"Loaded Leg2 MAT: {mat_path.name}")
         return True
@@ -1044,7 +1044,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._set_resource_reload_error("leg2_mat", None)
         self._set_resource_warnings("leg2_mat", ())
         self._update_leg2_datasource_controls()
-        self._sync_previews(camera_access_hint="auto")
+        self._sync_previews(changes=PreviewChange.SIGNALS_ONLY)
         self._refresh_resources_ui()
         self.statusBar().showMessage("Cleared Leg2 MAT ultrasonic datasource.")
 
@@ -1077,7 +1077,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
             return
         self._mark_session_dirty()
         self.session.leg2_ultrasonic_datasource.signal_kind = signal_kind
-        self._sync_previews(camera_access_hint="auto")
+        self._sync_previews(changes=PreviewChange.SIGNALS_ONLY)
 
     def _update_leg2_datasource_controls(self) -> None:
         self.leg2_signal_kind_combo.setEnabled(self._leg2_adapter().is_loaded())
@@ -2178,7 +2178,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
     def _timeline_leg2_offset_changed(self, offset_s: float) -> None:
         self._mark_session_dirty()
         self.session.leg2_ultrasonic_datasource.offset_s = offset_s
-        self._sync_previews(camera_access_hint="auto")
+        self._sync_previews(changes=PreviewChange.SIGNALS_ONLY)
 
     def _timeline_h5_alignment_drag_changed(
         self,
@@ -2780,14 +2780,24 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         timeline_visible_range_s: tuple[float, float] | None = None,
         recompute_timeline_range: bool = False,
         refresh_signal_data: bool = True,
+        changes: PreviewChange | None = None,
     ) -> None:
-        plan = PreviewSyncPlan(
-            camera_access_hint=camera_access_hint,
-            invalidate_source_resolution=invalidate_source_resolution,
-            timeline_visible_range_s=timeline_visible_range_s,
-            recompute_timeline_range=recompute_timeline_range,
-            refresh_signal_data=refresh_signal_data,
-        )
+        if changes is None:
+            plan = PreviewSyncPlan(
+                camera_access_hint=camera_access_hint,
+                invalidate_source_resolution=invalidate_source_resolution,
+                timeline_visible_range_s=timeline_visible_range_s,
+                recompute_timeline_range=recompute_timeline_range,
+                refresh_signal_data=refresh_signal_data,
+            )
+        else:
+            plan = PreviewSyncPlan.from_changes(
+                changes,
+                camera_access_hint=camera_access_hint,
+                timeline_visible_range_s=timeline_visible_range_s,
+                recompute_timeline_range=recompute_timeline_range,
+                refresh_signal_data=refresh_signal_data,
+            )
         run_preview_sync(plan, self)
 
     def _sync_previews_preserving_timeline_range(

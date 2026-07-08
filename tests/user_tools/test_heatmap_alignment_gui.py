@@ -4009,6 +4009,40 @@ def test_display_only_refresh_preserves_timeline_range(
     assert window.timeline_range_model.visible_range_s() == pytest.approx((2.0, 4.0))
 
 
+def test_leg2_signal_changes_do_not_invalidate_viewport_quality(
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = HeatmapAlignmentWindow()
+    calls: list[str] = []
+
+    monkeypatch.setattr(window.leg2_signal_kind_combo, "currentData", lambda: "filtered")
+    monkeypatch.setattr(
+        window, "_invalidate_source_resolution_viewport", lambda: calls.append("invalidate")
+    )
+    monkeypatch.setattr(
+        window, "_load_current_camera_frame", lambda *, access_hint="auto": calls.append("camera")
+    )
+    monkeypatch.setattr(window, "_sync_heatmap_truth_preview", lambda: calls.append("truth"))
+    monkeypatch.setattr(
+        window,
+        "_sync_export_overlay_preview",
+        lambda *, frame_idx, truth_frame: calls.append("overlay"),
+    )
+    monkeypatch.setattr(
+        window,
+        "_sync_viewport_preview",
+        lambda *, truth_frame, invalidate_source_resolution: calls.append("viewport"),
+    )
+
+    window._leg2_signal_kind_changed(1)
+    window._timeline_leg2_offset_changed(1.25)
+
+    assert window.session.leg2_ultrasonic_datasource.signal_kind == "filtered"
+    assert window.session.leg2_ultrasonic_datasource.offset_s == pytest.approx(1.25)
+    assert calls == []
+
+
 def test_explicit_timeline_range_reset_paths(
     tmp_path: Path,
     qapplication: QApplication,
