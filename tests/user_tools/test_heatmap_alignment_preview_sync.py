@@ -314,7 +314,7 @@ def test_run_preview_sync_runs_stages_in_order() -> None:
         refresh_signal_data=False,
     )
 
-    run_preview_sync(plan, host)
+    effects = run_preview_sync(plan, host)
 
     assert host.calls == [
         "invalidate",
@@ -325,22 +325,38 @@ def test_run_preview_sync_runs_stages_in_order() -> None:
         "overlay:7:True",
         "viewport:True:True",
     ]
+    assert effects == PreviewOutputEffects(
+        refreshed=(
+            PreviewOutput.CAMERA_FRAME
+            | PreviewOutput.CAMERA_CORNERS
+            | PreviewOutput.TIMELINE_FEEDBACK
+            | PreviewOutput.HEATMAP_TRUTH
+            | PreviewOutput.EXPORT_OVERLAY
+            | PreviewOutput.VIEWPORT
+        ),
+        invalidated=PreviewOutput.SOURCE_RESOLUTION_VIEWPORT,
+    )
 
 
 def test_run_preview_sync_skips_invalidate_when_disabled() -> None:
     host = _RecordingPreviewHost()
     plan = PreviewSyncPlan(invalidate_source_resolution=False)
 
-    run_preview_sync(plan, host)
+    effects = run_preview_sync(plan, host)
 
     assert "invalidate" not in host.calls
     assert host.calls[0] == "camera:auto"
+    assert PreviewOutput.SOURCE_RESOLUTION_VIEWPORT not in effects.invalidated
 
 
 def test_run_preview_sync_can_refresh_only_signal_feedback() -> None:
     host = _RecordingPreviewHost()
     plan = PreviewSyncPlan.from_changes(PreviewChange.SIGNALS_ONLY)
 
-    run_preview_sync(plan, host)
+    effects = run_preview_sync(plan, host)
 
     assert host.calls == ["timeline:None:False:True"]
+    assert effects == PreviewOutputEffects(
+        refreshed=PreviewOutput.TIMELINE_FEEDBACK | PreviewOutput.SIGNAL_DATA,
+        invalidated=PreviewOutput(0),
+    )

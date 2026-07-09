@@ -274,7 +274,7 @@ class PreviewSyncHost(Protocol):
     ) -> None: ...
 
 
-def run_preview_sync(plan: PreviewSyncPlan, host: PreviewSyncHost) -> None:
+def run_preview_sync(plan: PreviewSyncPlan, host: PreviewSyncHost) -> PreviewOutputEffects:
     """Run preview stages in the workbench's established order."""
     work = plan.work
     if work & PreviewWork.INVALIDATE_SOURCE_RESOLUTION:
@@ -300,3 +300,4 @@ def run_preview_sync(plan: PreviewSyncPlan, host: PreviewSyncHost) -> None:
             truth_frame=truth_frame,
             invalidate_source_resolution=bool(work & PreviewWork.INVALIDATE_SOURCE_RESOLUTION),
         )
+    return plan.output_effects
