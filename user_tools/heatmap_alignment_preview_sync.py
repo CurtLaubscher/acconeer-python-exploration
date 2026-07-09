@@ -51,6 +51,18 @@ class PreviewOutput(Flag):
     SOURCE_RESOLUTION_VIEWPORT = auto()
 
 
+@dataclass(frozen=True)
+class PreviewOutputEffects:
+    """Derived preview outputs refreshed or invalidated by one sync."""
+
+    refreshed: PreviewOutput = PreviewOutput(0)
+    invalidated: PreviewOutput = PreviewOutput(0)
+
+    @property
+    def affected(self) -> PreviewOutput:
+        return self.refreshed | self.invalidated
+
+
 def preview_work_for_changes(
     changes: PreviewChange,
     *,
@@ -121,7 +133,13 @@ def preview_work_for_changes(
 
 def preview_outputs_for_work(work: PreviewWork) -> PreviewOutput:
     """Map named preview work to the derived outputs it refreshes or invalidates."""
+    return preview_output_effects_for_work(work).affected
+
+
+def preview_output_effects_for_work(work: PreviewWork) -> PreviewOutputEffects:
+    """Map named preview work to refreshed and invalidated derived outputs."""
     outputs = PreviewOutput(0)
+    invalidated = PreviewOutput(0)
     if work & PreviewWork.CAMERA_FRAME:
         outputs |= PreviewOutput.CAMERA_FRAME
     if work & PreviewWork.CAMERA_CORNERS:
@@ -137,8 +155,8 @@ def preview_outputs_for_work(work: PreviewWork) -> PreviewOutput:
     if work & PreviewWork.VIEWPORT:
         outputs |= PreviewOutput.VIEWPORT
     if work & PreviewWork.INVALIDATE_SOURCE_RESOLUTION:
-        outputs |= PreviewOutput.SOURCE_RESOLUTION_VIEWPORT
-    return outputs
+        invalidated |= PreviewOutput.SOURCE_RESOLUTION_VIEWPORT
+    return PreviewOutputEffects(refreshed=outputs, invalidated=invalidated)
 
 
 @dataclass(frozen=True)
@@ -183,6 +201,11 @@ class PreviewSyncPlan:
     def outputs(self) -> PreviewOutput:
         """Derived preview outputs affected by this plan."""
         return preview_outputs_for_work(self.work)
+
+    @property
+    def output_effects(self) -> PreviewOutputEffects:
+        """Derived preview outputs refreshed or invalidated by this plan."""
+        return preview_output_effects_for_work(self.work)
 
     @classmethod
     def from_changes(
