@@ -50,6 +50,11 @@ from heatmap_alignment_gui import (  # noqa: E402
     track_offset_label_rect,
     track_offset_label_should_show,
 )
+from heatmap_alignment_preview_sync import (  # noqa: E402
+    PreviewChange,
+    PreviewOutput,
+    PreviewOutputStatus,
+)
 from heatmap_alignment_rendering import HeatmapPlotRenderer  # noqa: E402
 from heatmap_alignment_resource_summaries import (  # noqa: E402
     AlignmentResourceRuntime,
@@ -1417,6 +1422,24 @@ def test_resource_job_manager_cancel_completes_to_idle(
     assert manager.cancel_job("radar_h5") is True
     assert manager.board().radar_h5.phase == "idle"
     assert manager.board().radar_h5.cancel_requested is False
+
+
+def test_resource_job_result_classification() -> None:
+    from heatmap_alignment_job_lifecycle import JobResultStatus
+    from heatmap_alignment_resource_job_state import (
+        ResourceJobSlotState,
+        classify_job_result,
+    )
+
+    slot = ResourceJobSlotState(generation=2, phase="loading")
+
+    assert classify_job_result(slot, 2) == JobResultStatus.ACCEPTED
+    assert classify_job_result(slot, 1) == JobResultStatus.STALE
+    assert classify_job_result(slot, 2, generation_cancelled=True) == JobResultStatus.CANCELLED
+
+    slot.cancel_requested = True
+
+    assert classify_job_result(slot, 2) == JobResultStatus.CANCELLED
 
 
 def test_resource_job_manager_cancel_before_success_discards_payload(
@@ -3141,18 +3164,18 @@ def test_accepted_quit_abandons_source_resolution_before_thread_wait(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     window = HeatmapAlignmentWindow()
-    window._source_resolution_request_token = 7
-    window._source_resolution_worker_busy = True
-    window._pending_source_resolution_request = {"token": 7}
+    window._source_resolution_request_state.token = 7
+    window._source_resolution_request_state.worker_busy = True
+    window._source_resolution_request_state.pending_request = {"token": 7}
     window._source_resolution_viewport_frame = np.zeros((1, 1, 3), dtype=np.uint8)
     observed: dict[str, object] = {}
 
     monkeypatch.setattr(window._source_resolution_thread, "quit", lambda: None)
 
     def wait_for_worker() -> bool:
-        observed["token"] = window._source_resolution_request_token
-        observed["pending"] = window._pending_source_resolution_request
-        observed["busy"] = window._source_resolution_worker_busy
+        observed["token"] = window._source_resolution_request_state.token
+        observed["pending"] = window._source_resolution_request_state.pending_request
+        observed["busy"] = window._source_resolution_request_state.worker_busy
         observed["frame"] = window._source_resolution_viewport_frame
         return True
 
@@ -3175,17 +3198,17 @@ def test_close_sources_keeps_active_source_resolution_worker_busy_flag(
     qapplication: QApplication,
 ) -> None:
     window = HeatmapAlignmentWindow()
-    window._source_resolution_request_token = 11
-    window._source_resolution_worker_busy = True
-    window._pending_source_resolution_request = {"token": 11}
+    window._source_resolution_request_state.token = 11
+    window._source_resolution_request_state.worker_busy = True
+    window._source_resolution_request_state.pending_request = {"token": 11}
     window._source_resolution_viewport_frame = np.zeros((1, 1, 3), dtype=np.uint8)
 
     window._close_sources()
 
-    assert window._source_resolution_request_token == 12
-    assert window._pending_source_resolution_request is None
+    assert window._source_resolution_request_state.token == 12
+    assert window._source_resolution_request_state.pending_request is None
     assert window._source_resolution_viewport_frame is None
-    assert window._source_resolution_worker_busy is True
+    assert window._source_resolution_request_state.worker_busy is True
 
 
 def test_dont_save_then_open_proceeds(
@@ -4095,6 +4118,33 @@ def test_sync_previews_runs_named_stages_in_order(
     ]
 
 
+def test_sync_previews_tracks_output_state(
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = HeatmapAlignmentWindow()
+    _stub_preview_refresh(window, monkeypatch)
+
+    window._sync_previews(changes=PreviewChange.CAMERA_TIME)
+
+    assert (
+        window._preview_output_state.status(PreviewOutput.SOURCE_RESOLUTION_VIEWPORT)
+        == PreviewOutputStatus.STALE
+    )
+    assert window._preview_output_state.status(PreviewOutput.VIEWPORT) == PreviewOutputStatus.FRESH
+
+    window._sync_previews(changes=PreviewChange.H5_SOURCE)
+
+    assert (
+        window._preview_output_state.status(PreviewOutput.SOURCE_RESOLUTION_VIEWPORT)
+        == PreviewOutputStatus.STALE
+    )
+    assert (
+        window._preview_output_state.status(PreviewOutput.HEATMAP_TRUTH)
+        == PreviewOutputStatus.FRESH
+    )
+
+
 def _set_test_timeline_range(window: HeatmapAlignmentWindow) -> None:
     window.timeline_range_model.set_track_state(
         camera_duration_s=10.0,
@@ -4142,7 +4192,7 @@ def test_source_resolution_result_preserves_timeline_range(
 ) -> None:
     window = HeatmapAlignmentWindow()
     _set_test_timeline_range(window)
-    window._source_resolution_request_token = 7
+    window._source_resolution_request_state.token = 7
     _stub_preview_refresh(window, monkeypatch)
 
     window._handle_source_resolution_viewport_result(
@@ -4150,6 +4200,10 @@ def test_source_resolution_result_preserves_timeline_range(
     )
 
     assert window.timeline_range_model.visible_range_s() == pytest.approx((2.0, 4.0))
+    assert (
+        window._preview_output_state.status(PreviewOutput.SOURCE_RESOLUTION_VIEWPORT)
+        == PreviewOutputStatus.FRESH
+    )
 
 
 def test_source_resolution_result_after_abandon_is_ignored(
@@ -4157,7 +4211,7 @@ def test_source_resolution_result_after_abandon_is_ignored(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     window = HeatmapAlignmentWindow()
-    window._source_resolution_request_token = 3
+    window._source_resolution_request_state.token = 3
     sync_calls: list[dict[str, object]] = []
 
     monkeypatch.setattr(
@@ -4173,6 +4227,10 @@ def test_source_resolution_result_after_abandon_is_ignored(
 
     assert window._source_resolution_viewport_frame is None
     assert sync_calls == []
+    assert (
+        window._preview_output_state.status(PreviewOutput.SOURCE_RESOLUTION_VIEWPORT)
+        == PreviewOutputStatus.STALE
+    )
 
 
 def test_viewport_preview_renders_without_h5_truth_frame(
@@ -4209,7 +4267,7 @@ def test_viewport_resize_keeps_hq_frame_and_schedules_settled_refresh(
     window.current_camera_frame = np.zeros((4, 4, 3), dtype=np.uint8)
     window.session.viewport.corners = [[0.0, 0.0], [3.0, 0.0], [3.0, 3.0], [0.0, 3.0]]
     window._source_resolution_viewport_frame = hq_frame
-    window._source_resolution_request_token = 12
+    window._source_resolution_request_state.token = 12
     scheduled_sizes: list[tuple[int, int]] = []
 
     monkeypatch.setattr(window, "_viewport_output_size", lambda _truth_frame: (320, 180))
@@ -4226,7 +4284,7 @@ def test_viewport_resize_keeps_hq_frame_and_schedules_settled_refresh(
 
     window._viewport_preview_resized()
 
-    assert window._source_resolution_request_token == 13
+    assert window._source_resolution_request_state.token == 13
     assert window._source_resolution_viewport_frame is hq_frame
     assert scheduled_sizes == [(320, 180)]
 

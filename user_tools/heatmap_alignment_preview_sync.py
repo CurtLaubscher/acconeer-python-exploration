@@ -3,8 +3,10 @@ from __future__ import annotations
 """Preview synchronization plan and stage ordering for the alignment workbench."""
 
 from dataclasses import dataclass
-from enum import Flag, auto
+from enum import Enum, Flag, auto
 from typing import Protocol
+
+from heatmap_alignment_job_lifecycle import JobResultStatus
 
 import numpy as np
 
@@ -49,6 +51,81 @@ class PreviewOutput(Flag):
     EXPORT_OVERLAY = auto()
     VIEWPORT = auto()
     SOURCE_RESOLUTION_VIEWPORT = auto()
+
+
+@dataclass(frozen=True)
+class PreviewOutputEffects:
+    """Derived preview outputs refreshed or invalidated by one sync."""
+
+    refreshed: PreviewOutput = PreviewOutput(0)
+    invalidated: PreviewOutput = PreviewOutput(0)
+
+    @property
+    def affected(self) -> PreviewOutput:
+        return self.refreshed | self.invalidated
+
+
+class PreviewOutputStatus(Enum):
+    """Tracked freshness state for a derived preview output."""
+
+    UNKNOWN = "unknown"
+    FRESH = "fresh"
+    STALE = "stale"
+
+
+class PreviewOutputState:
+    """Mutable freshness tracker for derived preview outputs."""
+
+    def __init__(self) -> None:
+        self._statuses: dict[PreviewOutput, PreviewOutputStatus] = {}
+
+    def status(self, output: PreviewOutput) -> PreviewOutputStatus:
+        return self._statuses.get(output, PreviewOutputStatus.UNKNOWN)
+
+    def apply(self, effects: PreviewOutputEffects) -> None:
+        for output in PreviewOutput:
+            if output & effects.invalidated:
+                self._statuses[output] = PreviewOutputStatus.STALE
+            if output & effects.refreshed:
+                self._statuses[output] = PreviewOutputStatus.FRESH
+
+
+@dataclass
+class LatestPreviewRequestState:
+    """Latest-request-wins state for one asynchronous preview job."""
+
+    token: int = 0
+    worker_busy: bool = False
+    pending_request: dict[str, object] | None = None
+
+    def invalidate(self, *, clear_worker_busy: bool = False) -> None:
+        self.token += 1
+        self.pending_request = None
+        if clear_worker_busy:
+            self.worker_busy = False
+
+    def set_pending(self, request: dict[str, object] | None) -> None:
+        self.pending_request = request
+
+    def take_pending_for_start(self) -> dict[str, object] | None:
+        if self.pending_request is None or self.worker_busy:
+            return None
+        request = self.pending_request
+        self.pending_request = None
+        self.worker_busy = True
+        return request
+
+    def finish_worker(self) -> None:
+        self.worker_busy = False
+
+    def accepts(self, payload: dict[str, object]) -> bool:
+        return payload.get("token") == self.token
+
+    def finish_with_payload(self, payload: dict[str, object]) -> JobResultStatus:
+        self.finish_worker()
+        if self.accepts(payload):
+            return JobResultStatus.ACCEPTED
+        return JobResultStatus.STALE
 
 
 def preview_work_for_changes(
@@ -121,7 +198,13 @@ def preview_work_for_changes(
 
 def preview_outputs_for_work(work: PreviewWork) -> PreviewOutput:
     """Map named preview work to the derived outputs it refreshes or invalidates."""
+    return preview_output_effects_for_work(work).affected
+
+
+def preview_output_effects_for_work(work: PreviewWork) -> PreviewOutputEffects:
+    """Map named preview work to refreshed and invalidated derived outputs."""
     outputs = PreviewOutput(0)
+    invalidated = PreviewOutput(0)
     if work & PreviewWork.CAMERA_FRAME:
         outputs |= PreviewOutput.CAMERA_FRAME
     if work & PreviewWork.CAMERA_CORNERS:
@@ -137,8 +220,8 @@ def preview_outputs_for_work(work: PreviewWork) -> PreviewOutput:
     if work & PreviewWork.VIEWPORT:
         outputs |= PreviewOutput.VIEWPORT
     if work & PreviewWork.INVALIDATE_SOURCE_RESOLUTION:
-        outputs |= PreviewOutput.SOURCE_RESOLUTION_VIEWPORT
-    return outputs
+        invalidated |= PreviewOutput.SOURCE_RESOLUTION_VIEWPORT
+    return PreviewOutputEffects(refreshed=outputs, invalidated=invalidated)
 
 
 @dataclass(frozen=True)
@@ -183,6 +266,11 @@ class PreviewSyncPlan:
     def outputs(self) -> PreviewOutput:
         """Derived preview outputs affected by this plan."""
         return preview_outputs_for_work(self.work)
+
+    @property
+    def output_effects(self) -> PreviewOutputEffects:
+        """Derived preview outputs refreshed or invalidated by this plan."""
+        return preview_output_effects_for_work(self.work)
 
     @classmethod
     def from_changes(
@@ -251,7 +339,7 @@ class PreviewSyncHost(Protocol):
     ) -> None: ...
 
 
-def run_preview_sync(plan: PreviewSyncPlan, host: PreviewSyncHost) -> None:
+def run_preview_sync(plan: PreviewSyncPlan, host: PreviewSyncHost) -> PreviewOutputEffects:
     """Run preview stages in the workbench's established order."""
     work = plan.work
     if work & PreviewWork.INVALIDATE_SOURCE_RESOLUTION:
@@ -277,3 +365,4 @@ def run_preview_sync(plan: PreviewSyncPlan, host: PreviewSyncHost) -> None:
             truth_frame=truth_frame,
             invalidate_source_resolution=bool(work & PreviewWork.INVALIDATE_SOURCE_RESOLUTION),
         )
+    return plan.output_effects

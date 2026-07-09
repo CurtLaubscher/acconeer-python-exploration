@@ -12,14 +12,20 @@ if str(USER_TOOLS_PATH) not in sys.path:
 import numpy as np
 
 from heatmap_alignment_preview_sync import (  # noqa: E402
+    LatestPreviewRequestState,
     PreviewChange,
     PreviewOutput,
+    PreviewOutputEffects,
+    PreviewOutputState,
+    PreviewOutputStatus,
     PreviewSyncPlan,
     PreviewWork,
+    preview_output_effects_for_work,
     preview_outputs_for_work,
     preview_work_for_changes,
     run_preview_sync,
 )
+from heatmap_alignment_job_lifecycle import JobResultStatus  # noqa: E402
 
 
 def test_preview_sync_plan_defaults() -> None:
@@ -108,6 +114,79 @@ def test_preview_outputs_for_work_maps_refreshed_and_invalidated_outputs() -> No
     )
 
 
+def test_preview_output_effects_for_work_separates_refresh_from_invalidation() -> None:
+    work = (
+        PreviewWork.INVALIDATE_SOURCE_RESOLUTION
+        | PreviewWork.CAMERA_FRAME
+        | PreviewWork.VIEWPORT
+    )
+
+    assert preview_output_effects_for_work(work) == PreviewOutputEffects(
+        refreshed=PreviewOutput.CAMERA_FRAME | PreviewOutput.VIEWPORT,
+        invalidated=PreviewOutput.SOURCE_RESOLUTION_VIEWPORT,
+    )
+
+
+def test_preview_output_state_applies_fresh_and_stale_effects() -> None:
+    state = PreviewOutputState()
+
+    assert state.status(PreviewOutput.VIEWPORT) == PreviewOutputStatus.UNKNOWN
+
+    state.apply(
+        PreviewOutputEffects(
+            refreshed=PreviewOutput.VIEWPORT,
+            invalidated=PreviewOutput.SOURCE_RESOLUTION_VIEWPORT,
+        )
+    )
+
+    assert state.status(PreviewOutput.VIEWPORT) == PreviewOutputStatus.FRESH
+    assert state.status(PreviewOutput.SOURCE_RESOLUTION_VIEWPORT) == PreviewOutputStatus.STALE
+
+    state.apply(PreviewOutputEffects(refreshed=PreviewOutput.SOURCE_RESOLUTION_VIEWPORT))
+
+    assert state.status(PreviewOutput.SOURCE_RESOLUTION_VIEWPORT) == PreviewOutputStatus.FRESH
+
+
+def test_latest_preview_request_state_runs_latest_pending_request() -> None:
+    state = LatestPreviewRequestState()
+    first_request = {"token": 0, "value": "first"}
+    second_request = {"token": 0, "value": "second"}
+
+    state.set_pending(first_request)
+    state.set_pending(second_request)
+
+    assert state.take_pending_for_start() == second_request
+    assert state.worker_busy is True
+    assert state.take_pending_for_start() is None
+
+    state.finish_worker()
+
+    assert state.worker_busy is False
+
+
+def test_latest_preview_request_state_invalidates_pending_and_accepts_by_token() -> None:
+    state = LatestPreviewRequestState(token=4, pending_request={"token": 4})
+
+    state.invalidate()
+
+    assert state.token == 5
+    assert state.pending_request is None
+    assert state.accepts({"token": 4}) is False
+    assert state.accepts({"token": 5}) is True
+
+
+def test_latest_preview_request_state_finishes_with_result_status() -> None:
+    state = LatestPreviewRequestState(token=2, worker_busy=True)
+
+    assert state.finish_with_payload({"token": 1}) == JobResultStatus.STALE
+    assert state.worker_busy is False
+
+    state.worker_busy = True
+
+    assert state.finish_with_payload({"token": 2}) == JobResultStatus.ACCEPTED
+    assert state.worker_busy is False
+
+
 def test_preview_sync_plan_work_matches_direct_plan_flags() -> None:
     plan = PreviewSyncPlan(
         invalidate_source_resolution=False,
@@ -146,12 +225,17 @@ def test_preview_sync_plan_outputs_for_h5_source_change_exclude_viewport_outputs
     )
     assert PreviewOutput.VIEWPORT not in plan.outputs
     assert PreviewOutput.SOURCE_RESOLUTION_VIEWPORT not in plan.outputs
+    assert plan.output_effects.invalidated == PreviewOutput(0)
 
 
 def test_preview_sync_plan_outputs_for_layout_change_exclude_source_resolution() -> None:
     plan = PreviewSyncPlan.from_changes(PreviewChange.LAYOUT)
 
     assert plan.outputs == PreviewOutput.VIEWPORT
+    assert plan.output_effects == PreviewOutputEffects(
+        refreshed=PreviewOutput.VIEWPORT,
+        invalidated=PreviewOutput(0),
+    )
 
 
 def test_preview_sync_plan_from_signal_only_change() -> None:
@@ -294,7 +378,7 @@ def test_run_preview_sync_runs_stages_in_order() -> None:
         refresh_signal_data=False,
     )
 
-    run_preview_sync(plan, host)
+    effects = run_preview_sync(plan, host)
 
     assert host.calls == [
         "invalidate",
@@ -305,22 +389,38 @@ def test_run_preview_sync_runs_stages_in_order() -> None:
         "overlay:7:True",
         "viewport:True:True",
     ]
+    assert effects == PreviewOutputEffects(
+        refreshed=(
+            PreviewOutput.CAMERA_FRAME
+            | PreviewOutput.CAMERA_CORNERS
+            | PreviewOutput.TIMELINE_FEEDBACK
+            | PreviewOutput.HEATMAP_TRUTH
+            | PreviewOutput.EXPORT_OVERLAY
+            | PreviewOutput.VIEWPORT
+        ),
+        invalidated=PreviewOutput.SOURCE_RESOLUTION_VIEWPORT,
+    )
 
 
 def test_run_preview_sync_skips_invalidate_when_disabled() -> None:
     host = _RecordingPreviewHost()
     plan = PreviewSyncPlan(invalidate_source_resolution=False)
 
-    run_preview_sync(plan, host)
+    effects = run_preview_sync(plan, host)
 
     assert "invalidate" not in host.calls
     assert host.calls[0] == "camera:auto"
+    assert PreviewOutput.SOURCE_RESOLUTION_VIEWPORT not in effects.invalidated
 
 
 def test_run_preview_sync_can_refresh_only_signal_feedback() -> None:
     host = _RecordingPreviewHost()
     plan = PreviewSyncPlan.from_changes(PreviewChange.SIGNALS_ONLY)
 
-    run_preview_sync(plan, host)
+    effects = run_preview_sync(plan, host)
 
     assert host.calls == ["timeline:None:False:True"]
+    assert effects == PreviewOutputEffects(
+        refreshed=PreviewOutput.TIMELINE_FEEDBACK | PreviewOutput.SIGNAL_DATA,
+        invalidated=PreviewOutput(0),
+    )
