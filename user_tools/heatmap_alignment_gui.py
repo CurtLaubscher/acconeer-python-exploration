@@ -82,7 +82,14 @@ from heatmap_alignment_h5_resource_job import (
 from heatmap_alignment_heatmap_header import HeatmapDistanceHeader
 from heatmap_alignment_peak_import import import_peak_distance_json_for_heatmap
 from heatmap_alignment_peak_overlay import peak_overlay_for_frame
-from heatmap_alignment_preview_sync import PreviewChange, PreviewSyncPlan, run_preview_sync
+from heatmap_alignment_preview_sync import (
+    PreviewChange,
+    PreviewOutput,
+    PreviewOutputEffects,
+    PreviewOutputState,
+    PreviewSyncPlan,
+    run_preview_sync,
+)
 from heatmap_alignment_recent_sessions import RecentSessionStore
 from heatmap_alignment_reconcile import H5SlotIdentity, desired_h5_identity, elide_path_middle
 from heatmap_alignment_rendering import HeatmapPlotRenderer
@@ -254,6 +261,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._source_resolution_request_token = 0
         self._source_resolution_worker_busy = False
         self._pending_source_resolution_request: dict[str, object] | None = None
+        self._preview_output_state = PreviewOutputState()
         self._resource_job_manager = ResourceJobManager(self)
         self._resource_job_manager.job_state_changed.connect(
             self._handle_resource_job_state_changed
@@ -808,6 +816,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._source_resolution_request_token += 1
         self._source_resolution_viewport_frame = None
         self._pending_source_resolution_request = None
+        self._mark_source_resolution_viewport_stale()
         if clear_worker_busy:
             self._source_resolution_worker_busy = False
 
@@ -2439,11 +2448,23 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._source_resolution_viewport_frame = None
         self._pending_source_resolution_request = None
         self.viewport_source_resolution_timer.stop()
+        self._mark_source_resolution_viewport_stale()
 
     def _retarget_source_resolution_viewport(self) -> None:
         self._source_resolution_request_token += 1
         self._pending_source_resolution_request = None
         self.viewport_source_resolution_timer.stop()
+        self._mark_source_resolution_viewport_stale()
+
+    def _mark_source_resolution_viewport_stale(self) -> None:
+        self._preview_output_state.apply(
+            PreviewOutputEffects(invalidated=PreviewOutput.SOURCE_RESOLUTION_VIEWPORT)
+        )
+
+    def _mark_source_resolution_viewport_fresh(self) -> None:
+        self._preview_output_state.apply(
+            PreviewOutputEffects(refreshed=PreviewOutput.SOURCE_RESOLUTION_VIEWPORT)
+        )
 
     def _source_resolution_request_payload(
         self,
@@ -2502,6 +2523,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
                 frame.copy() if isinstance(frame, np.ndarray) else None
             )
             if self._source_resolution_viewport_frame is not None:
+                self._mark_source_resolution_viewport_fresh()
                 self._sync_previews_preserving_timeline_range(
                     camera_access_hint="auto",
                     invalidate_source_resolution=False,
@@ -2910,7 +2932,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
                 recompute_timeline_range=recompute_timeline_range,
                 refresh_signal_data=refresh_signal_data,
             )
-        run_preview_sync(plan, self)
+        self._preview_output_state.apply(run_preview_sync(plan, self))
 
     def _sync_previews_preserving_timeline_range(
         self,

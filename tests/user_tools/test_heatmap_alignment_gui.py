@@ -50,6 +50,11 @@ from heatmap_alignment_gui import (  # noqa: E402
     track_offset_label_rect,
     track_offset_label_should_show,
 )
+from heatmap_alignment_preview_sync import (  # noqa: E402
+    PreviewChange,
+    PreviewOutput,
+    PreviewOutputStatus,
+)
 from heatmap_alignment_rendering import HeatmapPlotRenderer  # noqa: E402
 from heatmap_alignment_resource_summaries import (  # noqa: E402
     AlignmentResourceRuntime,
@@ -4095,6 +4100,33 @@ def test_sync_previews_runs_named_stages_in_order(
     ]
 
 
+def test_sync_previews_tracks_output_state(
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = HeatmapAlignmentWindow()
+    _stub_preview_refresh(window, monkeypatch)
+
+    window._sync_previews(changes=PreviewChange.CAMERA_TIME)
+
+    assert (
+        window._preview_output_state.status(PreviewOutput.SOURCE_RESOLUTION_VIEWPORT)
+        == PreviewOutputStatus.STALE
+    )
+    assert window._preview_output_state.status(PreviewOutput.VIEWPORT) == PreviewOutputStatus.FRESH
+
+    window._sync_previews(changes=PreviewChange.H5_SOURCE)
+
+    assert (
+        window._preview_output_state.status(PreviewOutput.SOURCE_RESOLUTION_VIEWPORT)
+        == PreviewOutputStatus.STALE
+    )
+    assert (
+        window._preview_output_state.status(PreviewOutput.HEATMAP_TRUTH)
+        == PreviewOutputStatus.FRESH
+    )
+
+
 def _set_test_timeline_range(window: HeatmapAlignmentWindow) -> None:
     window.timeline_range_model.set_track_state(
         camera_duration_s=10.0,
@@ -4150,6 +4182,10 @@ def test_source_resolution_result_preserves_timeline_range(
     )
 
     assert window.timeline_range_model.visible_range_s() == pytest.approx((2.0, 4.0))
+    assert (
+        window._preview_output_state.status(PreviewOutput.SOURCE_RESOLUTION_VIEWPORT)
+        == PreviewOutputStatus.FRESH
+    )
 
 
 def test_source_resolution_result_after_abandon_is_ignored(
@@ -4173,6 +4209,10 @@ def test_source_resolution_result_after_abandon_is_ignored(
 
     assert window._source_resolution_viewport_frame is None
     assert sync_calls == []
+    assert (
+        window._preview_output_state.status(PreviewOutput.SOURCE_RESOLUTION_VIEWPORT)
+        == PreviewOutputStatus.STALE
+    )
 
 
 def test_viewport_preview_renders_without_h5_truth_frame(

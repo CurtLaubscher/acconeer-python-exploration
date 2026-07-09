@@ -15,6 +15,8 @@ from heatmap_alignment_preview_sync import (  # noqa: E402
     PreviewChange,
     PreviewOutput,
     PreviewOutputEffects,
+    PreviewOutputState,
+    PreviewOutputStatus,
     PreviewSyncPlan,
     PreviewWork,
     preview_output_effects_for_work,
@@ -121,6 +123,26 @@ def test_preview_output_effects_for_work_separates_refresh_from_invalidation() -
         refreshed=PreviewOutput.CAMERA_FRAME | PreviewOutput.VIEWPORT,
         invalidated=PreviewOutput.SOURCE_RESOLUTION_VIEWPORT,
     )
+
+
+def test_preview_output_state_applies_fresh_and_stale_effects() -> None:
+    state = PreviewOutputState()
+
+    assert state.status(PreviewOutput.VIEWPORT) == PreviewOutputStatus.UNKNOWN
+
+    state.apply(
+        PreviewOutputEffects(
+            refreshed=PreviewOutput.VIEWPORT,
+            invalidated=PreviewOutput.SOURCE_RESOLUTION_VIEWPORT,
+        )
+    )
+
+    assert state.status(PreviewOutput.VIEWPORT) == PreviewOutputStatus.FRESH
+    assert state.status(PreviewOutput.SOURCE_RESOLUTION_VIEWPORT) == PreviewOutputStatus.STALE
+
+    state.apply(PreviewOutputEffects(refreshed=PreviewOutput.SOURCE_RESOLUTION_VIEWPORT))
+
+    assert state.status(PreviewOutput.SOURCE_RESOLUTION_VIEWPORT) == PreviewOutputStatus.FRESH
 
 
 def test_preview_sync_plan_work_matches_direct_plan_flags() -> None:
