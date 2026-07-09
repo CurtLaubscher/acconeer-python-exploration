@@ -3146,18 +3146,18 @@ def test_accepted_quit_abandons_source_resolution_before_thread_wait(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     window = HeatmapAlignmentWindow()
-    window._source_resolution_request_token = 7
-    window._source_resolution_worker_busy = True
-    window._pending_source_resolution_request = {"token": 7}
+    window._source_resolution_request_state.token = 7
+    window._source_resolution_request_state.worker_busy = True
+    window._source_resolution_request_state.pending_request = {"token": 7}
     window._source_resolution_viewport_frame = np.zeros((1, 1, 3), dtype=np.uint8)
     observed: dict[str, object] = {}
 
     monkeypatch.setattr(window._source_resolution_thread, "quit", lambda: None)
 
     def wait_for_worker() -> bool:
-        observed["token"] = window._source_resolution_request_token
-        observed["pending"] = window._pending_source_resolution_request
-        observed["busy"] = window._source_resolution_worker_busy
+        observed["token"] = window._source_resolution_request_state.token
+        observed["pending"] = window._source_resolution_request_state.pending_request
+        observed["busy"] = window._source_resolution_request_state.worker_busy
         observed["frame"] = window._source_resolution_viewport_frame
         return True
 
@@ -3180,17 +3180,17 @@ def test_close_sources_keeps_active_source_resolution_worker_busy_flag(
     qapplication: QApplication,
 ) -> None:
     window = HeatmapAlignmentWindow()
-    window._source_resolution_request_token = 11
-    window._source_resolution_worker_busy = True
-    window._pending_source_resolution_request = {"token": 11}
+    window._source_resolution_request_state.token = 11
+    window._source_resolution_request_state.worker_busy = True
+    window._source_resolution_request_state.pending_request = {"token": 11}
     window._source_resolution_viewport_frame = np.zeros((1, 1, 3), dtype=np.uint8)
 
     window._close_sources()
 
-    assert window._source_resolution_request_token == 12
-    assert window._pending_source_resolution_request is None
+    assert window._source_resolution_request_state.token == 12
+    assert window._source_resolution_request_state.pending_request is None
     assert window._source_resolution_viewport_frame is None
-    assert window._source_resolution_worker_busy is True
+    assert window._source_resolution_request_state.worker_busy is True
 
 
 def test_dont_save_then_open_proceeds(
@@ -4174,7 +4174,7 @@ def test_source_resolution_result_preserves_timeline_range(
 ) -> None:
     window = HeatmapAlignmentWindow()
     _set_test_timeline_range(window)
-    window._source_resolution_request_token = 7
+    window._source_resolution_request_state.token = 7
     _stub_preview_refresh(window, monkeypatch)
 
     window._handle_source_resolution_viewport_result(
@@ -4193,7 +4193,7 @@ def test_source_resolution_result_after_abandon_is_ignored(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     window = HeatmapAlignmentWindow()
-    window._source_resolution_request_token = 3
+    window._source_resolution_request_state.token = 3
     sync_calls: list[dict[str, object]] = []
 
     monkeypatch.setattr(
@@ -4249,7 +4249,7 @@ def test_viewport_resize_keeps_hq_frame_and_schedules_settled_refresh(
     window.current_camera_frame = np.zeros((4, 4, 3), dtype=np.uint8)
     window.session.viewport.corners = [[0.0, 0.0], [3.0, 0.0], [3.0, 3.0], [0.0, 3.0]]
     window._source_resolution_viewport_frame = hq_frame
-    window._source_resolution_request_token = 12
+    window._source_resolution_request_state.token = 12
     scheduled_sizes: list[tuple[int, int]] = []
 
     monkeypatch.setattr(window, "_viewport_output_size", lambda _truth_frame: (320, 180))
@@ -4266,7 +4266,7 @@ def test_viewport_resize_keeps_hq_frame_and_schedules_settled_refresh(
 
     window._viewport_preview_resized()
 
-    assert window._source_resolution_request_token == 13
+    assert window._source_resolution_request_state.token == 13
     assert window._source_resolution_viewport_frame is hq_frame
     assert scheduled_sizes == [(320, 180)]
 

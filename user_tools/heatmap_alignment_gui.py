@@ -329,30 +329,6 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._discard_h5_replacement_backup()
         self._pending_peak_session_reload = False
 
-    @property
-    def _source_resolution_request_token(self) -> int:
-        return self._source_resolution_request_state.token
-
-    @_source_resolution_request_token.setter
-    def _source_resolution_request_token(self, token: int) -> None:
-        self._source_resolution_request_state.token = token
-
-    @property
-    def _source_resolution_worker_busy(self) -> bool:
-        return self._source_resolution_request_state.worker_busy
-
-    @_source_resolution_worker_busy.setter
-    def _source_resolution_worker_busy(self, worker_busy: bool) -> None:
-        self._source_resolution_request_state.worker_busy = worker_busy
-
-    @property
-    def _pending_source_resolution_request(self) -> dict[str, object] | None:
-        return self._source_resolution_request_state.pending_request
-
-    @_pending_source_resolution_request.setter
-    def _pending_source_resolution_request(self, request: dict[str, object] | None) -> None:
-        self._source_resolution_request_state.pending_request = request
-
     def _discard_camera_replacement_backup(self) -> None:
         backup = self._camera_replacement_backup
         if isinstance(backup, CameraResourceBackup):
@@ -2500,7 +2476,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         if camera_time_s < 0.0 or camera_time_s > self.session.camera_track.duration_s:
             return None
         return {
-            "token": self._source_resolution_request_token,
+            "token": self._source_resolution_request_state.token,
             "camera_path": self.session.camera_track.path,
             "camera_time_s": camera_time_s,
             "corners": native_corners.tolist(),
@@ -2543,7 +2519,10 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
                     refresh_signal_data=False,
                 )
 
-        if self._pending_source_resolution_request is not None and not self.play_timer.isActive():
+        if (
+            self._source_resolution_request_state.pending_request is not None
+            and not self.play_timer.isActive()
+        ):
             self._start_debounced_source_resolution_viewport()
 
     def _set_playback_active(self, active: bool, *, refresh_viewport: bool = True) -> None:
