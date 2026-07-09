@@ -1424,6 +1424,23 @@ def test_resource_job_manager_cancel_completes_to_idle(
     assert manager.board().radar_h5.cancel_requested is False
 
 
+def test_resource_job_result_classification() -> None:
+    from heatmap_alignment_resource_job_state import (
+        ResourceJobSlotState,
+        classify_job_result,
+    )
+
+    slot = ResourceJobSlotState(generation=2, phase="loading")
+
+    assert classify_job_result(slot, 2) == "accepted"
+    assert classify_job_result(slot, 1) == "stale"
+    assert classify_job_result(slot, 2, generation_cancelled=True) == "cancelled"
+
+    slot.cancel_requested = True
+
+    assert classify_job_result(slot, 2) == "cancelled"
+
+
 def test_resource_job_manager_cancel_before_success_discards_payload(
     qapplication: QApplication,
 ) -> None:

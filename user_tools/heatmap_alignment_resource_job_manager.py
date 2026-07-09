@@ -21,6 +21,7 @@ from heatmap_alignment_resource_job_state import (
     ResourceJobKind,
     ResourceJobSnapshot,
     begin_resource_job,
+    classify_job_result,
     clear_resource_job,
     complete_resource_job,
     mark_resource_job_phase,
@@ -423,10 +424,12 @@ class ResourceJobManager(QtCore.QObject):
         result: object,
     ) -> None:
         slot = self._board.slot(kind)
-        if slot.cancel_requested or self._generation_cancelled(kind, generation):
-            self._release_job_result(kind, generation, result)
-            return
-        if not should_apply_job_result(slot, generation):
+        result_status = classify_job_result(
+            slot,
+            generation,
+            generation_cancelled=self._generation_cancelled(kind, generation),
+        )
+        if result_status != "accepted":
             self._release_job_result(kind, generation, result)
             return
         complete_resource_job(self._board, kind, generation, phase="idle")
