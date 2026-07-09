@@ -50,6 +50,11 @@ from heatmap_alignment_gui import (  # noqa: E402
     track_offset_label_rect,
     track_offset_label_should_show,
 )
+from heatmap_alignment_preview_sync import (  # noqa: E402
+    PreviewChange,
+    PreviewOutput,
+    PreviewOutputStatus,
+)
 from heatmap_alignment_rendering import HeatmapPlotRenderer  # noqa: E402
 from heatmap_alignment_resource_summaries import (  # noqa: E402
     AlignmentResourceRuntime,
@@ -4093,6 +4098,33 @@ def test_sync_previews_runs_named_stages_in_order(
         "overlay:7:True",
         "viewport:True:True",
     ]
+
+
+def test_sync_previews_tracks_output_state(
+    qapplication: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = HeatmapAlignmentWindow()
+    _stub_preview_refresh(window, monkeypatch)
+
+    window._sync_previews(changes=PreviewChange.CAMERA_TIME)
+
+    assert (
+        window._preview_output_state.status(PreviewOutput.SOURCE_RESOLUTION_VIEWPORT)
+        == PreviewOutputStatus.STALE
+    )
+    assert window._preview_output_state.status(PreviewOutput.VIEWPORT) == PreviewOutputStatus.FRESH
+
+    window._sync_previews(changes=PreviewChange.H5_SOURCE)
+
+    assert (
+        window._preview_output_state.status(PreviewOutput.SOURCE_RESOLUTION_VIEWPORT)
+        == PreviewOutputStatus.STALE
+    )
+    assert (
+        window._preview_output_state.status(PreviewOutput.HEATMAP_TRUTH)
+        == PreviewOutputStatus.FRESH
+    )
 
 
 def _set_test_timeline_range(window: HeatmapAlignmentWindow) -> None:

@@ -3,7 +3,7 @@ from __future__ import annotations
 """Preview synchronization plan and stage ordering for the alignment workbench."""
 
 from dataclasses import dataclass
-from enum import Flag, auto
+from enum import Enum, Flag, auto
 from typing import Protocol
 
 import numpy as np
@@ -61,6 +61,31 @@ class PreviewOutputEffects:
     @property
     def affected(self) -> PreviewOutput:
         return self.refreshed | self.invalidated
+
+
+class PreviewOutputStatus(Enum):
+    """Tracked freshness state for a derived preview output."""
+
+    UNKNOWN = "unknown"
+    FRESH = "fresh"
+    STALE = "stale"
+
+
+class PreviewOutputState:
+    """Mutable freshness tracker for derived preview outputs."""
+
+    def __init__(self) -> None:
+        self._statuses: dict[PreviewOutput, PreviewOutputStatus] = {}
+
+    def status(self, output: PreviewOutput) -> PreviewOutputStatus:
+        return self._statuses.get(output, PreviewOutputStatus.UNKNOWN)
+
+    def apply(self, effects: PreviewOutputEffects) -> None:
+        for output in PreviewOutput:
+            if output & effects.invalidated:
+                self._statuses[output] = PreviewOutputStatus.STALE
+            if output & effects.refreshed:
+                self._statuses[output] = PreviewOutputStatus.FRESH
 
 
 def preview_work_for_changes(
