@@ -19,6 +19,7 @@ ResourceJobPhase = Literal[
     "failed",
     "superseded",
 ]
+ResourceJobResultStatus = Literal["accepted", "cancelled", "stale"]
 
 ACTIVE_RESOURCE_JOB_PHASES: tuple[ResourceJobPhase, ...] = (
     "pending",
@@ -87,11 +88,20 @@ def next_generation(current: int) -> int:
 
 
 def should_apply_job_result(slot: ResourceJobSlotState, result_generation: int) -> bool:
-    return (
-        result_generation == slot.generation
-        and slot.phase not in ("superseded", "idle", "cancelling")
-        and not slot.cancel_requested
-    )
+    return classify_job_result(slot, result_generation) == "accepted"
+
+
+def classify_job_result(
+    slot: ResourceJobSlotState,
+    result_generation: int,
+    *,
+    generation_cancelled: bool = False,
+) -> ResourceJobResultStatus:
+    if generation_cancelled or slot.cancel_requested or slot.phase == "cancelling":
+        return "cancelled"
+    if result_generation != slot.generation or slot.phase in ("superseded", "idle"):
+        return "stale"
+    return "accepted"
 
 
 def begin_resource_job(
