@@ -1425,6 +1425,7 @@ def test_resource_job_manager_cancel_completes_to_idle(
 
 
 def test_resource_job_result_classification() -> None:
+    from heatmap_alignment_job_lifecycle import JobResultStatus
     from heatmap_alignment_resource_job_state import (
         ResourceJobSlotState,
         classify_job_result,
@@ -1432,13 +1433,13 @@ def test_resource_job_result_classification() -> None:
 
     slot = ResourceJobSlotState(generation=2, phase="loading")
 
-    assert classify_job_result(slot, 2) == "accepted"
-    assert classify_job_result(slot, 1) == "stale"
-    assert classify_job_result(slot, 2, generation_cancelled=True) == "cancelled"
+    assert classify_job_result(slot, 2) == JobResultStatus.ACCEPTED
+    assert classify_job_result(slot, 1) == JobResultStatus.STALE
+    assert classify_job_result(slot, 2, generation_cancelled=True) == JobResultStatus.CANCELLED
 
     slot.cancel_requested = True
 
-    assert classify_job_result(slot, 2) == "cancelled"
+    assert classify_job_result(slot, 2) == JobResultStatus.CANCELLED
 
 
 def test_resource_job_manager_cancel_before_success_discards_payload(
