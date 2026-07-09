@@ -88,7 +88,8 @@ idea is fixed, rejected, or superseded.
 ### Architecture direction
 
 - Keep `PreviewChange` / `PreviewSyncPlan` as the current bridge for targeted
-  invalidation.
+  invalidation; the job architecture branch has started making its work, affected
+  outputs, and result lifecycle explicit without replacing the current workflow.
 - Treat the preview output/job dependency model as the likely prerequisite for
   the fully backed multi-resource system, not just a preview-performance cleanup.
 - Move toward that dependency model before splitting camera decode, viewport
@@ -546,7 +547,11 @@ Possible directions:
 - Cache recently requested source-resolution viewport frames.
 - Render nearby paused frames after the user stops scrubbing or dragging.
 - Keep low-quality frames available immediately as the fallback interaction path.
-- Consider consolidating source-resolution viewport rendering with the same job/request lifecycle used for resource loading, or a shared lightweight async request framework, so cancellation, stale-result discard, bounded execution, and shutdown handling are not maintained in separate systems.
+- **Partially implemented (`job-architecture-overhaul`):** source-resolution
+  viewport rendering now uses an explicit latest-request state helper, shared
+  result-status vocabulary, and preview output freshness tracking. Remaining
+  follow-up is to decide whether this should become a broader coordinator for
+  other preview jobs after one more runtime path proves the shape.
 - Defer source-frame decode vs. viewport-transform separation until the broader
   preview output/job dependency model exists, unless a concrete bug or measurement
   makes a narrow interim split necessary. See **Preview output and job dependency
@@ -603,6 +608,20 @@ This matters if camera/monitor movement becomes a real problem. It is not a curr
 The current `PreviewChange` / `PreviewSyncPlan` layer is a bridge toward a more
 explicit dependency model. Keep using it for targeted invalidation fixes, but do
 not expand it into a full framework through ad hoc flags.
+
+Current implementation progress (`job-architecture-overhaul`):
+- `PreviewWork` names the work needed for a preview sync.
+- `PreviewOutput` and `PreviewOutputEffects` distinguish refreshed outputs from
+  invalidated outputs.
+- `PreviewOutputState` tracks internal freshness for derived preview outputs.
+- `LatestPreviewRequestState` centralizes latest-request-wins behavior for the
+  source-resolution viewport worker.
+- `JobResultStatus` is shared by preview jobs and resource jobs for accepted,
+  stale, and cancelled results.
+
+This is still a bridge, not the final job framework. It deliberately keeps the
+existing camera/H5 workflow and PySide worker structure intact while making the
+state transitions explicit enough to migrate one path at a time.
 
 This model is the likely prerequisite for a fully backed multi-resource system.
 Before the workbench can comfortably support multiple optional sources, derived
