@@ -4182,6 +4182,10 @@ def test_source_resolution_result_preserves_timeline_range(
     )
 
     assert window.timeline_range_model.visible_range_s() == pytest.approx((2.0, 4.0))
+    assert (
+        window._preview_output_state.status(PreviewOutput.SOURCE_RESOLUTION_VIEWPORT)
+        == PreviewOutputStatus.FRESH
+    )
 
 
 def test_source_resolution_result_after_abandon_is_ignored(
@@ -4205,6 +4209,10 @@ def test_source_resolution_result_after_abandon_is_ignored(
 
     assert window._source_resolution_viewport_frame is None
     assert sync_calls == []
+    assert (
+        window._preview_output_state.status(PreviewOutput.SOURCE_RESOLUTION_VIEWPORT)
+        == PreviewOutputStatus.STALE
+    )
 
 
 def test_viewport_preview_renders_without_h5_truth_frame(
