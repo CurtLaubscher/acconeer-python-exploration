@@ -14,7 +14,6 @@ import numpy as np
 from heatmap_alignment_preview_sync import (  # noqa: E402
     LatestPreviewRequestState,
     PreviewChange,
-    PreviewJobResultStatus,
     PreviewOutput,
     PreviewOutputEffects,
     PreviewOutputState,
@@ -26,6 +25,7 @@ from heatmap_alignment_preview_sync import (  # noqa: E402
     preview_work_for_changes,
     run_preview_sync,
 )
+from heatmap_alignment_job_lifecycle import JobResultStatus  # noqa: E402
 
 
 def test_preview_sync_plan_defaults() -> None:
@@ -178,12 +178,12 @@ def test_latest_preview_request_state_invalidates_pending_and_accepts_by_token()
 def test_latest_preview_request_state_finishes_with_result_status() -> None:
     state = LatestPreviewRequestState(token=2, worker_busy=True)
 
-    assert state.finish_with_payload({"token": 1}) == PreviewJobResultStatus.STALE
+    assert state.finish_with_payload({"token": 1}) == JobResultStatus.STALE
     assert state.worker_busy is False
 
     state.worker_busy = True
 
-    assert state.finish_with_payload({"token": 2}) == PreviewJobResultStatus.ACCEPTED
+    assert state.finish_with_payload({"token": 2}) == JobResultStatus.ACCEPTED
     assert state.worker_busy is False
 
 

@@ -15,6 +15,7 @@ from heatmap_alignment_h5_resource_job import (
     load_h5_resource_payload,
     release_resource_job_result,
 )
+from heatmap_alignment_job_lifecycle import JobResultStatus
 from heatmap_alignment_resource_job_state import (
     ResourceJobBoard,
     ResourceJobError,
@@ -429,7 +430,7 @@ class ResourceJobManager(QtCore.QObject):
             generation,
             generation_cancelled=self._generation_cancelled(kind, generation),
         )
-        if result_status != "accepted":
+        if result_status != JobResultStatus.ACCEPTED:
             self._release_job_result(kind, generation, result)
             return
         complete_resource_job(self._board, kind, generation, phase="idle")

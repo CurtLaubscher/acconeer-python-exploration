@@ -82,10 +82,10 @@ from heatmap_alignment_h5_resource_job import (
 from heatmap_alignment_heatmap_header import HeatmapDistanceHeader
 from heatmap_alignment_peak_import import import_peak_distance_json_for_heatmap
 from heatmap_alignment_peak_overlay import peak_overlay_for_frame
+from heatmap_alignment_job_lifecycle import JobResultStatus
 from heatmap_alignment_preview_sync import (
     LatestPreviewRequestState,
     PreviewChange,
-    PreviewJobResultStatus,
     PreviewOutput,
     PreviewOutputEffects,
     PreviewOutputState,
@@ -2507,7 +2507,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
     def _handle_source_resolution_viewport_result(self, result: object) -> None:
         payload = dict(result) if isinstance(result, dict) else {}
         result_status = self._source_resolution_request_state.finish_with_payload(payload)
-        if result_status == PreviewJobResultStatus.ACCEPTED:
+        if result_status == JobResultStatus.ACCEPTED:
             frame = payload.get("frame")
             self._source_resolution_viewport_frame = (
                 frame.copy() if isinstance(frame, np.ndarray) else None

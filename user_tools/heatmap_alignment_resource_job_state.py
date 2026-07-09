@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
+from heatmap_alignment_job_lifecycle import JobResultStatus
+
 
 ResourceJobKind = Literal["camera", "radar_h5"]
 ResourceJobPhase = Literal[
@@ -19,7 +21,6 @@ ResourceJobPhase = Literal[
     "failed",
     "superseded",
 ]
-ResourceJobResultStatus = Literal["accepted", "cancelled", "stale"]
 
 ACTIVE_RESOURCE_JOB_PHASES: tuple[ResourceJobPhase, ...] = (
     "pending",
@@ -88,7 +89,7 @@ def next_generation(current: int) -> int:
 
 
 def should_apply_job_result(slot: ResourceJobSlotState, result_generation: int) -> bool:
-    return classify_job_result(slot, result_generation) == "accepted"
+    return classify_job_result(slot, result_generation) == JobResultStatus.ACCEPTED
 
 
 def classify_job_result(
@@ -96,12 +97,12 @@ def classify_job_result(
     result_generation: int,
     *,
     generation_cancelled: bool = False,
-) -> ResourceJobResultStatus:
+) -> JobResultStatus:
     if generation_cancelled or slot.cancel_requested or slot.phase == "cancelling":
-        return "cancelled"
+        return JobResultStatus.CANCELLED
     if result_generation != slot.generation or slot.phase in ("superseded", "idle"):
-        return "stale"
-    return "accepted"
+        return JobResultStatus.STALE
+    return JobResultStatus.ACCEPTED
 
 
 def begin_resource_job(

@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from enum import Enum, Flag, auto
 from typing import Protocol
 
+from heatmap_alignment_job_lifecycle import JobResultStatus
+
 import numpy as np
 
 
@@ -71,13 +73,6 @@ class PreviewOutputStatus(Enum):
     STALE = "stale"
 
 
-class PreviewJobResultStatus(Enum):
-    """Whether a finished preview job result still matches the latest request."""
-
-    ACCEPTED = "accepted"
-    STALE = "stale"
-
-
 class PreviewOutputState:
     """Mutable freshness tracker for derived preview outputs."""
 
@@ -126,11 +121,11 @@ class LatestPreviewRequestState:
     def accepts(self, payload: dict[str, object]) -> bool:
         return payload.get("token") == self.token
 
-    def finish_with_payload(self, payload: dict[str, object]) -> PreviewJobResultStatus:
+    def finish_with_payload(self, payload: dict[str, object]) -> JobResultStatus:
         self.finish_worker()
         if self.accepts(payload):
-            return PreviewJobResultStatus.ACCEPTED
-        return PreviewJobResultStatus.STALE
+            return JobResultStatus.ACCEPTED
+        return JobResultStatus.STALE
 
 
 def preview_work_for_changes(
