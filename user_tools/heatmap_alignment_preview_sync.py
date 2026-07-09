@@ -88,6 +88,38 @@ class PreviewOutputState:
                 self._statuses[output] = PreviewOutputStatus.FRESH
 
 
+@dataclass
+class LatestPreviewRequestState:
+    """Latest-request-wins state for one asynchronous preview job."""
+
+    token: int = 0
+    worker_busy: bool = False
+    pending_request: dict[str, object] | None = None
+
+    def invalidate(self, *, clear_worker_busy: bool = False) -> None:
+        self.token += 1
+        self.pending_request = None
+        if clear_worker_busy:
+            self.worker_busy = False
+
+    def set_pending(self, request: dict[str, object] | None) -> None:
+        self.pending_request = request
+
+    def take_pending_for_start(self) -> dict[str, object] | None:
+        if self.pending_request is None or self.worker_busy:
+            return None
+        request = self.pending_request
+        self.pending_request = None
+        self.worker_busy = True
+        return request
+
+    def finish_worker(self) -> None:
+        self.worker_busy = False
+
+    def accepts(self, payload: dict[str, object]) -> bool:
+        return payload.get("token") == self.token
+
+
 def preview_work_for_changes(
     changes: PreviewChange,
     *,

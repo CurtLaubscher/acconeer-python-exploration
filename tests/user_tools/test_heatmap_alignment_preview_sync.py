@@ -12,6 +12,7 @@ if str(USER_TOOLS_PATH) not in sys.path:
 import numpy as np
 
 from heatmap_alignment_preview_sync import (  # noqa: E402
+    LatestPreviewRequestState,
     PreviewChange,
     PreviewOutput,
     PreviewOutputEffects,
@@ -143,6 +144,34 @@ def test_preview_output_state_applies_fresh_and_stale_effects() -> None:
     state.apply(PreviewOutputEffects(refreshed=PreviewOutput.SOURCE_RESOLUTION_VIEWPORT))
 
     assert state.status(PreviewOutput.SOURCE_RESOLUTION_VIEWPORT) == PreviewOutputStatus.FRESH
+
+
+def test_latest_preview_request_state_runs_latest_pending_request() -> None:
+    state = LatestPreviewRequestState()
+    first_request = {"token": 0, "value": "first"}
+    second_request = {"token": 0, "value": "second"}
+
+    state.set_pending(first_request)
+    state.set_pending(second_request)
+
+    assert state.take_pending_for_start() == second_request
+    assert state.worker_busy is True
+    assert state.take_pending_for_start() is None
+
+    state.finish_worker()
+
+    assert state.worker_busy is False
+
+
+def test_latest_preview_request_state_invalidates_pending_and_accepts_by_token() -> None:
+    state = LatestPreviewRequestState(token=4, pending_request={"token": 4})
+
+    state.invalidate()
+
+    assert state.token == 5
+    assert state.pending_request is None
+    assert state.accepts({"token": 4}) is False
+    assert state.accepts({"token": 5}) is True
 
 
 def test_preview_sync_plan_work_matches_direct_plan_flags() -> None:

@@ -83,6 +83,7 @@ from heatmap_alignment_heatmap_header import HeatmapDistanceHeader
 from heatmap_alignment_peak_import import import_peak_distance_json_for_heatmap
 from heatmap_alignment_peak_overlay import peak_overlay_for_frame
 from heatmap_alignment_preview_sync import (
+    LatestPreviewRequestState,
     PreviewChange,
     PreviewOutput,
     PreviewOutputEffects,
@@ -258,9 +259,7 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._playback_started_at_s: float | None = None
         self._playback_started_video_time_s = 0.0
         self._source_resolution_viewport_frame: np.ndarray | None = None
-        self._source_resolution_request_token = 0
-        self._source_resolution_worker_busy = False
-        self._pending_source_resolution_request: dict[str, object] | None = None
+        self._source_resolution_request_state = LatestPreviewRequestState()
         self._preview_output_state = PreviewOutputState()
         self._resource_job_manager = ResourceJobManager(self)
         self._resource_job_manager.job_state_changed.connect(
@@ -329,6 +328,30 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self._discard_camera_replacement_backup()
         self._discard_h5_replacement_backup()
         self._pending_peak_session_reload = False
+
+    @property
+    def _source_resolution_request_token(self) -> int:
+        return self._source_resolution_request_state.token
+
+    @_source_resolution_request_token.setter
+    def _source_resolution_request_token(self, token: int) -> None:
+        self._source_resolution_request_state.token = token
+
+    @property
+    def _source_resolution_worker_busy(self) -> bool:
+        return self._source_resolution_request_state.worker_busy
+
+    @_source_resolution_worker_busy.setter
+    def _source_resolution_worker_busy(self, worker_busy: bool) -> None:
+        self._source_resolution_request_state.worker_busy = worker_busy
+
+    @property
+    def _pending_source_resolution_request(self) -> dict[str, object] | None:
+        return self._source_resolution_request_state.pending_request
+
+    @_pending_source_resolution_request.setter
+    def _pending_source_resolution_request(self, request: dict[str, object] | None) -> None:
+        self._source_resolution_request_state.pending_request = request
 
     def _discard_camera_replacement_backup(self) -> None:
         backup = self._camera_replacement_backup
@@ -813,12 +836,9 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
 
     def _abandon_source_resolution_viewport(self, *, clear_worker_busy: bool = False) -> None:
         self.viewport_source_resolution_timer.stop()
-        self._source_resolution_request_token += 1
+        self._source_resolution_request_state.invalidate(clear_worker_busy=clear_worker_busy)
         self._source_resolution_viewport_frame = None
-        self._pending_source_resolution_request = None
         self._mark_source_resolution_viewport_stale()
-        if clear_worker_busy:
-            self._source_resolution_worker_busy = False
 
     def _clear_active_camera_resource(self) -> None:
         self._set_playback_active(False, refresh_viewport=False)
@@ -835,9 +855,8 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.camera_view.set_corners(None)
         self.camera_view.set_export_overlay(self.session.export_overlay)
         self.camera_view.set_export_overlay_preview_frame(None)
-        self._source_resolution_request_token += 1
+        self._source_resolution_request_state.invalidate()
         self._source_resolution_viewport_frame = None
-        self._pending_source_resolution_request = None
         self.viewport_view.set_frame(None)
 
     def _clear_active_h5_resource(self) -> None:
@@ -2444,15 +2463,13 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.camera_view.set_frame(frame)
 
     def _invalidate_source_resolution_viewport(self) -> None:
-        self._source_resolution_request_token += 1
+        self._source_resolution_request_state.invalidate()
         self._source_resolution_viewport_frame = None
-        self._pending_source_resolution_request = None
         self.viewport_source_resolution_timer.stop()
         self._mark_source_resolution_viewport_stale()
 
     def _retarget_source_resolution_viewport(self) -> None:
-        self._source_resolution_request_token += 1
-        self._pending_source_resolution_request = None
+        self._source_resolution_request_state.invalidate()
         self.viewport_source_resolution_timer.stop()
         self._mark_source_resolution_viewport_stale()
 
@@ -2498,26 +2515,22 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         request = self._source_resolution_request_payload(viewport_size=viewport_size)
         if request is None:
             self.viewport_source_resolution_timer.stop()
-            self._pending_source_resolution_request = None
+            self._source_resolution_request_state.set_pending(None)
             return
-        self._pending_source_resolution_request = request
+        self._source_resolution_request_state.set_pending(request)
         if not self.play_timer.isActive():
             self.viewport_source_resolution_timer.start()
 
     def _start_debounced_source_resolution_viewport(self) -> None:
-        request = self._pending_source_resolution_request
+        request = self._source_resolution_request_state.take_pending_for_start()
         if request is None:
             return
-        if self._source_resolution_worker_busy:
-            return
-        self._pending_source_resolution_request = None
-        self._source_resolution_worker_busy = True
         self.source_resolution_viewport_render_requested.emit(request)
 
     def _handle_source_resolution_viewport_result(self, result: object) -> None:
-        self._source_resolution_worker_busy = False
+        self._source_resolution_request_state.finish_worker()
         payload = dict(result) if isinstance(result, dict) else {}
-        if payload.get("token") == self._source_resolution_request_token:
+        if self._source_resolution_request_state.accepts(payload):
             frame = payload.get("frame")
             self._source_resolution_viewport_frame = (
                 frame.copy() if isinstance(frame, np.ndarray) else None
