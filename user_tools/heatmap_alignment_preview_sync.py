@@ -71,6 +71,13 @@ class PreviewOutputStatus(Enum):
     STALE = "stale"
 
 
+class PreviewJobResultStatus(Enum):
+    """Whether a finished preview job result still matches the latest request."""
+
+    ACCEPTED = "accepted"
+    STALE = "stale"
+
+
 class PreviewOutputState:
     """Mutable freshness tracker for derived preview outputs."""
 
@@ -118,6 +125,12 @@ class LatestPreviewRequestState:
 
     def accepts(self, payload: dict[str, object]) -> bool:
         return payload.get("token") == self.token
+
+    def finish_with_payload(self, payload: dict[str, object]) -> PreviewJobResultStatus:
+        self.finish_worker()
+        if self.accepts(payload):
+            return PreviewJobResultStatus.ACCEPTED
+        return PreviewJobResultStatus.STALE
 
 
 def preview_work_for_changes(

@@ -85,6 +85,7 @@ from heatmap_alignment_peak_overlay import peak_overlay_for_frame
 from heatmap_alignment_preview_sync import (
     LatestPreviewRequestState,
     PreviewChange,
+    PreviewJobResultStatus,
     PreviewOutput,
     PreviewOutputEffects,
     PreviewOutputState,
@@ -2504,9 +2505,9 @@ class HeatmapAlignmentWindow(QtWidgets.QMainWindow):
         self.source_resolution_viewport_render_requested.emit(request)
 
     def _handle_source_resolution_viewport_result(self, result: object) -> None:
-        self._source_resolution_request_state.finish_worker()
         payload = dict(result) if isinstance(result, dict) else {}
-        if self._source_resolution_request_state.accepts(payload):
+        result_status = self._source_resolution_request_state.finish_with_payload(payload)
+        if result_status == PreviewJobResultStatus.ACCEPTED:
             frame = payload.get("frame")
             self._source_resolution_viewport_frame = (
                 frame.copy() if isinstance(frame, np.ndarray) else None
